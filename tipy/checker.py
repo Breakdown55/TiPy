@@ -149,6 +149,8 @@ def check(tree):
             value_type = "bool"
         elif kind == "boolean":
             value_type, constant = "bool", item["value"]
+        elif kind == "tuple":
+            raise CompileError("Tuple values currently require an unpacked for loop over a literal list", item)
         elif kind == "name":
             symbol = lookup(item["name"], item)
             bind(item, symbol)
@@ -406,6 +408,55 @@ def check(tree):
                 continue
             if kind == "for":
                 iterable = statement["iterable"]
+                names = statement.get("names", [statement["name"]])
+                if iterable["kind"] == "list" and (any(v["kind"] == "tuple" for v in iterable["values"]) or not iterable["values"] and len(names) > 1):
+                    # Scalar rows have a known shape; no Python tuple objects or
+                    # heap descriptors are needed for this iteration.
+                    rows, constants, elements = iterable["values"], [], [None] * len(names)
+                    for row in rows:
+                        if row["kind"] != "tuple" or len(row["values"]) != len(names):
+                            raise CompileError(f"Every tuple row must have {len(names)} values to unpack", row)
+                        values = []
+                        for index, value in enumerate(row["values"]):
+                            value_type, constant = expression(value)
+                            if value_type not in {"i16", "u8", "bool", "fixed"}:
+                                raise CompileError("Tuple loop components must be scalar values", value)
+                            if elements[index] is None:
+                                elements[index] = value_type if value_type in {"bool", "fixed"} else "i16"
+                            compatible(elements[index], value_type, constant, value)
+                            values.append(constant)
+                        row["type"] = "tuple"
+                        constants.append(values)
+                    elements = [t or "i16" for t in elements]
+                    before = context["initialized"].copy()
+                    targets = []
+                    for name, element in zip(names, elements):
+                        if name in functions or name in GRAPHICS_BUILTINS or name == "len":
+                            raise CompileError("Loop variable conflicts with a function name", statement)
+                        target = context["locals"].get(name)
+                        if target is None:
+                            target = {"type": element, "size": 1 if element == "bool" else 2, "label": f"__var_{len(globals_)}"}
+                            globals_[name] = target
+                            if name.startswith("$comp_"): checked["temporaries"][target["label"]] = target
+                        if target.pop("loop_inferred", False): target["type"] = element
+                        compatible(target["type"], element, None, statement)
+                        targets.append({**target, "symbol": target["label"]})
+                        context["initialized"].add(name)
+                    for field in ("iterator_0", "iteration_index"):
+                        if context["function"]:
+                            symbol = statement[field]
+                            symbol["type"] = "i16"
+                        else:
+                            symbol = {"type": "i16", "size": 2, "label": f"__tmp_{len(checked['temporaries'])}"}
+                            checked["temporaries"][symbol["label"]] = symbol
+                        statement[field] = {**symbol, "symbol": symbol["label"]}
+                    if all(value is not None for row in constants for value in row):
+                        statement["constant_rows"] = constants
+                    iterable.update(kind="tuple_sequence", type="tuple_sequence")
+                    statement.update(iteration_kind="tuple", targets=targets, target=targets[-1], sources=[iterable])
+                    statements(statement["body"], loop_depth + 1)
+                    context["initialized"] = before
+                    continue
                 if iterable["kind"] == "call" and iterable.get("name") == "range" and "range" not in functions:
                     expression(iterable)
                     names = statement.get("names", [statement["name"]])

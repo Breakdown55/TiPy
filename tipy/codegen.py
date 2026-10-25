@@ -456,6 +456,43 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 mark(end)
                 continue
             if kind == "for":
+                if statement["iteration_kind"] == "tuple":
+                    rows = statement["iterable"]["values"]
+                    pointer, index = statement["iterator_0"], statement["iteration_index"]
+                    targets = statement["targets"]
+                    arity = len(targets)
+                    static = "constant_rows" in statement
+                    if static:
+                        values = [int(value) & 65535 for row in statement["constant_rows"] for value in row]
+                        data = tuple(b for value in values for b in (value & 255, value >> 8))
+                        if data not in constant_data: constant_data[data] = f"__constant_data_{len(constant_data)}"
+                        emit(f"ld hl,{constant_data[data]}")
+                    else:
+                        # Snapshot all components once, in Python's row-major
+                        # evaluation order, before executing the loop body.
+                        for row in rows:
+                            for value in row["values"]:
+                                expression(value); emit("push hl")
+                        emit(f"ld hl,{(len(rows) * arity - 1) * 2}", "add hl,sp")
+                    store(pointer)
+                    emit("ld hl,0"); store(index)
+                    start, advance, end = label(), label(), label()
+                    mark(start)
+                    load(index)
+                    emit(f"ld de,{len(rows)}", "or a", "sbc hl,de", f"jp nc,{end}")
+                    for i, target in enumerate(targets):
+                        load(pointer)
+                        if i: emit(f"ld de,{(i * (2 if static else -2)) & 65535}", "add hl,de")
+                        emit("ld e,(hl)", "inc hl", "ld d,(hl)", "ex de,hl")
+                        store(target)
+                    loops.append((advance, end)); statements(statement["body"]); loops.pop()
+                    mark(advance)
+                    load(pointer); emit(f"ld de,{(arity * (2 if static else -2)) & 65535}", "add hl,de"); store(pointer)
+                    load(index); emit("inc hl"); store(index)
+                    emit(f"jp {start}"); mark(end)
+                    if not static:
+                        emit(f"ld hl,{len(rows) * arity * 2}", "add hl,sp", "ld sp,hl")
+                    continue
                 if "fast_range" in statement:
                     info, current = statement["fast_range"], statement["range_current"]
                     start, advance, end = label(), label(), label()

@@ -61,6 +61,84 @@ function execute(source, measurements) {
     return values
 }
 
+test('Tuple rows snapshot values once, unpack in order, and preserve nested control flow and frames', () => {
+    const source=`int xs=[10,20,30,40]
+int result=0
+for a,b in [(xs.pop(),xs.pop()),(xs.pop(),xs.pop())]:
+    result+=a-b
+int remaining=len(xs)
+def nested(n):
+    total=0
+    for a,b in [(n,n+1),(n+2,n+3)]:
+        for c,d in [(1,2),(3,4)]:
+            if c==1:
+                continue
+            total+=a+b+c+d
+    return total
+int computed=nested(5)
+def early(n):
+    for a,b in [(n,2),(n+1,3)]:
+        return a+b
+    return 0
+int repeated=0
+for i in range(100):
+    repeated+=early(3)
+int count=0
+for a,b in [(1,2),(3,4),(5,6)]:
+    count+=1
+    break
+int empty=7
+for a,b in []:
+    empty=0
+int x=99
+int sums=[x+y for x,y in [(1,2),(3,4)]]
+`
+    for(const optimization of ['reference','balanced']) {
+        const values=execute(source,{optimization})
+        assert.equal(values.result,20)
+        assert.equal(values.remaining,0)
+        assert.equal(values.computed,40)
+        assert.equal(values.repeated,500)
+        assert.equal(values.count,1)
+        assert.equal(values.empty,7)
+        assert.equal(values.x,99)
+        assert.deepEqual(values.sums,[3,7])
+    }
+    const staticRows={}
+    execute('clear()\nfor x,y in [(0,0),(95,63)]:\n    pixel_on(x,y)\nrender()',staticRows)
+    assert.doesNotMatch(staticRows.assembly,/__heap_start/)
+    assert.equal(staticRows.screen[0],1)
+    assert.equal(staticRows.screen[6143],1)
+    const folded={optimization:'aggressive'}
+    execute('clear()\nfor x,y in [(0,0),(95,63)]:\n    pixel_on(x,y)\nrender()',folded)
+    assert.deepEqual(folded.frames,staticRows.frames)
+})
+
+test('Digital rain runs the complete random comprehensions and tuple drawing loop natively', t => {
+    const source=readFileSync(resolve('../../examples/digital_rain.tip'),'utf8')
+    const compiled=spawnSync(process.env.TIPY_PYTHON || 'python',['-m','tipy','-','--show','all'],{
+        cwd:resolve('../..'),input:source,encoding:'utf8'
+    })
+    assert.equal(compiled.status,0,compiled.stderr)
+    const result=JSON.parse(compiled.stdout)
+    const runner=new Ti84Runner(result.assembly)
+    const frames=[]
+    const service=runner.serviceBcall.bind(runner)
+    runner.lcd.dirty=false
+    runner.serviceBcall=()=>{
+        service()
+        if(runner.lcd.dirty) { frames.push(runner.lcd.pixels.slice()); runner.lcd.dirty=false }
+    }
+    for(let slices=0;slices<2500 && frames.length<35 && !runner.done;slices++) runner.runSlice()
+    assert.equal(runner.done,false)
+    assert.ok(frames.length>=35)
+    assert.ok(new Set(frames.map(f=>Buffer.from(f).toString('base64'))).size>=25)
+    assert.ok(frames[30].some(n=>n))
+    assert.ok(runner.machineBytes<25193)
+    assert.doesNotMatch(result.assembly,/__native_sin/)
+    t.diagnostic(`Digital rain: ${runner.machineBytes} bytes, ${frames.length} native frames`)
+})
+
 test('Native fixed-point trig, conversions, inference and chained comparison semantics', () => {
     const source = `import math
 a = math.radians(90)

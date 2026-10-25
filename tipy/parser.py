@@ -260,7 +260,17 @@ class Parser:
             return node("negate", token, value=operand) if token["value"] == "-" else operand
         if token["kind"] == "OP" and token["value"] == "(":
             self.take("OP", "(")
+            if self.current["value"] == ")":
+                self.take("OP", ")")
+                return self.postfix(node("tuple", token, values=[]))
             result = self.expression()
+            if self.current["value"] == ",":
+                values = [result]
+                while self.current["value"] == ",":
+                    self.take("OP", ",")
+                    if self.current["value"] == ")": break
+                    values.append(self.expression())
+                result = node("tuple", token, values=values)
             self.take("OP", ")")
             return self.postfix(result)
         raise CompileError("Expected a number, variable or parenthesized expression", token)

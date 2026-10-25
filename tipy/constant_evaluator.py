@@ -182,7 +182,15 @@ class Evaluator:
                     except Continued: continue
                     except Broken: break
             elif kind == "for":
-                if item["iteration_kind"] == "range":
+                if item["iteration_kind"] == "tuple":
+                    rows = [[self.expr(value) for value in row["values"]] for row in item["iterable"]["values"]]
+                    for row in rows:
+                        self.tick(); self.iterations += 1
+                        for target, value in zip(item["targets"], row): self.store(target, value)
+                        try: self.block(item["body"])
+                        except Continued: continue
+                        except Broken: break
+                elif item["iteration_kind"] == "range":
                     values = range(*[self.expr(arg) for arg in item["iterable"]["arguments"]])
                     for value in values:
                         self.tick(); self.iterations += 1; self.store(item["target"], value)

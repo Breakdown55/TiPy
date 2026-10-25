@@ -1,0 +1,43 @@
+import random
+import time
+
+W = 96
+H = 64
+
+drops = [
+    random.randint(-64, 0)
+    for x in range(W)
+]
+
+speeds = [
+    random.randint(1, 3)
+    for x in range(W)
+]
+
+def draw_char(x, y):
+    for dx, dy in [
+        (0, 0), (1, 0),
+        (0, 1), (1, 1),
+        (0, 2), (1, 2)
+    ]:
+        px = x + dx
+        py = y + dy
+        if 0 <= px < W and 0 <= py < H:
+            pixel_on(px, py)
+
+while True:
+    clear()
+    for x in range(0, W, 2):
+        y = drops[x]
+        if 0 <= y < H:
+            draw_char(x, y)
+        for tail in range(4, 20, 4):
+            ty = y - tail
+            if 0 <= ty < H:
+                pixel_on(x, ty)
+        drops[x] += speeds[x]
+        if drops[x] > H + 20:
+            drops[x] = random.randint(-30, 0)
+            speeds[x] = random.randint(1, 3)
+    render()
+    time.sleep(0.04)
