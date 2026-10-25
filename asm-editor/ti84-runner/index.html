@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TiPy</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<main>
+  <section class="ide" aria-label="TiPy editor">
+    <aside aria-label="Files">
+      <div class="file-heading">Files <button id="new-file" title="New file" aria-label="New file">+</button></div>
+      <div id="files"></div>
+      <label class="open-file">Open file<input id="open" type="file" accept=".tip,.asm,.z80"></label>
+    </aside>
+    <div class="editor">
+      <nav id="tabs" aria-label="Open files"></nav>
+      <textarea id="source" aria-label="Source code" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+      <div class="toolbar"><button id="run">Compile</button><button id="execute" disabled>Run</button><button id="pause" hidden>Pause</button><span id="status" role="status">Ready</span></div>
+    </div>
+  </section>
+  <section id="calculator" tabindex="0" aria-label="Calculator. Arrow keys, Control for second, Shift for alpha.">
+    <canvas id="lcd" width="96" height="64" aria-label="Calculator screen"></canvas>
+    <div id="keypad" aria-label="Calculator buttons"></div>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body></html>

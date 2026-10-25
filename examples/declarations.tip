@@ -1,0 +1,7 @@
+int B = 3
+int C = 4
+int A = B + C
+
+# Reuse A's existing slot, preserving intermediate results on the stack.
+A = A + (B - C)
+A += 1

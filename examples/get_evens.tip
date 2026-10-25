@@ -1,0 +1,9 @@
+def get_evens(int[] x) -> int[]:
+    int evens = []
+    for num in x:
+        if num % 2 == 0:
+            evens.append(num)
+    return evens
+
+int x = [1,2,3,4,5]
+int evens = get_evens(x)

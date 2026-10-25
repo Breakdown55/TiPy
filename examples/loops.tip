@@ -1,0 +1,10 @@
+int A = 0
+int total = 0
+
+while A < 10:
+    A += 1
+    if A == 2:
+        continue
+    if A == 5:
+        break
+    total += A

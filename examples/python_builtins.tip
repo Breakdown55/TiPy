@@ -1,0 +1,13 @@
+int values = list(range(0, 30))
+int evens = [n for n in values if n % 2 == 0]
+int total = sum(evens)
+int smallest = min(evens)
+int largest = max(evens)
+bool contains_four = 4 in evens
+
+clear()
+for index, value in enumerate(evens):
+    pixel_on(value, index)
+for x, y in zip([1, 2, 3], [20, 21, 22]):
+    pixel_on(x, y)
+render()

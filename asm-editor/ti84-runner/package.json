@@ -1,0 +1,1 @@
+{"name":"tipy-ti84-runner","private":true,"type":"module","scripts":{"build":"node build.mjs","test":"node build.mjs && node --test dist/hardware.test.mjs","test:api":"node --test api.test.mjs","test:python":"node build.mjs && node --test dist/python-compiler.test.mjs","start":"node server.mjs"},"devDependencies":{"esbuild":"0.25.12"}}

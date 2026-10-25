@@ -1,0 +1,14 @@
+clear()
+pixel_on(0, 0)
+pixel_on(95, 63)
+pixel_on(48, 32)
+flip_pixel(48, 32)
+pixel_off(0, 0)
+
+int x = 10
+while x < 86:
+    pixel_on(x, 20)
+    x += 1
+rectangle(10, 40, 30, 50, 2, False)
+line(0, 0, 95, 63)
+render()

@@ -1,0 +1,11 @@
+int scores = [10, 20, 30]
+scores.append(40)
+scores.insert(1, 15)
+
+int second = scores[1]
+scores[2] = 25
+int last = scores.pop()
+int size = len(scores)
+
+int copy = scores.copy()
+copy.reverse()

@@ -1,0 +1,3 @@
+[submodule "z80"]
+	path = asm-editor/packages/z80
+	url = https://github.com/Specy/trs80.git

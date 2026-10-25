@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+
+# Local dependencies, builds, test captures and secrets.
+node_modules/
+dist/
+target/
+.venv/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+Thumbs.db
+
+# Keep the compiler/editor and the pinned Z80 dependency, not the full upstream IDE.
+/tihle/
+/asm-editor/*
+!/asm-editor/ti84-runner/
+!/asm-editor/packages/
+/asm-editor/packages/*
+!/asm-editor/packages/z80/

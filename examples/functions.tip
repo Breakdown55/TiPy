@@ -1,0 +1,7 @@
+def add(int x, int y) -> int:
+    int result = x + y
+    return result
+
+int x = 3
+int y = 4
+int answer = add(x, y)
