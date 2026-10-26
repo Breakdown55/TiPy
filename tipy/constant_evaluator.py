@@ -61,7 +61,7 @@ class Evaluator:
     def expr(self, item):
         self.tick()
         kind = item["kind"]
-        if item.get("type") == "fixed" or kind in {"stdlib", "cast_int", "to_fixed", "decimal", "compare_chain"}:
+        if item.get("type") in {"fixed", "str"} or kind in {"stdlib", "cast_int", "to_fixed", "decimal", "compare_chain", "text_print", "text_input"}:
             raise NotStatic("native numeric or runtime effect")
         if kind == "void_constant": return None
         if kind in {"number", "boolean"}:

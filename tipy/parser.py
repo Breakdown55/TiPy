@@ -211,6 +211,16 @@ class Parser:
 
     def atom(self):
         token = self.current
+        if token["kind"] == "STRING":
+            import ast
+            self.take("STRING")
+            try:
+                value = ast.literal_eval(token["value"])
+            except (ValueError, SyntaxError):
+                raise CompileError("Invalid string escape", token) from None
+            if any(not 32 <= ord(c) <= 126 and c != "\n" for c in value):
+                raise CompileError("Text supports printable ASCII and newline", token)
+            return node("string", token, value=value)
         if token["kind"] == "DECIMAL":
             self.take("DECIMAL")
             return node("decimal", token, value=token["value"])

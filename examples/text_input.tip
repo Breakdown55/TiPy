@@ -1,0 +1,15 @@
+clear()
+rectangle(0, 95, 0, 63, 1, False)
+print("TiPy", 4, 3)
+print("Text preserves", 4, 12)
+print("pixels beneath", 4, 20)
+render()
+
+# ALPHA (Shift) cycles numbers / uppercase / lowercase.
+# DEL (Backspace) deletes; CLEAR (Escape) clears the answer.
+str name = input("Name: ", 4, 30)
+int age = input("Age: ", 4, 40)
+
+print(name, 4, 50)
+print(age, 66, 50)
+render()

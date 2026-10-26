@@ -186,6 +186,7 @@ $('execute').onclick = () => {
         running = true
         lastTime = 0
         status('Running')
+        $('calculator').focus()
         paint()
         updateControls()
     } catch (error) { stop(); status(error.message,true) }

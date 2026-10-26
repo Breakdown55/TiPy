@@ -4,7 +4,7 @@ from copy import deepcopy
 from .errors import CompileError
 
 PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
-GRAPHICS_BUILTINS = PIXEL_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle"}
+GRAPHICS_BUILTINS = PIXEL_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
 PYTHON_BUILTINS = {"range", "list", "abs", "sum", "min", "max", "any", "all", "enumerate", "zip"}
 
 
@@ -41,7 +41,7 @@ def check(tree):
                 return isinstance(value, list) and any(valued_return(v) for v in value)
             statement["return_type"] = "i16" if valued_return(statement["body"]) else "void"
         statement["return_type"] = normalize(statement["return_type"])
-        if statement["return_type"] == "void[]":
+        if statement["return_type"] in {"void[]", "str[]"}:
             raise CompileError("An array cannot have void elements", statement)
         statement["label"] = f"__fn_{len(functions)}"
         statement["requires_globals"] = set()
@@ -51,7 +51,7 @@ def check(tree):
         names = set()
         for parameter in statement["params"]:
             parameter["type"] = normalize(parameter["type"])
-            if parameter["type"] in {"void", "void[]"}:
+            if parameter["type"] in {"void", "void[]", "str[]"}:
                 raise CompileError("A parameter cannot be void", parameter)
             if parameter["name"] in names:
                 raise CompileError(f"Duplicate parameter {parameter['name']!r}", parameter)
@@ -77,6 +77,9 @@ def check(tree):
         raise CompileError(f"Variable {name!r} has not been declared", item)
 
     def compatible(target, source_type, constant, item):
+        if "str" in {target, source_type}:
+            if target != source_type: raise CompileError(f"Cannot assign {source_type} to {target}", item)
+            return
         if (target == "fixed") != (source_type == "fixed"):
             raise CompileError("Use int(...) to convert fixed-point values to integers", item)
         if target.endswith("[]") or source_type.endswith("[]"):
@@ -137,7 +140,7 @@ def check(tree):
         elif kind == "call" and item["name"] == "int":
             if len(item["arguments"]) != 1:
                 raise CompileError("int expects one numeric value", item)
-            source_type, constant = expression(item["arguments"][0])
+            source_type, constant = expression(item["arguments"][0], expected_element="i16")
             if source_type not in {"i16", "u8", "bool", "fixed"}:
                 raise CompileError("int expects a scalar numeric value", item)
             item["kind"] = "cast_int"
@@ -149,6 +152,9 @@ def check(tree):
             value_type = "bool"
         elif kind == "boolean":
             value_type, constant = "bool", item["value"]
+        elif kind == "string":
+            value_type = "str"
+            item["owned"] = True
         elif kind == "tuple":
             raise CompileError("Tuple values currently require an unpacked for loop over a literal list", item)
         elif kind == "name":
@@ -164,7 +170,7 @@ def check(tree):
             item["owned"] = True
         elif kind == "list":
             element = expected_element
-            if element == "void" or element and element.endswith("[]"):
+            if element in {"void", "str"} or element and element.endswith("[]"):
                 raise CompileError("Arrays need a scalar element type", item)
             for value in item["values"]:
                 value_type, value_constant = expression(value)
@@ -245,6 +251,21 @@ def check(tree):
             item["kind"] = "builtin"
             if value_type.endswith("[]"):
                 item["owned"] = True
+        elif kind == "call" and item["name"] in {"print", "input"}:
+            name, arguments = item["name"], item["arguments"]
+            count = 3
+            if len(arguments) != count:
+                raise CompileError(f"{name} expects ({'value, x, y' if name == 'print' else 'prompt, x, y'})", item)
+            types = [expression(arg)[0] for arg in arguments]
+            if any(t not in {"i16", "u8"} for t in types[1:]):
+                raise CompileError("Text coordinates must be integers", item)
+            if name == "print" and types[0] not in {"i16", "u8", "bool", "str"}:
+                raise CompileError("print expects text, an integer, or bool", arguments[0])
+            if name == "input" and types[0] != "str":
+                raise CompileError("input prompt must be text", arguments[0])
+            item["kind"] = "text_print" if name == "print" else "text_input"
+            value_type = "void" if name == "print" else "i16" if expected_element in {"int", "i16", "u8"} else "str"
+            if value_type == "str": item["owned"] = True
         elif kind == "call" and item["name"] in GRAPHICS_BUILTINS and item["name"] not in functions:
             name = item["name"]
             count = 2 if name in PIXEL_BUILTINS else 0 if name in {"clear", "render"} else 6 if name == "rectangle" else 4
@@ -265,7 +286,7 @@ def check(tree):
             if len(item["arguments"]) != 1:
                 raise CompileError("len expects one array", item)
             argument_type, _ = expression(item["arguments"][0])
-            if not argument_type.endswith("[]"):
+            if not argument_type.endswith("[]") and argument_type != "str":
                 raise CompileError("len expects an array", item)
             item["kind"] = "length"
             value_type = "i16"
@@ -276,11 +297,11 @@ def check(tree):
             if len(item["arguments"]) != len(function["params"]):
                 raise CompileError(f"{item['name']} expects {len(function['params'])} arguments, got {len(item['arguments'])}", item)
             for argument, parameter in zip(item["arguments"], function["params"]):
-                argument_type, value = expression(argument, expected_element=parameter["type"][:-2] if parameter["type"].endswith("[]") else None)
+                argument_type, value = expression(argument, expected_element=parameter["type"][:-2] if parameter["type"].endswith("[]") else parameter["type"])
                 compatible(parameter["type"], argument_type, value, argument)
             item["symbol"] = function["label"]
             value_type = function["return_type"]
-            if value_type.endswith("[]"):
+            if value_type.endswith("[]") or value_type == "str":
                 item["owned"] = True
             if context["function"]:
                 context["function"]["calls"].add(item["name"])
@@ -300,7 +321,7 @@ def check(tree):
             value_type, constant = "bool", not operand if operand is not None else None
         elif kind == "negate":
             operand_type, operand = expression(item["value"], allow_min_magnitude=True)
-            if operand_type == "bool" or operand_type.endswith("[]"):
+            if operand_type in {"bool", "str"} or operand_type.endswith("[]"):
                 raise CompileError("Cannot negate a bool or array", item)
             value_type = operand_type if operand_type == "fixed" else "i16"
             constant = -operand if operand is not None else None
@@ -319,6 +340,8 @@ def check(tree):
                 return item["type"], None
             if left_type.endswith("[]") or right_type.endswith("[]"):
                 raise CompileError("Use indexing or array methods instead of scalar operators on arrays", item)
+            if "str" in {left_type, right_type}:
+                raise CompileError("String arithmetic and comparison are not supported yet", item)
             if kind in {"and", "or"}:
                 if left_type != "bool" or right_type != "bool":
                     raise CompileError("and/or require bool operands", item)
@@ -368,7 +391,7 @@ def check(tree):
                 continue
             if kind == "collect":
                 element, constant = expression(statement["value"])
-                if element.endswith("[]") or element == "void":
+                if element.endswith("[]") or element in {"void", "str"}:
                     raise CompileError("Comprehensions require scalar elements", statement)
                 expected = statement.get("expected_element")
                 if expected:
@@ -397,7 +420,7 @@ def check(tree):
                 else:
                     if statement["value"] is None:
                         raise CompileError("This function must return a value", statement)
-                    value_type, value = expression(statement["value"], expected_element=target[:-2] if target.endswith("[]") else None)
+                    value_type, value = expression(statement["value"], expected_element=target[:-2] if target.endswith("[]") else target)
                     compatible(target, value_type, value, statement)
                 reachable = False
                 continue
@@ -567,7 +590,9 @@ def check(tree):
                 if name in functions or name == "len" or name in GRAPHICS_BUILTINS:
                     raise CompileError(f"{name!r} is already a function name", statement)
                 symbol = context["locals"].get(name)
-                source_type, constant = expression(statement["value"])
+                expected = symbol["type"] if symbol and symbol["type"] != "auto" else None
+                if expected and expected.endswith("[]"): expected = expected[:-2]
+                source_type, constant = expression(statement["value"], expected_element=expected)
                 if symbol is None:
                     symbol = {"type": source_type, "size": 1 if source_type in {"u8", "bool"} else 2,
                               "label": f"__var_{len(globals_)}"}
@@ -609,7 +634,7 @@ def check(tree):
                 context["initialized"].add(name)
             else:
                 symbol = lookup(name, statement, writing=True)
-                source_type, constant = expression(statement["value"], expected_element=symbol["type"][:-2] if symbol["type"].endswith("[]") else None)
+                source_type, constant = expression(statement["value"], expected_element=symbol["type"][:-2] if symbol["type"].endswith("[]") else symbol["type"])
                 compatible(symbol["type"], source_type, constant, statement)
             statement["type"] = symbol["type"]
             bind(statement, symbol)

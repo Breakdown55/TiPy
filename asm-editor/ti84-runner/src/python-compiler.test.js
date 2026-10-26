@@ -21,8 +21,17 @@ function execute(source, measurements) {
     const frames = []
     if (measurements) {
         const service = runner.serviceBcall.bind(runner)
+        let keyIndex=0
         runner.lcd.dirty = false
         runner.serviceBcall = () => {
+            const r=runner.machine.z80.regs,mem=runner.machine.memory
+            const ret=mem[r.sp] | (mem[(r.sp+1)&65535]<<8)
+            const call=mem[ret] | (mem[(ret+1)&65535]<<8)
+            if(call===0x4018 && measurements.pollKeys) {
+                runner.releaseKeys()
+                const key=measurements.pollKeys[keyIndex++] ?? 0
+                if(key) runner.setKey(key,true)
+            }
             service()
             if (runner.lcd.dirty) { frames.push(runner.lcd.pixels.slice()); runner.lcd.dirty = false }
         }
@@ -39,17 +48,18 @@ function execute(source, measurements) {
     for (const [name,symbol] of Object.entries(result.symbols)) {
         const address = runner.assembly.asm.scopes[0].symbols.get(symbol.label).value
         let value = runner.machine.memory[address]
-        if (symbol.type.endsWith('[]')) {
+        if (symbol.type.endsWith('[]') || symbol.type==='str') {
             const pointer = value | (runner.machine.memory[address + 1] << 8)
             const readWord = a => runner.machine.memory[a] | (runner.machine.memory[a + 1] << 8)
             const data = readWord(pointer)
             const length = readWord(pointer + 2)
             const width = readWord(pointer + 6)
-            values[name] = Array.from({ length },(_,i) => {
+            const elements = Array.from({ length },(_,i) => {
                 let element = width === 1 ? runner.machine.memory[data + i] : readWord(data + i * 2)
                 if (symbol.type === 'i16[]' && element & 0x8000) element -= 65536
                 return element
             })
+            values[name] = symbol.type==='str' ? String.fromCharCode(...elements) : elements
             continue
         }
         if (symbol.size === 2) {
@@ -60,6 +70,80 @@ function execute(source, measurements) {
     }
     return values
 }
+
+test('Print draws transparent glyph strokes at pixel coordinates with explicit rendering', () => {
+    const seed=Uint8Array.from({length:768},()=>0x55)
+    const measurements={seedGraph:seed}
+    execute('print("A ",3,2)\nrender()',measurements)
+    const expected=seed.slice()
+    const glyph=['01110','10001','10001','11111','10001','10001','10001']
+    glyph.forEach((row,y)=>[...row].forEach((bit,x)=>{if(bit==='1')expected[(y+2)*12+((x+3)>>3)]|=128>>((x+3)&7)}))
+    assert.deepEqual(measurements.graph,expected)
+    assert.equal(measurements.frames.length,1)
+    assert.doesNotMatch(measurements.assembly,/__heap_start|__text_input:/)
+    const unrendered={}
+    execute('print("Hi",0,0)',unrendered)
+    assert.equal(unrendered.frames.length,0)
+    for(const number of [0,1,-1,32767,-32768]) {
+        const formatted={},literal={}
+        execute(`clear()\nprint(${number},0,0)\nrender()`,formatted)
+        execute(`clear()\nprint("${number}",0,0)\nrender()`,literal)
+        assert.deepEqual(formatted.graph,literal.graph)
+    }
+    const clipped={}
+    execute('print("hello\\nWorld!?",-2,61)\nrender()',clipped)
+    assert.ok(clipped.graph.some(n=>n))
+})
+
+test('Managed strings survive assignments, calls, returns, replacement and repeated cleanup', () => {
+    const values=execute(`str greeting="Hello"
+str other=greeting
+greeting="Goodbye"
+def identity(str value) -> str:
+    str copy=value
+    return copy
+str answer=identity(other)
+for i in range(100):
+    greeting=identity("again")
+int size=len(answer)
+print(answer,0,0)
+print(True,0,8)
+render()`)
+    assert.equal(values.other,'Hello')
+    assert.equal(values.answer,'Hello')
+    assert.equal(values.greeting,'again')
+    assert.equal(values.size,5)
+})
+
+test('Integer input blinks, preserves the background, edits and returns signed i16', () => {
+    const measurements={seedGraph:Uint8Array.from({length:768},(_,i)=>(i*17+83)&255),
+        pollKeys:[...Array(55).fill(0),17,0,18,0,26,0,20,0,56,0,28,0,9]}
+    const values=execute('int answer=input("",0,0)',measurements)
+    assert.equal(values.answer,-328)
+    assert.ok(measurements.frames.length>=8)
+    const on=measurements.frames[0],off=measurements.frames[1]
+    for(let i=0;i<6144;i++) assert.equal(on[i]^off[i],Number(i>=7*96 && i<7*96+5),'Only the cursor stroke changes while blinking')
+    const expected={seedGraph:Uint8Array.from({length:768},(_,i)=>(i*17+83)&255)}
+    execute('print("-328",0,0)\nrender()',expected)
+    assert.deepEqual(measurements.graph,expected.graph,'Final answer removes the cursor and restores all untouched background bits')
+    assert.doesNotMatch(measurements.assembly,/__heap_start/)
+    const minimum=execute('int answer=input("",0,0)',{pollKeys:[17,0,18,0,26,0,36,0,19,0,28,0,9]})
+    assert.equal(minimum.answer,-32768)
+    const maximum=execute('int answer=input("",0,0)',{pollKeys:[18,0,26,0,36,0,19,0,28,0,9,0,56,0,36,0,9]})
+    assert.equal(maximum.answer,32767,'Out-of-range entry stays editable until corrected')
+    assert.throws(()=>execute('int answer=input("",0,63)'),/Input position/)
+})
+
+test('Text input uses ALPHA and DEL, keeps earlier answers alive, and handles empty input', () => {
+    const measurements={pollKeys:[48,0,47,0,39,0,31,0,56,0,31,0,9,0,34,0,9,0,9]}
+    const values=execute('str first=input("Name:",0,0)\nstr second=input("",0,16)\nstr empty=input("",0,32)\nprint(first,0,48)\nrender()',measurements)
+    assert.equal(values.first,'ABC')
+    assert.equal(values.second,'1')
+    assert.equal(values.empty,'')
+    assert.doesNotMatch(measurements.assembly,/__text_parse:/)
+    const lowercase=execute('str answer=input("",0,0)',{pollKeys:[48,0,48,0,47,0,39,0,31,0,9]})
+    assert.equal(lowercase.answer,'abc')
+})
 
 test('Tuple rows snapshot values once, unpack in order, and preserve nested control flow and frames', () => {
     const source=`int xs=[10,20,30,40]

@@ -5,6 +5,7 @@ from .optimizer import optimize
 
 
 def generate(tree, symbols, *, optimize_graphics=True):
+    def managed(type_name): return type_name == "str" or type_name.endswith("[]")
     if "static_frames" in tree:
         from .framebuffer_backend import generate_frames
         return generate_frames(tree["static_frames"])
@@ -41,7 +42,9 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 return False
             if item.get("iteration_kind") == "range":
                 return has_arrays(item["body"]) or has_arrays(item["iterable"]["arguments"])
-            return str(item.get("type", "")).endswith("[]") or item.get("kind") in {"list", "index", "method", "length"} or any(has_arrays(v) for v in item.values())
+            if item.get("kind") in {"text_print", "text_input"} and item["arguments"][0]["kind"] == "string":
+                return item.get("type") == "str" or has_arrays(item["arguments"][1:])
+            return managed(str(item.get("type", ""))) or item.get("kind") in {"list", "index", "method", "length"} or any(has_arrays(v) for v in item.values())
         if isinstance(item, list):
             return any(has_arrays(v) for v in item)
         return False
@@ -53,6 +56,15 @@ def generate(tree, symbols, *, optimize_graphics=True):
     constant_data = {}
     from .optimization_pipeline import walk
     native_used = {item["name"] for item in walk(tree["body"]) if item.get("kind") == "stdlib"}
+    text_nodes = [item for item in walk(tree["body"]) if item.get("kind") in {"text_print", "text_input"}]
+    text_used = {"draw"} if text_nodes else set()
+    if any(item["kind"] == "text_input" for item in text_nodes):
+        text_used.add("input"); native_used.add("time.sleep")
+        text_used.update("input_int" if item["type"] == "i16" else "input_str" for item in text_nodes if item["kind"] == "text_input")
+    if any(item["kind"] == "text_print" and item["arguments"][0]["type"] in {"i16", "u8"} for item in text_nodes): text_used.add("number")
+    if any(item["kind"] == "text_print" and item["arguments"][0]["type"] == "bool" for item in text_nodes): text_used.add("bool")
+    if text_nodes: pixels_used.add("pixel_on")
+    if "input" in text_used: pixels_used.update({"flip_pixel", "render"})
     if native_used & {"math.sin", "math.cos", "math.radians"}:
         modulo_used = True
     if native_used & {"math.radians", "random.randint"}:
@@ -132,6 +144,32 @@ def generate(tree, symbols, *, optimize_graphics=True):
         kind = item["kind"]
         if kind == "void_constant":
             return
+        elif kind == "string":
+            data = tuple(ord(c) for c in item["value"])
+            if data not in constant_data: constant_data[data] = f"__constant_data_{len(constant_data)}"
+            runtime("from_data", [1, len(data), {"kind": "address", "label": constant_data[data]}])
+        elif kind in {"text_print", "text_input"}:
+            value, x, y = item["arguments"]
+            temporary = value["kind"] != "string" and value.get("owned", False)
+            if value["kind"] == "string":
+                data = tuple(ord(c) for c in value["value"])
+                if data not in constant_data: constant_data[data] = f"__constant_data_{len(constant_data)}"
+                emit(f"ld hl,{constant_data[data]}", "push hl", f"ld hl,{len(data)}", "push hl")
+            else:
+                expression(value)
+                if temporary: emit("push hl")
+                if value["type"] == "str":
+                    emit("ld e,(hl)", "inc hl", "ld d,(hl)", "inc hl", "ld c,(hl)", "inc hl", "ld b,(hl)", "push de", "push bc")
+                else:
+                    emit(f"call __text_{'bool' if value['type'] == 'bool' else 'number'}", "push hl", "push bc")
+            expression(x); emit("push hl")
+            expression(y); emit("push hl")
+            if kind == "text_input":
+                emit(f"ld hl,{int(item['type'] == 'i16')}", "push hl", "call __text_input", *(["pop de"] * 5))
+            else:
+                emit("call __text_draw", *(["pop de"] * 4))
+            if temporary:
+                emit("pop de", "push hl", "push de", "call __arr_release", "pop de", "pop hl")
         elif kind in {"number", "boolean"}:
             emit(f"ld hl,{int(item['value']) & 0xFFFF}")
         elif kind == "decimal":
@@ -261,7 +299,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
             # Nested calls preserve IX and all expression temporaries on stack.
             for argument in item["arguments"]:
                 expression(argument)
-                if str(argument["type"]).endswith("[]") and not argument.get("owned"):
+                if managed(str(argument["type"])) and not argument.get("owned"):
                     emit("push hl", "call __arr_retain", "pop de")
                 emit("push hl")
             emit(f"call {item['symbol']}")
@@ -441,7 +479,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
             if kind == "return":
                 if statement["value"] is not None:
                     expression(statement["value"])
-                    if statement["value"]["type"].endswith("[]") and not statement["value"].get("owned"):
+                    if managed(statement["value"]["type"]) and not statement["value"].get("owned"):
                         emit("push hl", "call __arr_retain", "pop de")
                 emit(f"jp {return_label}")
                 continue
@@ -612,7 +650,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 mark(end)
                 continue
             expression(statement["value"])
-            if statement["type"].endswith("[]"):
+            if managed(statement["type"]):
                 if not statement["value"].get("owned"):
                     emit("push hl", "call __arr_retain", "pop de")
                 emit("push hl")
@@ -638,7 +676,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
         if function["frame_size"]:
             emit(f"ld hl,{(-function['frame_size']) & 0xFFFF}", "add hl,sp", "ld sp,hl")
         return_label = label()
-        array_locals = [value for value in function["locals"].values() if value["type"].endswith("[]")]
+        array_locals = [value for value in function["locals"].values() if managed(value["type"])]
         if array_locals:
             emit("ld hl,0")
             for value in array_locals:
@@ -655,6 +693,9 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 emit("push hl", "call __arr_release", "pop de")
             emit("pop hl")
         emit("ld sp,ix", "pop ix", "ret")
+    if text_used:
+        from .text_runtime import assembly as text_assembly
+        code.append(text_assembly(text_used))
     if native_used:
         from .native_runtime import assembly as native_assembly
         code.append(native_assembly(native_used))

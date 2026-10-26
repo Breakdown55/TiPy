@@ -14,7 +14,16 @@ export const KEYS = [
     ['ON',0], ['0',33], ['.',25], ['(−)',17], ['ENTER',9]
 ]
 const VALID_KEYS = new Set(KEYS.map(([,code]) => code))
-export const HOST_KEYS = { ArrowDown: 1, ArrowLeft: 2, ArrowRight: 3, ArrowUp: 4, Enter: 9, '+': 10, '-': 11, '*': 12, '/': 13, '^': 14, Backspace: 15, Escape: 15, '3': 18, '6': 19, '9': 20, ')': 21, '.': 25, '2': 26, '5': 27, '8': 28, '(': 29, '0': 33, '1': 34, '4': 35, '7': 36, ',': 37, Shift: 48, Control: 54 }
+export const HOST_KEYS = { ArrowDown: 1, ArrowLeft: 2, ArrowRight: 3, ArrowUp: 4, Enter: 9, '+': 10, '-': 11, '*': 12, '/': 13, '^': 14, Backspace: 56, Escape: 15, '3': 18, '6': 19, '9': 20, ')': 21, '.': 25, '2': 26, '5': 27, '8': 28, '(': 29, '0': 33, '1': 34, '4': 35, '7': 36, ',': 37, Shift: 48, Control: 54 }
+
+// Host letters correspond to the real keys carrying TI's ALPHA legends.
+// Native programs decide whether ALPHA is off, uppercase, or lowercase.
+const ALPHA_CODES = [47,39,31,46,38,30,22,14,45,37,29,21,13,44,36,28,20,12,43,35,27,19,11,42,34,26]
+for (let i=0;i<26;i++) {
+    HOST_KEYS[String.fromCharCode(65+i)] = ALPHA_CODES[i]
+    HOST_KEYS[String.fromCharCode(97+i)] = ALPHA_CODES[i]
+}
+HOST_KEYS[' '] = 33
 
 // LCD RAM is independent of CPU RAM. A RAM store cannot update the display.
 export class TiLcd {
@@ -256,7 +265,7 @@ export class Ti84Runner {
         } while (!single && this.machine.tStateCount - start < budget && (count % 256 !== 0 || performance.now() < deadline))
         if (this.done && this.listErrorAddress !== undefined) {
             const code = this.machine.memory[this.listErrorAddress]
-            if (code) throw new Error(({ 1: 'Array index out of range', 2: 'Cannot pop an empty array', 3: 'Array heap is out of memory', 4: 'Value not found in array', 5: 'Remainder divisor cannot be zero', 6: 'min/max requires a non-empty sequence', 7: 'range step cannot be zero', 8: 'Division divisor cannot be zero', 9: 'randint lower bound exceeds upper bound', 10: 'sleep must be between 0 and 32.767 seconds' })[code] ?? 'Runtime error')
+            if (code) throw new Error(({ 1: 'Array index out of range', 2: 'Cannot pop an empty array', 3: 'Array heap is out of memory', 4: 'Value not found in array', 5: 'Remainder divisor cannot be zero', 6: 'min/max requires a non-empty sequence', 7: 'range step cannot be zero', 8: 'Division divisor cannot be zero', 9: 'randint lower bound exceeds upper bound', 10: 'sleep must be between 0 and 32.767 seconds', 11: 'Input position must leave room for text and a cursor' })[code] ?? 'Runtime error')
         }
     }
 }
