@@ -1,0 +1,28 @@
+# Shared 2D/3D transform stack. Angles are radians.
+# Projection is orthographic: perspective, depth buffering and meshes come later.
+# push_matrix/pop_matrix save coordinates, not pixels or drawing style.
+clear()
+no_fill()
+stroke(BLACK)
+rect(5, 5, 16, 16)
+push_matrix()
+translate(60, 29, 0)
+rotate_x(0.6)
+rotate_y(-0.5)
+rotate_z(0.15)
+
+# Two faces and four connecting edges of a wireframe box.
+for z in [-8, 8]:
+    begin_shape()
+    vertex(-14, -14, z)
+    vertex(14, -14, z)
+    vertex(14, 14, z)
+    vertex(-14, 14, z)
+    end_shape(CLOSE)
+for x, y in [(-14, -14), (14, -14), (14, 14), (-14, 14)]:
+    line(x, y, -8, x, y, 8)
+pop_matrix()
+
+# Screen-space overlay after restoring the original coordinates.
+print("2D + 3D", 24, 55)
+render()

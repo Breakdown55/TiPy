@@ -1,0 +1,251 @@
+# Native py5-style facade. Only reachable helpers and state are included.
+def __tipy_gfx_background(int color):
+    __tipy_native_background(color)
+
+int __tipy_gfx_style=[1,255,1,0,1]
+float __tipy_gfx_zero=0
+float __tipy_gfx_one=1
+float[] __tipy_gfx_matrix=[__tipy_gfx_one,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_one,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_one,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_zero,__tipy_gfx_one]
+float[][] __tipy_gfx_stack=[]
+bool[] __tipy_gfx_active_stack=[]
+bool[] __tipy_gfx_active=[False]
+tuple[int,int][] __tipy_gfx_vertices=[]
+
+def __tipy_gfx_fill(int color):
+    __tipy_gfx_style[0]=1
+    __tipy_gfx_style[1]=color
+
+def __tipy_gfx_no_fill():
+    __tipy_gfx_style[0]=0
+
+def __tipy_gfx_stroke(int color):
+    __tipy_gfx_style[2]=1
+    __tipy_gfx_style[3]=color
+
+def __tipy_gfx_no_stroke():
+    __tipy_gfx_style[2]=0
+
+def __tipy_gfx_stroke_weight(int weight):
+    __tipy_gfx_style[4]=max(0,min(weight,191))
+
+def __tipy_gfx_round(float value) -> int:
+    if value>=32767:
+        return 32767
+    if value<=-32768:
+        return -32768
+    return int(value+0.5) if value>=0 else int(value-0.5)
+
+def __tipy_gfx_transformed() -> bool:
+    return __tipy_gfx_active[0]
+
+def __tipy_gfx_project(int x,int y,int z):
+    m=__tipy_gfx_matrix
+    return __tipy_gfx_round(m[0]*x+m[1]*y+m[2]*z+m[3]),__tipy_gfx_round(m[4]*x+m[5]*y+m[6]*z+m[7])
+
+def __tipy_gfx_multiply(float[] right):
+    left=__tipy_gfx_matrix.copy()
+    for row in range(4):
+        for column in range(4):
+            float total=0
+            for k in range(4):
+                total=total+left[row*4+k]*right[k*4+column]
+            __tipy_gfx_matrix[row*4+column]=total
+    __tipy_gfx_active[0]=True
+
+def __tipy_gfx_reset_matrix():
+    for i in range(16):
+        __tipy_gfx_matrix[i]=float(1) if i%5==0 else float(0)
+    __tipy_gfx_active[0]=False
+
+def __tipy_gfx_push_matrix():
+    __tipy_gfx_stack.append(__tipy_gfx_matrix.copy())
+    __tipy_gfx_active_stack.append(__tipy_gfx_active[0])
+
+def __tipy_gfx_pop_matrix():
+    previous=__tipy_gfx_stack.pop()
+    for i in range(16):
+        __tipy_gfx_matrix[i]=previous[i]
+    __tipy_gfx_active[0]=__tipy_gfx_active_stack.pop()
+
+def __tipy_gfx_translate3(float x,float y,float z):
+    m=__tipy_gfx_matrix
+    for row in range(4):
+        base=row*4
+        m[base+3]=m[base]*x+m[base+1]*y+m[base+2]*z+m[base+3]
+    __tipy_gfx_active[0]=True
+
+def __tipy_gfx_translate2(float x,float y):
+    __tipy_gfx_translate3(x,y,0)
+
+def __tipy_gfx_scale3(float x,float y,float z):
+    m=__tipy_gfx_matrix
+    for row in range(4):
+        base=row*4
+        m[base]=m[base]*x
+        m[base+1]=m[base+1]*y
+        m[base+2]=m[base+2]*z
+    __tipy_gfx_active[0]=True
+
+def __tipy_gfx_scale2(float x,float y):
+    __tipy_gfx_scale3(x,y,1)
+
+def __tipy_gfx_scale1(float value):
+    __tipy_gfx_scale3(value,value,value)
+
+def __tipy_gfx_apply_matrix(float a,float b,float c,float d,float e,float f,float g,float h,float i,float j,float k,float l,float m,float n,float o,float p):
+    __tipy_gfx_multiply([a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p])
+
+def __tipy_gfx_sin(float angle) -> float:
+    if angle-angle!=float(0):
+        return float(int(angle))
+    value=abs(angle)
+    float period=6.283185307179586
+    step=period
+    while step<=value*0.5:
+        step=step*2
+    while step>=period:
+        if value>=step:
+            value=value-step
+        step=step*0.5
+    if angle<0:
+        value=-value
+    return float(__tipy_native_sin_raw(int(value*256)))
+
+def __tipy_gfx_cos(float angle) -> float:
+    return __tipy_gfx_sin(angle+1.5707963267948966)
+
+def __tipy_gfx_rotate_axes(float angle,int first,int second):
+    c=__tipy_gfx_cos(angle)
+    s=__tipy_gfx_sin(angle)
+    m=__tipy_gfx_matrix
+    for row in range(4):
+        a=row*4+first
+        b=row*4+second
+        left=m[a]
+        right=m[b]
+        m[a]=left*c+right*s
+        m[b]=right*c-left*s
+    __tipy_gfx_active[0]=True
+
+def __tipy_gfx_rotate_z(float angle):
+    __tipy_gfx_rotate_axes(angle,0,1)
+
+def __tipy_gfx_rotate_x(float angle):
+    __tipy_gfx_rotate_axes(angle,1,2)
+
+def __tipy_gfx_rotate_y(float angle):
+    __tipy_gfx_rotate_axes(angle,2,0)
+
+def __tipy_gfx_ink(int color):
+    __tipy_native_ink(1 if color<128 else 0)
+
+def __tipy_gfx_outline(tuple[int,int][] points,bool closed):
+    if __tipy_gfx_style[2]==0 or __tipy_gfx_style[4]<=0:
+        return
+    __tipy_gfx_ink(__tipy_gfx_style[3])
+    __tipy_native_stroke(points,closed,__tipy_gfx_style[4])
+
+def __tipy_gfx_draw_polygon(tuple[int,int][] points,bool closed):
+    if __tipy_gfx_style[0]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[1])
+        __tipy_native_polygon(points,True)
+    __tipy_gfx_outline(points,closed)
+
+def __tipy_gfx_polygon(tuple[int,int][] points):
+    tuple[int,int][] projected=[]
+    for x,y in points:
+        projected.append(__tipy_gfx_project(x,y,0))
+    __tipy_gfx_draw_polygon(projected,True)
+
+def __tipy_gfx_polyline(tuple[int,int][] points,bool closed):
+    tuple[int,int][] projected=[]
+    for x,y in points:
+        projected.append(__tipy_gfx_project(x,y,0))
+    __tipy_gfx_outline(projected,closed)
+
+def __tipy_gfx_triangle(int x1,int y1,int x2,int y2,int x3,int y3):
+    __tipy_gfx_polygon([(x1,y1),(x2,y2),(x3,y3)])
+
+def __tipy_gfx_quad(int x1,int y1,int x2,int y2,int x3,int y3,int x4,int y4):
+    __tipy_gfx_polygon([(x1,y1),(x2,y2),(x3,y3),(x4,y4)])
+
+def __tipy_gfx_line6(int x1,int y1,int z1,int x2,int y2,int z2):
+    __tipy_gfx_outline([__tipy_gfx_project(x1,y1,z1),__tipy_gfx_project(x2,y2,z2)],False)
+
+def __tipy_gfx_line4(int x1,int y1,int x2,int y2):
+    __tipy_gfx_line6(x1,y1,0,x2,y2,0)
+
+def __tipy_gfx_point3(int x,int y,int z):
+    __tipy_gfx_outline([__tipy_gfx_project(x,y,z)],False)
+
+def __tipy_gfx_point2(int x,int y):
+    __tipy_gfx_point3(x,y,0)
+
+def __tipy_gfx_begin_shape():
+    __tipy_gfx_vertices.clear()
+
+def __tipy_gfx_vertex3(int x,int y,int z):
+    __tipy_gfx_vertices.append(__tipy_gfx_project(x,y,z))
+
+def __tipy_gfx_vertex2(int x,int y):
+    __tipy_gfx_vertex3(x,y,0)
+
+def __tipy_gfx_end_shape(bool closed):
+    __tipy_gfx_draw_polygon(__tipy_gfx_vertices,closed)
+    __tipy_gfx_vertices.clear()
+
+def __tipy_gfx_contour(int x,int y,int rx,int ry):
+    tuple[int,int][] points=[]
+    for i in range(32):
+        float angle=float(i)*0.19634954084936207
+        px=__tipy_gfx_round(x+__tipy_gfx_cos(angle)*rx)
+        py=__tipy_gfx_round(y+__tipy_gfx_sin(angle)*ry)
+        points.append((px,py))
+    __tipy_gfx_polygon(points)
+
+def __tipy_gfx_circle(int x,int y,int diameter):
+    if diameter<0:
+        return
+    rx=diameter//2
+    ry=rx
+    if __tipy_gfx_transformed():
+        __tipy_gfx_contour(x,y,rx,ry)
+        return
+    if __tipy_gfx_style[0]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[1])
+        __tipy_native_circle(x,y,rx,True)
+    if __tipy_gfx_style[2]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[3])
+        for w in range(min(__tipy_gfx_style[4],min(rx,ry)+1)):
+            __tipy_native_circle(x,y,rx-w,False)
+
+def __tipy_gfx_ellipse(int x,int y,int width,int height):
+    if width<0 or height<0:
+        return
+    rx=width//2
+    ry=height//2
+    if __tipy_gfx_transformed():
+        __tipy_gfx_contour(x,y,rx,ry)
+        return
+    if __tipy_gfx_style[0]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[1])
+        __tipy_native_ellipse(x,y,rx,ry,True)
+    if __tipy_gfx_style[2]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[3])
+        for w in range(min(__tipy_gfx_style[4],min(rx,ry)+1)):
+            __tipy_native_ellipse(x,y,rx-w,ry-w,False)
+
+def __tipy_gfx_rect(int x,int y,int width,int height):
+    if width==0 or height==0:
+        return
+    x2=__tipy_native_add(x,width-1 if width>0 else width+1)
+    y2=__tipy_native_add(y,height-1 if height>0 else height+1)
+    if __tipy_gfx_transformed():
+        __tipy_gfx_polygon([(x,y),(x2,y),(x2,y2),(x,y2)])
+        return
+    if __tipy_gfx_style[0]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[1])
+        __tipy_native_rectangle(x,x2,y,y2,1,True)
+    if __tipy_gfx_style[2]!=0 and __tipy_gfx_style[4]>0:
+        __tipy_gfx_ink(__tipy_gfx_style[3])
+        __tipy_native_rectangle(x,x2,y,y2,__tipy_gfx_style[4],False)

@@ -1,0 +1,31 @@
+# py5-style drawing on the 96x64 screen; BLACK=0, WHITE=255.
+# Circle/ellipse sizes are diameters, rect uses x/y/width/height.
+clear()
+fill(BLACK)
+no_stroke()
+circle(12, 12, 16)
+ellipse(40, 12, 28, 12)
+
+no_fill()
+stroke(BLACK)
+stroke_weight(2)
+rect(62, 4, 27, 18)
+
+stroke_weight(1)
+fill(BLACK)
+triangle(4, 44, 15, 28, 26, 44)
+no_fill()
+quad(34, 29, 50, 26, 54, 44, 30, 44)
+
+# A concave shape, with vertices joined in order.
+begin_shape()
+vertex(65, 28)
+vertex(90, 28)
+vertex(90, 35)
+vertex(73, 35)
+vertex(73, 46)
+vertex(65, 46)
+end_shape(CLOSE)
+
+print("TiPy 2D", 24, 55)
+render()

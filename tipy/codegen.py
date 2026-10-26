@@ -32,6 +32,18 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             dependencies = called_labels(functions[name]["body"]) - live
             live.update(dependencies); pending.extend(dependencies)
     tree = {**tree, "body": [item for item in tree["body"] if item["kind"] != "function" or item["label"] in live]}
+    # Compiler-owned graphics state is initialized only when a reachable helper
+    # reads it. Unused drawing functions must not introduce a heap or matrices.
+    state={n['symbol']:n for n in tree['body'] if n.get('kind')=='declare' and n.get('name','').startswith('$__tipy_gfx_')}
+    def reads(node):
+        if isinstance(node,dict):return ({node['symbol']} if node.get('kind')=='name' and 'symbol' in node else set())|set().union(*(reads(v) for v in node.values()))
+        if isinstance(node,list):return set().union(*(reads(v) for v in node))
+        return set()
+    needed=reads([n for n in tree['body'] if n.get('symbol') not in state]);pending=list(needed&state.keys())
+    while pending:
+        dependencies=reads(state[pending.pop()])-needed;needed.update(dependencies);pending.extend(dependencies&state.keys())
+    removed=set(state)-needed
+    tree={**tree,'body':[n for n in tree['body'] if n.get('symbol') not in removed],'temporaries':{k:v for k,v in tree.get('temporaries',{}).items() if v['label'] not in removed}}
     from .drawing_optimizer import optimize_drawing
     if optimize_graphics:
         tree = optimize_drawing(tree)
@@ -43,6 +55,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
 
     def has_arrays(item):
         if isinstance(item, dict):
+            if item.get('kind')=='graphics' and item.get('name')=='triangle':return True
             if item.get("unreachable") is True:
                 return False
             if item.get("iteration_kind") == "range":
@@ -587,7 +600,18 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             if item["name"] == "pop" and not item["arguments"]:
                 arguments.append(-1)
             runtime(item["name"], arguments)
+        elif kind=='raw_fixed':expression(item['value'])
+        elif kind=='graphics_value':
+            if item['name']=='sin_raw':modulo_used=True
+            runtime(item['name'],item['arguments'],'__gfx_');pixels_used.add(item['name'])
         elif kind == "graphics":
+            if item['name']=='ink':
+                expression(item['arguments'][0]);emit('ld a,l','ld (__gfx_ink),a');pixels_used.add('ink');return
+            if item['name']=='triangle':
+                args=item['arguments'];points={'kind':'list','type':'tuple[i16,i16][]','owned':True,'values':[{'kind':'tuple','type':'tuple[i16,i16]','owned':True,'values':args[i:i+2]} for i in (0,2,4)]}
+                runtime('polygon',[points,args[6]],'__gfx_');pixels_used.add('polygon');return
+            if item['name'] in {'circle','ellipse','polygon','polyline','stroke'}:
+                runtime(item['name'],item['arguments'],'__gfx_');pixels_used.add(item['name']);return
             if item["name"] in {"pixel_on", "pixel_off", "flip_pixel"}:
                 expression(item["arguments"][0])
                 emit("push hl")
@@ -1257,14 +1281,15 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
     if tracing:
         fatal="        ld (__list_error),hl\n        ld sp,(__list_main_sp)\n        ld ix,(__list_main_ix)\n        ret"
         code[:]=[part.replace(fatal,"        jp __arr_fail") for part in code]
-    required = set(RUNTIME_TARGET.findall("\n".join(code)))
-    if required:
-        object_types={t for node in walk(tree) if isinstance(node.get("type"),str) for t in all_types(node["type"])}
-        dictionary_types = {dict_types(t) if is_dict(t) else (element_type(t),"i16") for t in object_types if is_dict(t) or is_set(t)}
-        code.extend(["", "; Used heap runtime routines and their dependencies", runtime_assembly(required, dictionary_types, object_types,tracing,generators,_heap_bytes)])
     if pixels_used:
         from .graphics_runtime import graphics_assembly
         code.append(graphics_assembly(pixels_used))
+    required = set(RUNTIME_TARGET.findall("\n".join(code)))
+    if required:
+        object_types={t for node in walk(tree) if isinstance(node.get("type"),str) for t in all_types(node["type"])}
+        if any(n.get('kind')=='graphics' and n.get('name')=='triangle' for n in walk(tree)):object_types.update({'tuple[i16,i16][]','tuple[i16,i16]'})
+        dictionary_types = {dict_types(t) if is_dict(t) else (element_type(t),"i16") for t in object_types if is_dict(t) or is_set(t)}
+        code.extend(["", "; Used heap runtime routines and their dependencies", runtime_assembly(required, dictionary_types, object_types,tracing,generators,_heap_bytes)])
     for values, label_name in constant_data.items():
         code.append(label_name + ":")
         for start in range(0, len(values), 24):

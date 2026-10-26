@@ -282,7 +282,16 @@ __gfx_{name}_loop:
 
 
 def graphics_assembly(used):
+    used=set(used)
     routines = []
+    styled=bool(used & {'ink','stroke','circle','ellipse','polygon','polyline','styled_rectangle'})
+    if used & {'background','sin_raw','sat_add','stroke','circle','ellipse','polygon','polyline'}:
+        from .shape_runtime import assembly
+        routines.append(assembly(used))
+        if used & {'circle','ellipse','polygon'}:routines.append(_axis_line(False).replace('__gfx_h_line','__gfx_styled_h_line').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
+        if used & {'polygon','polyline','stroke'}:routines.append(_line().replace('__gfx_line','__gfx_styled_line').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
+    if 'styled_rectangle' in used:routines.append(_rectangle().replace('__gfx_rectangle','__gfx_styled_rectangle').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
+    if styled:routines.append('__gfx_ink_pixel:\n        ld a,(__gfx_ink)\n        jp __gfx_pixel\n__gfx_ink: db 1');used.add('pixel_on')
     if "build_row_mask" in used:
         routines.append(_build_row_mask())
     for name in ("or_row", "and_row", "xor_row"):

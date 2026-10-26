@@ -93,6 +93,187 @@ function execute(source, measurements) {
     return values
 }
 
+function expectedCurve(cx,cy,rx,ry,filled) {
+    const inside=(x,y)=>{
+        if(rx<0||ry<0)return false
+        const dx=BigInt(x-cx),dy=BigInt(y-cy),a=BigInt(rx),b=BigInt(ry)
+        if(!rx)return x===cx&&Math.abs(y-cy)<=ry
+        if(!ry)return y===cy&&Math.abs(x-cx)<=rx
+        return dx*dx*b*b+dy*dy*a*a<=a*a*b*b
+    }
+    return Uint8Array.from({length:768},(_,index)=>{
+        const y=Math.floor(index/12),x=(index%12)*8
+        let value=0
+        for(let bit=0;bit<8;bit++)if(inside(x+bit,y)&&(filled||[[1,0],[-1,0],[0,1],[0,-1]].some(([a,b])=>!inside(x+bit+a,y+b))))value|=128>>bit
+        return value
+    })
+}
+test('New native circles and ellipses exactly rasterize filled and outline shapes with clipping',()=>{
+    for(const [cx,cy,rx,ry] of [[25,20,8,8],[0,0,9,5],[94,62,13,4],[30,30,0,8],[30,30,8,0],[10,10,0,0],[48,32,-1,2],[32767,20,32767,12],[-32768,0,32767,32767],[48,32,32767,32767]])for(const filled of [false,true]) {
+        const m={maxSlices:20000}
+        execute(`clear()\n__tipy_native_ellipse(${cx},${cy},${rx},${ry},${filled?'True':'False'})\nrender()`,m)
+        assert.deepEqual(m.graph,expectedCurve(cx,cy,rx,ry,filled),`ellipse ${[cx,cy,rx,ry,filled]}`)
+        if(rx===ry&&rx>=0) {
+            const circle={maxSlices:20000};execute(`clear()\n__tipy_native_circle(${cx},${cy},${rx},${filled?'True':'False'})\nrender()`,circle)
+            assert.deepEqual(circle.graph,m.graph)
+            assert.doesNotMatch(circle.assembly,/__heap_start:|__gfx_mul32:|__gfx_ellipse:/)
+        }
+    }
+})
+function expectedPolygon(points,filled,closed=true) {
+    const pixels=new Uint8Array(6144)
+    const on=(x,y)=>{if(x>=0&&x<96&&y>=0&&y<64)pixels[y*96+x]=1}
+    if(filled&&points.length>=3)for(let y=0;y<64;y++)for(let x=0;x<96;x++) {
+        let inside=false
+        for(let i=0;i<points.length;i++) {
+            let [a,b]=points[i],[c,d]=points[(i+1)%points.length]
+            if(b>d){[a,c]=[c,a];[b,d]=[d,b]}
+            if(y>=b&&y<d&&(x-a)*(d-b)<(c-a)*(y-b))inside=!inside
+        }
+        if(inside)on(x,y)
+    }
+    const edge=([a,b],[c,d])=>{
+        const swap=Math.abs(d-b)>Math.abs(c-a)
+        if(swap){[a,b]=[b,a];[c,d]=[d,c]}
+        const dx=Math.abs(c-a),dy=Math.abs(d-b),sx=a<c?1:-1,sy=b<d?1:-1
+        for(let i=0;i<=dx;i++) {
+            const major=a+sx*i,minor=b+sy*(dx?Math.floor((Math.floor(dx/2)+i*dy)/dx):0)
+            if(swap)on(minor,major);else on(major,minor)
+        }
+    }
+    if(points.length===1)on(...points[0])
+    for(let i=1;i<points.length;i++)edge(points[i-1],points[i])
+    if(closed&&points.length>1)edge(points.at(-1),points[0])
+    return Uint8Array.from({length:768},(_,i)=>Array.from({length:8},(_,b)=>pixels[i*8+b]<<(7-b)).reduce((a,b)=>a|b,0))
+}
+test('Native polygon scanlines fill concave shapes and preserve exact i16 edge intersections',()=>{
+    for(const points of [[],[[4,5]],[[2,2],[20,20]],[[10,10],[40,10],[20,40]],[[4,4],[40,4],[40,12],[12,12],[12,40],[4,40]],[[5,5],[50,45],[5,45],[50,5]],[[-32768,-32768],[32767,32767],[32767,-32768]],[[-32768,10],[32767,11],[30,50]]])for(const filled of [false,true]) {
+        const source='['+points.map(p=>'('+p.join(',')+')').join(',')+']',m={maxSlices:20000}
+        execute(`clear()\n__tipy_native_polygon(${source},${filled?'True':'False'})\nrender()`,m)
+        assert.deepEqual(m.graph,expectedPolygon(points,filled),`polygon ${JSON.stringify(points)}, ${filled}`)
+        if(points.length===3) {
+            const triangle={maxSlices:20000};execute(`clear()\n__tipy_native_triangle(${points.flat().join(',')},${filled?'True':'False'})\nrender()`,triangle)
+            assert.deepEqual(triangle.graph,m.graph)
+        }
+    }
+    const points=[[1,1],[30,40],[80,2]],source='[(1,1),(30,40),(80,2)]'
+    for(const closed of [false,true]) {
+        const m={};execute(`clear()\n__tipy_native_polyline(${source},${closed?'True':'False'})\nrender()`,m)
+        assert.deepEqual(m.graph,expectedPolygon(points,false,closed))
+        assert.doesNotMatch(m.assembly,/__gfx_intersection:/)
+    }
+})
+test('Py5 matrix stack composes transforms and restores only the coordinate system',()=>{
+    const m={maxSlices:20000,project:true}
+    execute(`clear()
+no_fill()
+point(1,2)
+push_matrix()
+translate(40,20)
+scale(2,3)
+point(1,2)
+push_matrix()
+translate(1,1)
+point(0,0)
+pop_matrix()
+point(2,0)
+pop_matrix()
+point(3,4)
+render()`,m)
+    const expected={};execute('clear()\n' + [[1,2],[42,26],[42,23],[44,20],[3,4]].map(([x,y])=>`pixel_on(${x},${y})`).join('\n')+'\nrender()',expected)
+    assert.deepEqual(m.graph,expected.graph)
+})
+test('Py5 axis rotations accept radians and project 3D vertices orthographically',()=>{
+    const m={maxSlices:20000,project:true}
+    execute(`clear()
+push_matrix()
+translate(48,32,0)
+rotate_x(1.5707963267948966)
+point(0,0,10)
+pop_matrix()
+push_matrix()
+translate(48,32,0)
+rotate_y(1.5707963267948966)
+point(0,0,10)
+pop_matrix()
+push_matrix()
+translate(48,32)
+rotate(1.5707963267948966)
+point(10,0)
+pop_matrix()
+reset_matrix()
+point(0,0)
+render()`,m)
+    const expected={};execute('clear()\npixel_on(48,22)\npixel_on(58,32)\npixel_on(48,42)\npixel_on(0,0)\nrender()',expected)
+    assert.deepEqual(m.graph,expected.graph)
+    assert.doesNotMatch(m.assembly,/__native_sin_table:/)
+})
+
+test('Py5 fill, erasing, stroke widths and custom vertex paths preserve monochrome styles',()=>{
+    const m={project:true,maxSlices:20000}
+    execute(`clear()
+fill(BLACK)
+no_stroke()
+rect(2,2,30,30)
+fill(WHITE)
+circle(16,16,12)
+no_fill()
+stroke(BLACK)
+stroke_weight(2)
+rect(40,4,20,20)
+stroke_weight(1)
+begin_shape()
+vertex(65,5)
+vertex(85,5)
+vertex(75,25)
+end_shape(CLOSE)
+render()`,m)
+    const expected={};execute('clear()\nrectangle(2,31,2,31,1,True)\nrectangle(40,59,4,23,2,False)\nline(65,5,85,5)\nline(85,5,75,25)\nline(75,25,65,5)\nrender()',expected)
+    const erased=expectedCurve(16,16,6,6,true)
+    assert.deepEqual(m.graph,expected.graph.map((v,i)=>v&~erased[i]))
+    assert.doesNotMatch(m.assembly,/__gfx_sin_quarter:|__native_sin_table:/)
+})
+test('Py5 namespace aliases and background colors compile without a host library',()=>{
+    const m={project:true};execute('import py5 as p\nfrom py5 import WHITE as white\np.background(p.BLACK)\np.no_stroke()\np.fill(white)\np.rect(2,3,10,8)\nrender()',m)
+    const expected=new Uint8Array(768).fill(255)
+    for(let y=3;y<11;y++)for(let x=2;x<12;x++)expected[y*12+(x>>3)]&=~(128>>(x&7))
+    assert.deepEqual(m.graph,expected)
+})
+test('Py5 helper pruning preserves drawing and transforms in definition-time defaults',()=>{
+    const source='def effect():\n    circle(10,10,4)\n    return 0\ndef unused(int value=effect()):\n    pass\nno_fill()\npoint(0,0)\nrender()'
+    const expected={seedGraph:new Uint8Array(768).fill(255)}
+    execute('__tipy_native_ink(0)\n__tipy_native_circle(10,10,2,True)\n__tipy_native_ink(1)\n__tipy_native_circle(10,10,2,False)\npixel_on(0,0)\nrender()',expected)
+    for(const optimization of ['reference','aggressive']) {
+        const m={optimization,project:true,seedGraph:new Uint8Array(768).fill(255)};execute(source,m);assert.deepEqual(m.graph,expected.graph)
+        const transformed={optimization,project:true}
+        execute('def move():\n    translate(20,10)\n    return 0\ndef unused(int value=move()):\n    pass\nclear()\npoint(0,0)\nrender()',transformed)
+        assert.deepEqual(transformed.graph,Uint8Array.from({length:768},(_,i)=>i===10*12+2?8:0))
+    }
+})
+test('Py5 transforms preserve caller vertices and reclaim repeated temporary shapes',()=>{
+    const m={project:true,maxSlices:20000}
+    const v=execute(`clear()
+no_fill()
+points=[(0,0),(8,0),(4,8)]
+for frame in range(30):
+    push_matrix()
+    translate(20,10)
+    scale(2,1)
+    polygon(points)
+    pop_matrix()
+render()`,m)
+    assert.deepEqual(v.points,[[0,0],[8,0],[4,8]])
+    assert.deepEqual(m.graph,expectedPolygon([[20,10],[36,10],[28,18]],false))
+})
+for(const name of ['graphics_2d.tip','graphics_3d_ready.tip'])test(`Py5 example ${name} runs through browser compilation`,()=>{
+    const source=readFileSync(resolve('../../examples/'+name),'utf8')
+    for(const optimization of ['reference','aggressive']) {
+        const m={project:true,optimization,maxSlices:20000};execute(source,m)
+        assert.ok(m.graph.some(v=>v));assert.ok(m.frames.length===1)
+        assert.ok(m.bytes<0xfffe-0x9d95)
+    }
+})
+
 const featureDemo = readFileSync(resolve('../../examples/feature_test.tip'),'utf8')
 const featureTitles = [...featureDemo.matchAll(/begin\("([^"]+)"\)/g)].map(match=>match[1])
 for(let page=1;page<=24;page++)test(`Feature demo page ${page} displays six native passes`,t=>{

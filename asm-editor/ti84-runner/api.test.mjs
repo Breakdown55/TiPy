@@ -45,6 +45,16 @@ test('HTTP compile resolves callbacks throughout the complete feature demo',asyn
         }
     })
 })
+test('HTTP compile supports py5-style 2D and orthographic 3D demos',async()=>{
+    await withServer(process.env.TIPY_PYTHON || 'python',async url=>{
+        for(const name of ['graphics_2d.tip','graphics_3d_ready.tip']) {
+            const source=await readFile(new URL('../../examples/'+name,import.meta.url),'utf8')
+            const response=await post(url,{files:{'main.tip':source},entry:'main.tip'})
+            const result=await response.json()
+            assert.equal(response.status,200,JSON.stringify(result.error));assert.equal(result.ok,true)
+        }
+    })
+})
 
 test('HTTP compile returns Python source locations and no assembly on failure',async () => {
     await withServer(process.env.TIPY_PYTHON || 'python',async url => {

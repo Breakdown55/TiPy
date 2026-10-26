@@ -5,13 +5,15 @@ from .errors import CompileError
 
 MEMBERS = {"time": {"sleep"}, "random": {"randint", "seed"},
            "math": {"radians", "sin", "cos"}}
+from .graphics_library import PUBLIC
+MEMBERS['py5']=PUBLIC|{'line','BLACK','WHITE','CLOSE','OPEN'}
 
 
 def imports(source):
     bindings, lines = {}, []
     for text in source.splitlines():
-        match = re.fullmatch(r"(\s*)import (time|random|math)(?:\s+as\s+(\w+))?\s*(?:#.*)?", text)
-        selected = re.fullmatch(r"(\s*)from (time|random|math) import (.+)", text.split("#", 1)[0].rstrip())
+        match = re.fullmatch(r"(\s*)import (time|random|math|py5)(?:\s+as\s+(\w+))?\s*(?:#.*)?", text)
+        selected = re.fullmatch(r"(\s*)from (time|random|math|py5) import (.+)", text.split("#", 1)[0].rstrip())
         if match:
             indent, module, alias = match.groups()
             bindings[alias or module] = module
@@ -39,10 +41,19 @@ def resolve(tree, bindings):
                 if module in MEMBERS:
                     if item["name"] not in MEMBERS[module]:
                         raise CompileError(f"Unsupported {module} member {item['name']!r}", item)
-                    item.update(kind="stdlib", name=module + "." + item["name"])
+                    item.update(kind="call" if module=='py5' else "stdlib", name=item['name'] if module=='py5' else module + "." + item["name"])
                     del item["base"]
             elif item.get("kind") == "call" and "." in scope.get(item["name"], ""):
-                item.update(kind="stdlib", name=scope[item["name"]])
+                target=scope[item['name']];item.update(kind='call' if target.startswith('py5.') else 'stdlib',name=target[4:] if target.startswith('py5.') else target)
+            constants={'BLACK':0,'WHITE':255,'CLOSE':True,'OPEN':False}
+            constant=None
+            if item.get('kind')=='attribute' and item['base'].get('kind')=='name' and scope.get(item['base']['name'])=='py5':
+                if item['name'] not in constants:raise CompileError('Unsupported py5 attribute',item)
+                constant=item['name']
+            elif item.get('kind')=='name' and scope.get(item['name'],'').startswith('py5.'):
+                constant=scope[item['name']][4:]
+            if constant in constants:
+                value=constants[constant];location={k:item[k] for k in ('filename','line','column') if k in item};item.clear();item.update(kind='boolean' if isinstance(value,bool) else 'number',value=value,**location)
             targets = item.get("names", [item.get("name")])
             if item.get("kind") in {"declare", "parameter", "for", "assign", "function"} and any(target in scope for target in targets):
                 raise CompileError("Cannot rebind a native module import", item)

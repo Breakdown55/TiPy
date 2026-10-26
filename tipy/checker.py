@@ -5,12 +5,16 @@ from .errors import CompileError
 from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_types, dynamic_tuple, is_set, element as element_type, is_view, view_types, iterable_element, is_cell, is_closure, is_iterator, iterator_types, is_optional, is_object,all_types
 
 PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
-GRAPHICS_BUILTINS = PIXEL_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
+SHAPE_BUILTINS = {"circle","ellipse","triangle","polygon","polyline"}
+from .graphics_library import PUBLIC as PY5_BUILTINS
+GRAPHICS_BUILTINS = PIXEL_BUILTINS | SHAPE_BUILTINS | PY5_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
 PYTHON_BUILTINS = {"range", "list", "abs", "sum", "min", "max", "any", "all", "enumerate", "zip"}
 
 
 def check(tree):
     checked = deepcopy(tree)
+    from .graphics_library import install as install_graphics
+    install_graphics(checked)
     from .classes import prepare as lower_classes
     lower_classes(checked)
     classes=checked["classes"]
@@ -1009,6 +1013,40 @@ def check(tree):
             item["kind"] = "text_print" if name == "print" else "text_input"
             value_type = "void" if name == "print" else "i16" if expected_element in {"int", "i16", "u8"} else "str"
             if value_type == "str": item["owned"] = True
+        elif kind=='call' and item['name'] in {'__tipy_native_background','__tipy_native_ink','__tipy_native_add','__tipy_native_sin_raw'}:
+            name,args=item['name'],item['arguments']
+            if len(args)!=(2 if name=='__tipy_native_add' else 1):raise CompileError('Invalid native graphics arguments',item)
+            for arg in args:
+                if expression(arg)[0] not in {'i16','u8'}:raise CompileError('Native graphics arguments require integers',arg)
+            if name=='__tipy_native_sin_raw':
+                item.update(kind='graphics_value',name='sin_raw',type='fixed');return 'fixed',None
+            result='i16' if name=='__tipy_native_add' else 'void'
+            item.update(kind='graphics_value' if result=='i16' else 'graphics',name='sat_add' if result=='i16' else 'background' if name=='__tipy_native_background' else 'ink',type=result);return result,None
+        elif kind=='call' and item['name']=='__tipy_native_stroke':
+            args=item['arguments']
+            if len(args)!=3:raise CompileError('Invalid native stroke arguments',item)
+            if expression(args[0],expected_element='tuple[i16,i16]')[0]!='tuple[i16,i16][]' or expression(args[1])[0]!='bool' or expression(args[2])[0] not in {'i16','u8'}:raise CompileError('Invalid native stroke argument type',item)
+            item.update(kind='graphics',name='stroke',type='void');return 'void',None
+        elif kind=='call' and item['name']=='__tipy_native_rectangle':
+            args=item['arguments']
+            if len(args)!=6:raise CompileError('Invalid native rectangle arguments',item)
+            for i,arg in enumerate(args):
+                if expression(arg)[0] not in ({'bool'} if i==5 else {'i16','u8'}):raise CompileError('Invalid native rectangle argument type',arg)
+            item.update(kind='graphics',name='styled_rectangle',type='void');return 'void',None
+        elif kind == "call" and (item["name"] in SHAPE_BUILTINS or item['name'].removeprefix('__tipy_native_') in SHAPE_BUILTINS):
+            item['name']=item['name'].removeprefix('__tipy_native_')
+            name,args=item['name'],item['arguments']
+            counts={"circle":(4,),"ellipse":(5,),"triangle":(7,),"polygon":(2,),"polyline":(1,2)}
+            if len(args) not in counts[name]:raise CompileError(f"Invalid arguments to {name}",item)
+            if name=='polyline' and len(args)==1:args.append({"kind":"boolean","value":False,"line":item['line'],"column":item['column']})
+            for i,arg in enumerate(args):
+                t,c=expression(arg,expected_element='tuple[i16,i16]' if name in {'polygon','polyline'} and i==0 else None)
+                if i==len(args)-1:
+                    if t!='bool':raise CompileError("Shape filled/closed must be bool",arg)
+                elif name in {'polygon','polyline'}:
+                    if t!='tuple[i16,i16][]':raise CompileError("Shape points must be a list of (int x, int y) tuples",arg)
+                elif t not in {'i16','u8'}:raise CompileError("Shape coordinates and radii must be integers",arg)
+            item.update(kind='graphics',type='void');return 'void',None
         elif kind == "call" and item["name"] in GRAPHICS_BUILTINS and item["name"] not in functions:
             name = item["name"]
             count = 2 if name in PIXEL_BUILTINS else 0 if name in {"clear", "render"} else 6 if name == "rectangle" else 4
