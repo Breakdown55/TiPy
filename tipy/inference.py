@@ -1,5 +1,5 @@
 """Return-shape inference before call checking; definite assignment is separate."""
-from .types import is_dict,dict_types,is_tuple,tuple_types,is_set,element
+from .types import is_dict,dict_types,is_tuple,tuple_types,is_set,element,iterable_element,is_iterator
 import re
 
 
@@ -8,15 +8,30 @@ def infer_returns(tree):
     automatic={name for name,f in functions.items() if f["return_type"]=="auto"}
     globals_={}
     def norm(t):return re.sub(r"\bint\b","i16",t)
+    def merge(a,b):
+        if not a:return b
+        if not b or a==b:return a
+        if a=="none":return b if b.startswith("optional[") else f"optional[{b}]"
+        if b=="none":return a if a.startswith("optional[") else f"optional[{a}]"
+        if a==f"optional[{b}]":return a
+        if b==f"optional[{a}]":return b
+        return None
     def expr(n,scope):
         k=n["kind"]
+        if k=="none":return "none"
+        if k=="identity":return "bool"
         if k in {"number","hash","cast_int"}:return "i16"
         if k in {"boolean","compare","compare_chain","and","or","not","membership"}:return "bool"
         if k in {"string","fstring","format_value"}:return "str"
         if k=="decimal":return "fixed"
-        if k=="conditional":return expr(n["body"],scope) or expr(n["alternative"],scope)
+        if k=="conditional":return merge(expr(n["body"],scope),expr(n["alternative"],scope))
         if k=="name":return scope.get(n["name"],globals_.get(n["name"]))
-        if k in {"add","subtract","multiply","floor_divide","modulo","negate"}:return expr(n.get("left",n.get("value")),scope)
+        if k=="closure":
+            functions[n["function"]]["capture_hints"]={v["name"]:scope.get(v["name"],globals_.get(v["name"])) for v in n["captures"]}
+            return f"closure[{n['function']}]"
+        if k in {"add","subtract","multiply","floor_divide","modulo","negate"}:
+            t=expr(n.get("left",n.get("value")),scope)
+            return t[9:-1] if t and t.startswith("optional[") else t
         if k=="tuple":
             ts=[expr(v,scope) for v in n["values"]]
             return "tuple["+",".join(ts)+"]" if all(ts) else None
@@ -39,14 +54,21 @@ def infer_returns(tree):
         if k=="call":
             name=n["name"]
             if name in functions:
-                t=functions[name]["return_type"];return norm(t) if t!="auto" else None
+                f=functions[name]
+                if f.get("generator"):
+                    t=f.get("yield_type","auto");return f"iter[{norm(t)},generator,{name}]" if t!="auto" else None
+                t=f["return_type"];return norm(t) if t!="auto" else None
             if name in {"int","len","abs","sum","min","max","hash","ord"}:return "i16"
             if name in {"input","str","chr","repr"}:return "str"
             if name=="set":
                 if not n["arguments"]:return "set[i16]"
                 t=expr(n["arguments"][0],scope)
                 return t if t and is_set(t) else f"set[{t[:-2]}]" if t and t.endswith("[]") else "set[str]" if t=="str" else None
-            if name in {"range","list"}:return "i16[]" if not n["arguments"] or name=="range" else expr(n["arguments"][0],scope)
+            if name=="range":return "i16[]"
+            if name=="list":
+                if not n["arguments"]:return "i16[]"
+                t=expr(n["arguments"][0],scope);e=iterable_element(t) if t else None
+                return e+"[]" if e else None
         if k=="method":
             t=expr(n["base"],scope)
             if n["name"]=="copy":return t
@@ -70,6 +92,9 @@ def infer_returns(tree):
             if k in {"declare","assign"}:
                 t=expr(n["value"],scope);declared=norm(n.get("type","auto"))
                 if declared!="auto" and not (t and t.endswith("[]")):t=declared
+                if declared=="auto":
+                    combined=merge(scope.get(n["name"],n.get("inferred_type")),t)
+                    if combined and combined.startswith("optional["):n["inferred_type"]=combined;t=combined
                 if t:scope[n["name"]]=t
             elif k=="return":
                 t=expr(n["value"],scope) if n["value"] else "void"
@@ -83,13 +108,42 @@ def infer_returns(tree):
                         key,value=dict_types(source);elements=[key,value] if iterable["name"]=="items" else [value] if iterable["name"]=="values" else [key]
                 elif t and t.endswith("[]"):elements=[t[:-2]]
                 elif t and is_dict(t):elements=[dict_types(t)[0]]
+                elif t and is_iterator(t):elements=[iterable_element(t)]
                 for name,element in zip(n.get("names",[n["name"]]),elements):scope[name]=element
                 scan(n["body"],scope,returns)
-            elif k in {"if","while"}:
+            elif k in {"if","while","try_except","try_finally"}:
                 scan(n["body"],scope,returns);scan(n.get("alternative",[]),scope,returns)
+                scan(n.get("final",[]),scope,returns)
+                for handler in n.get("handlers",[]):scan(handler["body"],scope,returns)
+    def annotate(items,scope):
+        for n in items:
+            t=scope.get(n.get("name"),"")
+            if n["kind"] in {"assign","declare"} and n.get("type","auto")=="auto":
+                v=n["value"]
+                if t.startswith("optional[") or v["kind"]=="list" and not v["values"] and t.endswith("[]"):n["inferred_type"]=t
+            if n["kind"]!="function":
+                for key in ("body","alternative","final"):
+                    if isinstance(n.get(key),list):annotate(n[key],scope)
     for _ in range(max(2,len(functions)+1)):
         scan(tree["body"],globals_,[])
+        annotate(tree["body"],globals_)
+        for name,f in functions.items():
+            if f.get("generator") and f.get("yield_type")=="auto":
+                scope={p["name"]:norm(p["type"]) for p in f["params"]};scan(f["body"],scope,[])
+                def yields(n):
+                    if isinstance(n,dict):
+                        if n.get("kind")=="yield":yield expr(n["value"],scope)
+                        else:
+                            for v in n.values():yield from yields(v)
+                    elif isinstance(n,list):
+                        for v in n:yield from yields(v)
+                ts=list(yields(f["body"]))
+                if ts and all(ts) and len(set(ts))==1:f["yield_type"]=ts[0]
         for name in automatic:
-            f=functions[name];scope={p["name"]:norm(p["type"]) for p in f["params"]};returns=[]
+            f=functions[name];scope={**{k:v for k,v in f.get("capture_hints",{}).items() if v},**{p["name"]:norm(p["type"]) for p in f["params"]}};returns=[]
             scan(f["body"],scope,returns)
-            if returns and len(set(returns))==1:f["return_type"]=returns[0]
+            annotate(f["body"],scope)
+            if returns:
+                t=returns[0]
+                for other in returns[1:]:t=merge(t,other)
+                if t:f["return_type"]=t

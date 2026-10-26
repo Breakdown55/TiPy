@@ -17,7 +17,7 @@ def walk(item):
 def reachable(tree):
     functions = {item["label"]: item for item in tree["body"] if item["kind"] == "function"}
     def calls(items):
-        return {node["symbol"] for node in walk(items) if node.get("kind") == "call" and "symbol" in node and not node.get("unreachable")}
+        return {node["symbol"] for node in walk(items) if node.get("kind") in {"call","closure_call","closure","function_ref","iterator_map"} and "symbol" in node and not node.get("unreachable")}
     live = calls([item for item in tree["body"] if item["kind"] != "function"])
     pending = list(live)
     while pending:
@@ -179,6 +179,7 @@ class ConstantPropagation:
 
 
 def pure_total(item):
+    if item.get("cell"):return False
     kind = item["kind"]
     if kind in {"number", "boolean", "name", "constant_list", "void_constant"}: return True
     if kind in {"negate", "not"}: return pure_total(item["value"])
@@ -208,6 +209,7 @@ def inline_small_functions(tree):
     for function in [item for item in tree["body"] if item["kind"] == "function"]:
         body = [item for item in function["body"] if item["kind"] != "pass"]
         if len(body) != 1 or body[0]["kind"] != "return" or body[0]["value"] is None: continue
+        if function.get("cell_names") or function.get("captures"):continue
         value = body[0]["value"]
         if managed(value["type"]) or not pure_total(value): continue
         if sum("kind" in node for node in walk(value)) > 8: continue
@@ -337,6 +339,10 @@ def optimize_program(checked, symbols, mode):
     tree = deepcopy(checked)
     report = [{"pass": "mode", "value": mode}]
     if mode == "reference": return tree, symbols, report
+    if tree.get("tracing_heap") or any(n.get("cell") or n.get("kind") in {"closure","closure_call","function_ref"} for n in walk(tree)):
+        report.append({"pass":"closure-alias-safety","preserved":True})
+        reachable(tree)
+        return tree,symbols,report
     removed_functions = reachable(tree)
     report.append({"pass": "function-reachability", "removed": removed_functions})
     if mode == "aggressive":

@@ -78,6 +78,34 @@ class Parser:
 
     def statement(self):
         start = self.current
+        if start["kind"]=="YIELD":
+            self.take("YIELD");value=node("none",start) if self.current["kind"]=="NEWLINE" else self.expression_list()
+            self.take("NEWLINE");return node("yield",start,value=value)
+        if start["kind"]=="TRY":
+            self.take("TRY");body=self.suite();handlers=[];alternative=[];final=[]
+            while self.current["kind"]=="EXCEPT":
+                token=self.take("EXCEPT");types=[];name=None
+                if self.current["value"]!=":":
+                    if self.current["value"]=="(":
+                        self.take("OP","(");types.append(self.take("NAME")["value"])
+                        while self.current["value"]==",":self.take("OP",",");types.append(self.take("NAME")["value"])
+                        self.take("OP",")")
+                    else:types.append(self.take("NAME")["value"])
+                    if self.current["kind"]=="AS":self.take("AS");name=self.take("NAME")["value"]
+                handlers.append(node("except",token,types=types,name=name,body=self.suite()))
+            if self.current["kind"]=="ELSE":self.take("ELSE");alternative=self.suite()
+            if self.current["kind"]=="FINALLY":self.take("FINALLY");final=self.suite()
+            if not handlers and not final:raise CompileError("try requires except or finally",start)
+            if alternative and not handlers:raise CompileError("try else requires except",start)
+            result=node("try_except",start,body=body,handlers=handlers,alternative=alternative) if handlers else None
+            return node("try_finally",start,body=[result] if result else body,final=final) if final else result
+        if start["kind"] in {"RAISE","ASSERT"}:
+            self.take(start["kind"]);value=None if self.current["kind"]=="NEWLINE" else self.expression();message=None
+            if self.current["value"]==",":self.take("OP",",");message=self.expression()
+            self.take("NEWLINE");return node(start["value"],start,value=value,message=message)
+        if start["kind"]=="NONLOCAL":
+            self.take("NONLOCAL");names=self.targets();self.take("NEWLINE")
+            return node("nonlocal",start,names=names)
         if start["kind"] == "DEF":
             self.take("DEF")
             name = self.take("NAME")["value"]
@@ -192,6 +220,16 @@ class Parser:
         return node("assign", start, name=name, value=value, inferred=operator["value"] == "=")
 
     def expression(self,conditional=True):
+        if self.current["kind"]=="LAMBDA":
+            token=self.take("LAMBDA");params=[]
+            if self.current["value"]!=":":
+                while True:
+                    p=self.current;t=self.type_name() if p["kind"]=="TYPE" else "int";name=self.take("NAME")["value"]
+                    params.append(node("parameter",p,type=t,name=name))
+                    if self.current["value"]!=",":break
+                    self.take("OP",",")
+            self.take("OP",":")
+            return node("lambda",token,params=params,value=self.expression())
         result = self.boolean_and()
         while self.current["kind"] == "OR":
             token = self.take("OR")
@@ -227,6 +265,10 @@ class Parser:
 
     def comparison(self):
         result = self.bit_or()
+        if self.current["kind"]=="IS":
+            token=self.take("IS");negate=False
+            if self.current["kind"]=="NOT":self.take("NOT");negate=True
+            return node("identity",token,left=result,right=self.bit_or(),negate=negate)
         if self.current["kind"] == "IN" or self.current["kind"] == "NOT" and self.tokens[self.index + 1]["kind"] == "IN":
             token = self.current
             negate = self.current["kind"] == "NOT"
@@ -283,6 +325,7 @@ class Parser:
 
     def atom(self):
         token = self.current
+        if token["kind"]=="NONE":self.take("NONE");return node("none",token)
         if token["kind"]=="FSTRING":
             import ast
             from .lexer import tokenize

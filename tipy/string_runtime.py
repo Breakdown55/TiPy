@@ -14,6 +14,10 @@ class StringRoutine(Routine):
 
 def routines():
     out=[]
+    r=Routine("exception",("object",),("message",),prefix="__str_")
+    r.set("message",("call","__obj_read","object",1))
+    r.if_(("eq","message",0),lambda:r.ret(call("new",1)))
+    r.ret(call("retain","message"));out.append(r.finish())
     r=StringRoutine("get",("object","index"),("result",))
     r.set("index",call("normalize","object","index"));r.set("result",call("new",1))
     r.invoke("append","result",byte(add(word("object"),"index")));r.ret("result");out.append(r.finish())

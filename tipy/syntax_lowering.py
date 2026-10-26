@@ -22,6 +22,7 @@ def prepare(tree):
                         serial+=1;name=f"$default_{serial}"
                         result.append({"kind":"declare","name":name,"type":p["type"],"value":p.pop("default"),**loc})
                         p["default_ref"]={"kind":"name","name":name,**loc};seen_default=True
+                    elif p.get("default_capture"):seen_default=True
                     elif seen_default:raise CompileError("A required parameter cannot follow a default parameter",p)
                 n["body"]=body(n["body"])
             elif k in {"for","while"}:
@@ -37,6 +38,11 @@ def prepare(tree):
                 continue
             elif k=="if":
                 n["body"]=body(n["body"],break_flag);n["alternative"]=body(n["alternative"],break_flag)
+            elif k in {"try_except","try_finally"}:
+                n["body"]=body(n["body"],break_flag)
+                for handler in n.get("handlers",[]):handler["body"]=body(handler["body"],break_flag)
+                for key in ("alternative","final"):
+                    if key in n:n[key]=body(n[key],break_flag)
             elif k=="break" and break_flag:
                 result.append({"kind":"assign","name":break_flag,"inferred":False,"value":{"kind":"boolean","value":False,**loc},**loc})
             result.append(n)

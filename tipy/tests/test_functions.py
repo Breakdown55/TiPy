@@ -44,7 +44,7 @@ class FunctionTests(unittest.TestCase):
             ("def f() -> int:\n    int A=A\n    return A", "may not be initialized"),
             ("def f(int A) -> int:\n    int A=2\n    return A", "already declared"),
             ("def f() -> int:\n    break\n    return 1", "break must be inside"),
-            ("def f() -> void:\n    def g() -> void:\n        pass", "Nested functions"),
+            ("def f() -> void:\n    nonlocal missing", "nonlocal requires"),
             ("int A=f()\nint B=12\ndef f() -> int:\n    return B", "uninitialized global"),
             ("int A=1\ndef f() -> void:\n    A+=2\nf()", "global writes"),
         ]

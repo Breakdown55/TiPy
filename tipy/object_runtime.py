@@ -5,6 +5,14 @@ from .list_runtime import Routine, add, sub, word, byte, call
 
 def routines(has_dict=True):
     out=[]
+    r=Routine("optional_get",("object",),prefix="__obj_")
+    r.if_(("eq","object",0),lambda:r.fail(17));r.ret(call("get","object",0));out.append(r.finish())
+    r=Routine("cell_set",("cell","value"),("old",),prefix="__obj_")
+    r.set("old",word(word("cell")))
+    def managed_field():
+        r.expr(("call","__obj_release","old"))
+    r.if_(("ne",byte(word(add("cell",10))),0),managed_field)
+    r.write(word("cell"),"value");r.ret("value");out.append(r.finish())
     for name in ("shift_left","shift_right"):
         r=Routine(name,("value","count"),prefix="__obj_")
         r.if_(("negative","count"),lambda:r.fail(14))

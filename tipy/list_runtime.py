@@ -8,7 +8,7 @@ The small emitter below is only an authoring aid; all operations run as Z80.
 import re
 
 HEAP_BYTES = 8192
-RUNTIME_TARGET = re.compile(r"\b(?:call|jp)\s+((?:__arr_|__dict_|__obj_|__str_|__set_)[A-Za-z0-9_]+)\b")
+RUNTIME_TARGET = re.compile(r"\b(?:(?:call|jp)\s+|ld\s+(?:hl|de|bc),)((?:__arr_|__dict_|__obj_|__str_|__set_)[A-Za-z0-9_]+)\b")
 
 
 def add(a, b): return ("+", a, b)
@@ -138,7 +138,7 @@ class Routine:
         return "\n".join(self.code)
 
 
-def runtime_assembly(required=None, dictionary_types=None, object_types=None):
+def runtime_assembly(required=None, dictionary_types=None, object_types=None, tracing=False, generators=False):
     from .types import complex_type, managed
     nested = object_types is None or any(complex_type(t) for t in object_types)
     routines = []
@@ -154,10 +154,15 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None):
     r.ret(word(add("object", 2)))
     routines.append(r.finish())
 
-    r = Routine("malloc", ("need",), ("p", "size", "spare", "next"))
-    r.if_(("uge", "@__heap_end", "$sp"), lambda: r.fail(3))
-    r.if_(("ult", sub("$sp", "@__heap_end"), 256), lambda: r.fail(3))
+    r = Routine("malloc", ("need",), ("p", "size", "spare", "next","retried"))
+    if generators:
+        r.if_(("ult","$sp",("call","__obj_stack_floor")),lambda:r.fail(3))
+    else:
+        r.if_(("uge", "@__heap_end", "$sp"), lambda: r.fail(3))
+        r.if_(("ult", sub("$sp", "@__heap_end"), 256), lambda: r.fail(3))
     r.if_(("eq", "need", 0), lambda: r.set("need", 1))
+    if tracing:
+        r.set("retried",0);retry=r.label();r.mark(retry)
     r.set("p", "@__heap_start")
     def allocate_block():
         r.set("size", word("p"))
@@ -171,11 +176,18 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None):
                     r.write(add("next", 2), 1)
                 r.if_(("uge", "spare", 6), split)
                 r.write(add("p", 2), 0)
+                if tracing:
+                    r.expr(add("p",4));r.emit("push hl");r.expr("need");r.emit("ld b,h","ld c,l","pop hl")
+                    zero=r.label();r.mark(zero);r.emit("ld (hl),0","inc hl","dec bc","ld a,b","or c",f"jp nz,{zero}")
                 r.ret(add("p", 4))
             r.if_(("uge", "size", "need"), fits)
         r.if_(("eq", word(add("p", 2)), 1), free_block)
         r.set("p", add(add("p", 4), "size"))
     r.while_(("ult", "p", "@__heap_end"), allocate_block)
+    if tracing:
+        def collect():
+            r.set("retried",1);r.expr(("call","__obj_gc_collect"));r.emit(f"jp {retry}")
+        r.if_(("eq","retried",0),collect)
     r.fail(3)
     routines.append(r.finish())
 
@@ -426,11 +438,21 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None):
     routines.extend(dictionary_routines(
         key_strings=dictionary_types is None or any(key == "str" for key, _ in dictionary_types),
         value_strings=dictionary_types is None or any(managed(value) for _, value in dictionary_types)))
+    if tracing:
+        from .gc_runtime import routines as gc_routines
+        routines.extend(gc_routines(generators))
+    if generators:
+        from .generator_runtime import routines as generator_routines
+        routines.extend(generator_routines())
     routines.append("""__arr_fail:
         ld (__list_error),hl
         ld sp,(__list_main_sp)
         ld ix,(__list_main_ix)
         ret""")
+    if tracing:
+        routines[-1]="__arr_fail:\n        ld de,0\n        ld (__exception_message),de\n        jp __obj_throw"
+        from .exception_runtime import assembly
+        routines.extend(assembly())
     if required is None:
         return "\n\n".join(routines)
     by_name = {routine.split(":", 1)[0]: routine for routine in routines}

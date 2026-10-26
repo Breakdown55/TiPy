@@ -56,7 +56,9 @@ def tokenize(source, *, expand_defines=True):
                 token["kind"] = "TYPE"
             elif kind == "NAME" and text in {"True", "False"}:
                 token["kind"] = "BOOL"
-            elif kind == "NAME" and text in {"if", "elif", "else", "pass", "while", "break", "continue", "def", "return", "for", "in", "and", "or", "not", "del"}:
+            elif kind=="NAME" and text in {"None","is"}:token["kind"]=text.upper()
+            elif kind=="NAME" and text=="yield":token["kind"]="YIELD"
+            elif kind == "NAME" and text in {"if", "elif", "else", "pass", "while", "break", "continue", "def", "return", "for", "in", "and", "or", "not", "del", "lambda", "nonlocal", "try", "except", "finally", "raise", "assert", "as"}:
                 token["kind"] = text.upper()
             elif kind == "NUMBER":
                 token["value"] = int(text, 16 if text.lower().startswith("0x") else 10)

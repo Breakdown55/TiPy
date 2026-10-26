@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from .errors import CompileError
-from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_types, dynamic_tuple, is_set, element as element_type, is_view, view_types, iterable_element
+from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_types, dynamic_tuple, is_set, element as element_type, is_view, view_types, iterable_element, is_cell, is_closure, is_iterator, iterator_types, is_optional
 
 PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
 GRAPHICS_BUILTINS = PIXEL_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
@@ -11,10 +11,23 @@ PYTHON_BUILTINS = {"range", "list", "abs", "sum", "min", "max", "any", "all", "e
 
 def check(tree):
     checked = deepcopy(tree)
+    from .closures import prepare as lower_closures
+    lower_closures(checked)
     from .syntax_lowering import prepare as lower_syntax
     lower_syntax(checked)
+    def uses_exceptions(n):
+        if isinstance(n,dict):return n.get("kind") in {"try_except","try_finally","raise","assert"} or any(uses_exceptions(v) for v in n.values())
+        return isinstance(n,list) and any(uses_exceptions(v) for v in n)
+    checked["tracing_heap"]=uses_exceptions(checked)
     from .comprehensions import prepare
     prepare(checked)
+    def yielded(n):
+        if isinstance(n,dict):return n.get("kind")=="yield" or any(yielded(v) for v in n.values())
+        return isinstance(n,list) and any(yielded(v) for v in n)
+    for f in checked["body"]:
+        if f["kind"]=="function" and yielded(f["body"]):
+            f["generator"]=True;f["yield_type"]=f["return_type"];f["return_type"]="void";checked["tracing_heap"]=True
+    checked["generators"]=any(f.get("generator") for f in checked["body"])
     from .inference import infer_returns
     infer_returns(checked)
     globals_ = {}
@@ -51,6 +64,7 @@ def check(tree):
                 return isinstance(value, list) and any(valued_return(v) for v in value)
             statement["return_type"] = "i16" if valued_return(statement["body"]) else "void"
         statement["return_type"] = normalize(statement["return_type"])
+        if statement.get("generator"):statement["yield_type"]=normalize(statement.get("yield_type","i16"))
         if statement["return_type"] == "void[]":
             raise CompileError("An array cannot have void elements", statement)
         statement["label"] = f"__fn_{len(functions)}"
@@ -73,8 +87,13 @@ def check(tree):
         item["storage"] = symbol.get("storage", "global")
         if "offset" in symbol:
             item["offset"] = symbol["offset"]
+        for field in ("cell","capture_index","env_slot"):
+            if field in symbol:item[field]=symbol[field]
 
     def lookup(name, item, writing=False):
+        function=context["function"]
+        if function and name in function.get("capture_types",{}):
+            return {"label":"$capture_"+name,"type":function["capture_types"][name],"cell":True,"capture_index":function["captures"].index(name),"env_slot":function["locals"]["$env"]}
         if name in context["locals"]:
             if name not in context["initialized"]:
                 raise CompileError(f"Variable {name!r} may not be initialized on this branch", item)
@@ -87,6 +106,12 @@ def check(tree):
         raise CompileError(f"Variable {name!r} has not been declared", item)
 
     def compatible(target, source_type, constant, item):
+        if is_optional(target) or is_optional(source_type) or "none" in {target,source_type}:
+            if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}",item)
+            return
+        if is_iterator(target) or is_iterator(source_type) or is_cell(target) or is_cell(source_type) or is_closure(target) or is_closure(source_type):
+            if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}",item)
+            return
         if is_view(target) or is_view(source_type):
             if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}",item)
             return
@@ -126,7 +151,13 @@ def check(tree):
     def expression(*args,**kwargs):
         nonlocal expression_depth
         expression_depth+=1
-        try:return _expression(*args,**kwargs)
+        try:
+            t,c=_expression(*args,**kwargs);expected=kwargs.get("expected_element")
+            if expected and is_optional(expected) and t!=expected:
+                if t!="none" and t!=expected[9:-1]:raise CompileError(f"Cannot assign {t} to {expected}",args[0])
+                item=args[0];value=deepcopy(item);item.clear();item.update(kind="optional_box",value=value,type=expected,owned=True,line=value["line"],column=value["column"])
+                t=expected;c=None
+            return t,c
         finally:expression_depth-=1
 
     def scratch(type_name,index):
@@ -155,7 +186,7 @@ def check(tree):
                 return {key:replace(v) for key,v in value.items()}
             if isinstance(value,list):return [replace(v) for v in value]
             return value
-        for field in ("base","arguments","left","right","value"):
+        for field in ("base","arguments","left","right","value","sources"):
             if field in item:item[field]=replace(item[field])
         item["evaluations"]=snapshots
 
@@ -179,6 +210,9 @@ def check(tree):
         return result,order
 
     def iterable_list(source,t,item):
+        if is_iterator(t):
+            result=iterable_element(t)+"[]"
+            return {"kind":"iterator_list","base":source,"type":result,"owned":True},result
         if is_dict(t) or is_set(t) or is_view(t):
             mode="keys"
             if is_view(t):
@@ -197,9 +231,42 @@ def check(tree):
         if t.endswith("[]"):return source,t
         raise CompileError("Value is not iterable",item)
 
+    def make_iterator(source,t,item,reverse=False):
+        if is_iterator(t):
+            if reverse:raise CompileError("reversed requires an indexed sequence",item)
+            return source,t
+        mode="sequence"
+        if is_view(t):
+            mode,t=view_types(t);source={"kind":"view_target","base":source,"type":t,"owned":True}
+        elif is_dict(t) or is_set(t):mode="keys"
+        elif t=="str":mode="string"
+        value=iterable_element(t)
+        if mode=="items":value="tuple["+",".join(dict_types(t))+"]"
+        elif mode=="values":value=dict_types(t)[1]
+        if value is None:raise CompileError("Iteration requires a homogeneous element type",item)
+        if reverse and mode not in {"sequence","string"}:raise CompileError("reversed requires a sequence",item)
+        result=f"iter[{value},{mode},{t}]"
+        return {"kind":"iterator_new","base":source,"reverse":reverse,"type":result,"owned":True},result
+
+    def refined(condition,truth=True):
+        result=set(context.get("refinements",set()))
+        if condition.get("kind")=="identity" and condition.get("negate")==truth:
+            a,b=condition["left"],condition["right"]
+            if a["kind"]=="none":a,b=b,a
+            if b["kind"]=="none" and a["kind"]=="name" and is_optional(a["type"]):result.add(a["name"])
+        return result
+
     def _expression(item, allow_min_magnitude=False, allow_void=False, expected_element=None):
         kind = item["kind"]
         constant = None
+        if kind=="none":item["type"]="none";return "none",None
+        if kind=="identity":
+            previous=context.get("skip_refinement",False);context["skip_refinement"]=True
+            a,_=expression(item["left"]);b,_=expression(item["right"]);context["skip_refinement"]=previous
+            if not (a=="none" or b=="none" or managed(a) and managed(b)):raise CompileError("is compares object identity or None",item)
+            item["type"]="bool"
+            if item["left"].get("owned") or item["right"].get("owned"):freeze_arguments(item,[item["left"],item["right"]])
+            return "bool",None
         if kind == "number":
             value_type, constant = "i16", item["value"]
             if constant > (32768 if allow_min_magnitude else 32767):
@@ -235,6 +302,38 @@ def check(tree):
                 value_type = "void"
             else:
                 value_type = "fixed" if name.startswith("math.") else "void" if name == "random.seed" else "i16"
+        elif kind=="call" and item["name"] in {"iter","reversed","map","filter","next"} and item["name"] not in functions:
+            name,args=item["name"],item["arguments"]
+            if name in {"iter","reversed"}:
+                if len(args)!=1:raise CompileError(f"{name} expects one iterable",item)
+                t,_=expression(args[0]);value,t=make_iterator(args[0],t,item,name=="reversed")
+                item.clear();item.update(value);return t,None
+            if name=="next":
+                if len(args) not in {1,2}:raise CompileError("next expects an iterator and optional default",item)
+                t,_=expression(args[0])
+                if not is_iterator(t):raise CompileError("next requires an iterator",item)
+                result=iterable_element(t)
+                if len(args)==2:
+                    other,c=expression(args[1]);compatible(result,other,c,args[1])
+                else:checked["tracing_heap"]=True
+                item.update(kind="iterator_next",type=result,owned=managed(result));freeze_arguments(item,args);return result,None
+            if len(args)<2 or name=="filter" and len(args)!=2:raise CompileError(f"Invalid arguments to {name}",item)
+            callback=args[0];ct,_=expression(callback)
+            if not is_closure(ct):raise CompileError(f"{name} requires a function",callback)
+            function=functions[ct[8:-1]];params=function["params"][int(bool(function.get("closure_env"))):]
+            if len(params)!=len(args)-1:raise CompileError("Callback parameter count does not match iterables",item)
+            sources=[];source_types=[]
+            for arg,p in zip(args[1:],params):
+                t,_=expression(arg);source,t=make_iterator(arg,t,item)
+                compatible(p["type"],iterable_element(t),None,arg);sources.append(source);source_types.append(t)
+            result=iterable_element(source_types[0]) if name=="filter" else function["return_type"]
+            if function["return_type"]=="void":raise CompileError("An iterator callback must return a value",item)
+            t=f"iter[{result},{name},{ct},"+",".join(source_types)+"]"
+            item.update(kind="iterator_map",base=callback,sources=sources,type=t,owned=True,symbol=function["label"])
+            freeze_arguments(item,args)
+            if context["function"]:context["function"]["calls"].add(function["name"])
+            else:global_calls.append(({**item,"name":function["name"]},context["initialized"].copy()))
+            return t,None
         elif kind == "call" and item["name"] == "int":
             if len(item["arguments"]) != 1:
                 raise CompileError("int expects one numeric value", item)
@@ -258,6 +357,7 @@ def check(tree):
             elif t=="str":helper="repr" if name=="repr" else "identity"
             elif t in {"i16","u8"}:helper="number"
             elif t=="bool":helper="boolean"
+            elif t=="exception":helper="exception"
             else:raise CompileError("str conversion currently requires a scalar value",item)
             item.update(kind="string_builtin",name=helper,type="str",owned=True);return "str",None
         elif kind == "compare_chain":
@@ -381,16 +481,45 @@ def check(tree):
         elif kind == "tuple":
             fields=[expression(v)[0] for v in item["values"]]
             value_type="tuple["+",".join(fields)+"]";item["owned"]=True
+        elif kind=="closure_default":
+            item["owned"]=managed(item["type"]);return item["type"],None
+        elif kind=="closure":
+            function=functions[item["function"]]
+            fields=[];capture_types={}
+            for captured in item["captures"]:
+                t,_=expression(captured);fields.append(t);capture_types[captured["name"]]=t[5:-1]
+            function["capture_types"]=capture_types
+            function["params"][0]["type"]="tuple["+",".join(fields)+"]"
+            item.update(symbol=function["label"],type=f"closure[{function['name']}]",owned=True)
+            return item["type"],None
+        elif kind=="cell_ref":
+            symbol=lookup(item["name"],item)
+            if not symbol.get("cell"):raise CompileError("Captured variable needs a shared cell",item)
+            bind(item,symbol);value_type=f"cell[{symbol['type']}]"
         elif kind == "name":
+            if item["name"] in functions and item["name"] not in context["locals"]:
+                function=functions[item["name"]]
+                item.update(kind="function_ref",function=function["name"],symbol=function["label"],type=f"closure[{function['name']}]",owned=True)
+                return item["type"],None
             symbol = lookup(item["name"], item)
             bind(item, symbol)
             value_type = symbol["type"]
+            if is_optional(value_type) and item["name"] in context.get("refinements",{}) and not context.get("skip_refinement"):
+                value=deepcopy(item);value["type"]=value_type
+                value_type=value_type[9:-1];item.clear();item.update(kind="optional_get",value=value,type=value_type,owned=managed(value_type),line=value["line"],column=value["column"])
         elif kind=="conditional":
             t,_=expression(item["condition"])
             if t!="bool":raise CompileError("A conditional expression requires a bool condition",item)
+            old=context.get("refinements",set());context["refinements"]=refined(item["condition"])
             t,c=expression(item["body"],expected_element=expected_element)
+            context["refinements"]=old;context["refinements"]=refined(item["condition"],False)
             other,value=expression(item["alternative"],expected_element=expected_element)
-            compatible(t,other,value,item)
+            context["refinements"]=old
+            if "none" in {t,other} and t!=other:
+                t=f"optional[{other if t=='none' else t}]"
+                for field in ("body","alternative"):
+                    v=item[field];item[field]={"kind":"optional_box","value":v,"type":t,"owned":True,"line":v["line"],"column":v["column"]}
+            else:compatible(t,other,value,item)
             value_type=t
             if managed(t):item["owned"]=True
         elif kind == "comprehension":
@@ -627,7 +756,7 @@ def check(tree):
                     raise CompileError("range step cannot be zero", item)
                 value_type = "i16[]"
             elif name == "list":
-                if count and (is_dict(types[0]) or is_view(types[0]) or is_set(types[0])):
+                if count and (is_iterator(types[0]) or is_dict(types[0]) or is_view(types[0]) or is_set(types[0])):
                     converted,t=iterable_list(arguments[0],types[0],item)
                     location={k:item[k] for k in ("line","column","filename") if k in item}
                     item.clear();item.update(converted,**location);return t,None
@@ -704,9 +833,15 @@ def check(tree):
             value_type = "i16"
         elif kind == "call":
             function = functions.get(item["name"])
+            callback=None
+            if function is None and (item["name"] in context["locals"] or item["name"] in globals_ or context["function"] and item["name"] in context["function"].get("capture_types",{})):
+                symbol=lookup(item["name"],item)
+                if is_closure(symbol["type"]):
+                    callback={"kind":"name","name":item["name"],"type":symbol["type"]};bind(callback,symbol)
+                    function=functions[symbol["type"][8:-1]]
             if function is None:
                 raise CompileError(f"Function {item['name']!r} has not been defined", item)
-            params=function["params"];args=item["arguments"]
+            params=function["params"][1:] if callback is not None and function.get("closure_env") else function["params"];args=item["arguments"]
             variadic=params[-1] if params and params[-1].get("variadic") else None
             regular=params[:-1] if variadic else params
             extras=[];ordinary=[];positional=0
@@ -717,6 +852,9 @@ def check(tree):
                     positional+=1
                 else:ordinary.append(arg)
             defaults={p["name"]:p["default_ref"] for p in regular if "default_ref" in p}
+            for p in regular:
+                if "default_capture" in p:
+                    defaults[p["name"]]={"kind":"closure_default","base":callback,"index":function["captures"].index(p["default_capture"]),"type":p["type"],"line":item["line"],"column":item["column"]}
             if not variadic and not defaults and not any(a["kind"]=="keyword" for a in args) and len(args)!=len(params):
                 raise CompileError(f"{item['name']} expects {len(params)} arguments, got {len(args)}",item)
             bound,order=bind_keywords(ordinary,[p["name"] for p in regular],defaults,item)
@@ -725,18 +863,22 @@ def check(tree):
             for argument, parameter in zip(bound, params):
                 argument_type, value = expression(argument, expected_element=parameter["type"][:-2] if parameter["type"].endswith("[]") else parameter["type"])
                 compatible(parameter["type"], argument_type, value, argument)
+            if callback is not None:item["base"]=callback
             if defaults or variadic or any(a["kind"]=="keyword" for a in args):
                 # Snapshot the original expressions, then pack varargs from their snapshots.
                 supplied=[a["value"] if a["kind"]=="keyword" else a for a in args]
-                freeze_arguments(item,supplied)
+                freeze_arguments(item,([callback] if callback is not None else [])+supplied)
             item["symbol"] = function["label"]
+            if callback is not None:item.update(kind="closure_call",has_env=bool(function.get("closure_env")))
             value_type = function["return_type"]
+            if function.get("generator"):
+                value_type=f"iter[{function['yield_type']},generator,{function['name']}]";item["generator"]=True
             if managed(value_type):
                 item["owned"] = True
             if context["function"]:
-                context["function"]["calls"].add(item["name"])
+                context["function"]["calls"].add(function["name"])
             else:
-                global_calls.append((item, context["initialized"].copy()))
+                global_calls.append(({**item,"name":function["name"]}, context["initialized"].copy()))
         elif kind == "membership":
             left_type, left_constant = expression(item["left"])
             right_type, _ = expression(item["right"], expected_element="bool" if left_type == "bool" else None)
@@ -841,9 +983,9 @@ def check(tree):
                 if "bool" in {left_type, right_type}:
                     raise CompileError("Addition, subtraction and remainder require integers", item)
                 value_type = "i16"
-                if kind in {"modulo", "floor_divide"} and right == 0:
+                if kind in {"modulo", "floor_divide"} and right == 0 and not checked["tracing_heap"]:
                     raise CompileError("Remainder divisor cannot be zero" if kind == "modulo" else "Division divisor cannot be zero", item)
-                if left is not None and right is not None:
+                if left is not None and right is not None and not (kind in {"modulo","floor_divide"} and right==0):
                     constant = {"modulo": lambda: left % right, "floor_divide": lambda: left // right,
                                 "multiply": lambda: left * right, "add": lambda: left + right,
                                 "subtract": lambda: left - right}[kind]()
@@ -858,6 +1000,63 @@ def check(tree):
         reachable = True
         for statement in body:
             kind = statement["kind"]
+            if kind=="yield":
+                function=context["function"]
+                if not function or not function.get("generator"):raise CompileError("yield requires a function",statement)
+                t,c=expression(statement["value"],expected_element=function["yield_type"])
+                compatible(function["yield_type"],t,c,statement);continue
+            if kind in {"try_except","try_finally"}:
+                before=context["initialized"].copy();old=context.get("handler_depth",0);context["handler_depth"]=old+1
+                falls=statements(statement["body"],loop_depth)
+                context["handler_depth"]=old
+                paths=[]
+                if kind=="try_except":
+                    if falls and statements(statement["alternative"],loop_depth):paths.append(context["initialized"].copy())
+                    from .exception_runtime import EXCEPTIONS
+                    for handler in statement["handlers"]:
+                        context["initialized"]=before.copy()
+                        for t in handler["types"]:
+                            if t not in EXCEPTIONS and t not in {"Exception","BaseException"}:raise CompileError(f"Unknown exception type {t!r}",handler)
+                        handler["code_slot"]=scratch("i16",100+old)
+                        if handler["name"]:
+                            name=handler["name"];slot=context["locals"].get(name)
+                            if slot is None:
+                                slot={"type":"exception","size":2,"label":f"__var_{len(globals_)}"};globals_[name]=slot
+                            slot["type"]="exception";context["locals"][name]=slot;context["initialized"].add(name)
+                            handler["target"]={**slot,"symbol":slot["label"]}
+                        previous=context.get("active_exception");context["active_exception"]=handler["code_slot"]
+                        if statements(handler["body"],loop_depth):paths.append(context["initialized"].copy())
+                        context["active_exception"]=previous
+                    context["initialized"]=set.intersection(*paths) if paths else before
+                    reachable=bool(paths)
+                else:
+                    statement["code_slot"]=scratch("i16",110+old)
+                    context["initialized"]=before
+                    final_falls=statements(statement["final"],loop_depth)
+                    reachable=falls and final_falls
+                continue
+            if kind in {"raise","assert"}:
+                value=statement.get("value")
+                if kind=="assert":
+                    t,_=expression(value)
+                    if t!="bool":raise CompileError("assert requires a bool condition",statement)
+                    statement["exception_code"]=15
+                elif value is None:
+                    if not context.get("active_exception"):raise CompileError("Bare raise requires an active exception handler",statement)
+                    statement["code_slot"]=context["active_exception"]
+                else:
+                    from .exception_runtime import EXCEPTIONS
+                    if value["kind"] in {"call","name"} and value.get("name") in EXCEPTIONS:
+                        statement["exception_code"]=EXCEPTIONS[value["name"]][0]
+                        args=value.get("arguments",[])
+                        if len(args)>1:raise CompileError("An exception accepts one message",statement)
+                        statement["message"]=args[0] if args else None
+                    else:
+                        t,_=expression(value)
+                        if t!="exception":raise CompileError("raise requires an exception",statement)
+                if statement.get("message") and expression(statement["message"])[0]!="str":raise CompileError("Exception messages must be strings",statement)
+                if kind=="raise":reachable=False
+                continue
             if kind == "function":
                 if not top_level:
                     raise CompileError("Function definitions must be at the top level", statement)
@@ -936,6 +1135,7 @@ def check(tree):
                     value_type, value = expression(statement["value"], expected_element=target[:-2] if target.endswith("[]") else target)
                     compatible(target, value_type, value, statement)
                 reachable = False
+                if checked["tracing_heap"] and target!="void":statement["completion_slot"]=scratch(target,120)
                 continue
             if kind in {"break", "continue"}:
                 if loop_depth == 0:
@@ -1043,8 +1243,10 @@ def check(tree):
                 if mode == "zip" and not sources or mode == "enumerate" and len(iterable["arguments"]) not in {1, 2}:
                     raise CompileError(f"Invalid arguments to {mode}", iterable)
                 types = []
+                iterator_source=None
                 for source in sources:
                     iterable_type, _ = expression(source)
+                    if is_iterator(iterable_type) and mode=="array":iterator_source=(source,iterable_type);break
                     if is_view(iterable_type) and mode=="array":
                         view,mapping_type=view_types(iterable_type)
                         sources[0]={"kind":"view_target","base":source,"type":mapping_type,"owned":True}
@@ -1052,6 +1254,24 @@ def check(tree):
                     if not iterable_type.endswith("[]") and not is_tuple(iterable_type) and not ((is_dict(iterable_type) or is_set(iterable_type)) and mode == "array"):
                         raise CompileError("A for loop requires an array or range", source)
                     types.append(iterable_type)
+                if iterator_source:
+                    source,t=iterator_source;value=iterable_element(t);fields=tuple_types(value) if len(names)>1 and is_tuple(value) else [value]
+                    if len(fields)!=len(names):raise CompileError("Wrong number of iterator targets",statement)
+                    before=context["initialized"].copy();targets=[]
+                    for name,field in zip(names,fields):
+                        slot=context["locals"].get(name)
+                        if slot is None:
+                            slot={"type":field,"size":2,"label":f"__var_{len(globals_)}"};globals_[name]=slot
+                            if name.startswith("$comp_"):checked["temporaries"][slot["label"]]=slot
+                        if slot.pop("loop_inferred",False):slot["type"]=field
+                        compatible(slot["type"],field,None,statement);context["initialized"].add(name)
+                        targets.append({**slot,"symbol":slot["label"]})
+                    slot=statement.get("iterator_0") if context["function"] else None
+                    if slot is None:
+                        slot={"type":t,"size":2,"label":f"__tmp_{len(checked['temporaries'])}"};checked["temporaries"][slot["label"]]=slot
+                    slot["type"]=t
+                    statement.update(iteration_kind="iterator",sources=[source],targets=targets,target=targets[-1],iterator_0={**slot,"symbol":slot["label"]})
+                    statements(statement["body"],loop_depth+1);context["initialized"]=before;continue
                 if len(types) == 1 and (is_dict(types[0]) or is_set(types[0])):
                     key_type, value_type = (element_type(types[0]),"i16") if is_set(types[0]) else dict_types(types[0])
                     if is_set(types[0]) and view:raise CompileError("Sets have no dictionary views",statement)
@@ -1149,12 +1369,16 @@ def check(tree):
                 if condition_type != "bool":
                     raise CompileError(f"{'An if' if kind == 'if' else 'A while'} condition must be bool", statement["condition"])
                 before = context["initialized"].copy()
+                old=context.get("refinements",set());context["refinements"]=refined(statement["condition"])
                 then_falls = statements(statement["body"], loop_depth + (kind == "while"))
                 then_initialized = context["initialized"].copy()
                 context["initialized"] = before.copy()
+                context["refinements"]=old
                 if kind == "while":
                     continue
+                context["refinements"]=refined(statement["condition"],False)
                 else_falls = statements(statement["alternative"], loop_depth)
+                context["refinements"]=old
                 if then_falls and else_falls:
                     context["initialized"] &= then_initialized
                 elif then_falls:
@@ -1165,8 +1389,8 @@ def check(tree):
             if kind == "assign" and statement.get("inferred"):
                 if name in functions or name == "len" or name in GRAPHICS_BUILTINS:
                     raise CompileError(f"{name!r} is already a function name", statement)
-                symbol = context["locals"].get(name)
-                expected = symbol["type"] if symbol and symbol["type"] != "auto" else None
+                symbol = lookup(name,statement,writing=True) if context["function"] and name in context["function"].get("captures",[]) else context["locals"].get(name)
+                expected = symbol["type"] if symbol and symbol["type"] != "auto" else statement.get("inferred_type")
                 if expected and expected.endswith("[]"): expected = expected[:-2]
                 source_type, constant = expression(statement["value"], expected_element=expected)
                 if symbol is None:
@@ -1250,7 +1474,7 @@ def check(tree):
                 if name in local_symbols:
                     if kind == "assign": continue
                     raise CompileError(f"Variable {name!r} is already declared in this function", statement)
-                type_name = normalize(statement.get("type", "auto"))
+                type_name = normalize(statement.get("type",statement.get("inferred_type", "auto")))
                 # Reserve word slots for locals; an initializer can infer an
                 # array descriptor even when its declared element type is u8.
                 width = 2
@@ -1283,6 +1507,13 @@ def check(tree):
                 if size > 4096:
                     raise CompileError("Function frame exceeds 4096 bytes", statement)
                 size = allocate_locals(statement["body"], local_symbols, size)
+            elif kind in {"try_except","try_finally"}:
+                size=allocate_locals(statement["body"],local_symbols,size)
+                for handler in statement.get("handlers",[]):
+                    if handler.get("name") and handler["name"] not in local_symbols:
+                        size+=2;local_symbols[handler["name"]]={"type":"exception","size":2,"storage":"frame","offset":-size,"label":f"__local_{len(local_symbols)}"}
+                    size=allocate_locals(handler["body"],local_symbols,size)
+                size=allocate_locals(statement.get("alternative",statement.get("final",[])),local_symbols,size)
             elif kind in {"if", "while"}:
                 size = allocate_locals(statement["body"], local_symbols, size)
                 if kind == "if":
@@ -1299,6 +1530,8 @@ def check(tree):
                 "type": parameter["type"], "size": 2, "storage": "frame",
                 "offset": 4 + 2 * (count - index - 1), "label": f"__arg_{index}"}
         function["frame_size"] = allocate_locals(function["body"], local_symbols, 0)
+        for name in function.get("cell_names",[]):
+            if name in local_symbols:local_symbols[name]["cell"]=True
         function["locals"] = local_symbols
         context = {"locals": local_symbols, "initialized": {p["name"] for p in function["params"]},
                    "function": function}

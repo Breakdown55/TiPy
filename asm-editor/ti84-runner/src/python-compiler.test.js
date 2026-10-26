@@ -59,6 +59,8 @@ function execute(source, measurements) {
     const decode=(address,type)=>{
         if(type==='u8' || type==='bool')return mem[address]
         const raw=word(address)
+        if(type==='none')return null
+        if(type.startsWith('optional[') && !type.endsWith('[]'))return raw?decode(word(raw),type.slice(9,-1)):null
         if(type==='str')return String.fromCharCode(...mem.slice(word(raw),word(raw)+word(raw+2)))
         const tuple=type==='tuple[]' || /^(tuple|tuple_var|tuple_cycle)\[/.test(type) && !type.endsWith('[]')
         const dict=type.startsWith('dict[') && !type.endsWith('[]')
@@ -85,6 +87,228 @@ function execute(source, measurements) {
     for (const [name,symbol] of Object.entries(result.symbols)) values[name]=decode(runner.assembly.asm.scopes[0].symbols.get(symbol.label).value,symbol.type)
     return values
 }
+
+test('Generator stacks and nested definition-time defaults remain independent across repeated calls', () => {
+    const v=execute(`def factory(int initial):
+    def append(int value,int[] data=[initial]):
+        data.append(value)
+        return data.copy()
+    return append
+first=factory(10)
+second=factory(20)
+a=first(1)
+b=first(2)
+c=second(3)
+def inner(int count):
+    for n in range(count):
+        yield str(n)
+def outer(int count):
+    for text in inner(count):
+        yield text+"!"
+last=[]
+for repetition in range(30):
+    last=list(outer(3))
+`,{maxSlices:16000})
+    assert.deepEqual(v.a,[10,1]);assert.deepEqual(v.b,[10,1,2]);assert.deepEqual(v.c,[20,3]);assert.deepEqual(v.last,['0!','1!','2!'])
+})
+
+test('Native generators suspend loops and handlers, remain lazy and propagate errors', () => {
+    const v=execute(`events=[]
+def numbers(int count):
+    for n in range(count):
+        events.append(n)
+        yield n*n
+first=numbers(4)
+second=numbers(2)
+before=len(events)
+a=next(first)
+b=next(first)
+c=next(second)
+rest=list(first)
+end=next(first,99)
+def guarded():
+    try:
+        yield 10
+        raise ValueError("after yield")
+    finally:
+        events.append(50)
+generator=guarded()
+d=next(generator)
+caught=False
+try:
+    next(generator)
+except ValueError:
+    caught=True
+total=0
+for n in numbers(3):
+    total+=n
+`,{maxSlices:12000})
+    assert.equal(v.before,0);assert.deepEqual([v.a,v.b,v.c,v.d,v.end,v.total],[0,1,0,10,99,5]);assert.deepEqual(v.rest,[4,9]);assert.equal(v.caught,1)
+    assert.deepEqual(v.events,[0,1,0,2,3,50,0,1,2])
+})
+
+test('None uses optional storage and identity preserves object aliases', () => {
+    const v=execute(`x=None
+bool missing=x is None
+x=7
+value=0
+if x is not None:
+    value=x+1
+data=[1]
+alias=data
+other=[1]
+bool same=data is alias
+bool different=data is not other
+def maybe(bool choose):
+    if choose:
+        return "yes"
+    return None
+answer=maybe(True)
+text="no"
+if answer is not None:
+    text=answer+"!"
+empty=maybe(False)
+bool absent=empty is None
+`,{maxSlices:4000})
+    assert.deepEqual([v.missing,v.value,v.same,v.different,v.absent],[1,8,1,1,1]);assert.equal(v.text,'yes!')
+})
+
+test('Native iterators, reversed, lazy map/filter and next preserve state and ownership', () => {
+    const v=execute(`calls=[]
+def twice(int n):
+    calls.append(n)
+    return n*2
+def even(int n):
+    return n%2==0
+data=[1,2,3]
+iterator=iter(data)
+first=next(iterator)
+data.append(4)
+rest=list(iterator)
+end=next(iterator,99)
+back=list(reversed(data))
+mapped=map(twice,data)
+before=len(calls)
+head=next(mapped)
+after=len(calls)
+tail=list(mapped)
+filtered=list(filter(even,data))
+names=list(reversed("abc"))
+keys=iter({"x":1,"y":2})
+key1=next(keys)
+key2=next(keys)
+stopped=False
+try:
+    next(keys)
+except StopIteration:
+    stopped=True
+total=0
+for n in map(lambda x:x+1,data):
+    total+=n
+`,{maxSlices:10000})
+    assert.equal(v.first,1);assert.deepEqual(v.rest,[2,3,4]);assert.equal(v.end,99);assert.deepEqual(v.back,[4,3,2,1])
+    assert.equal(v.before,0);assert.equal(v.head,2);assert.equal(v.after,1);assert.deepEqual(v.tail,[4,6,8]);assert.deepEqual(v.filtered,[2,4]);assert.deepEqual(v.names,['c','b','a'])
+    assert.equal(v.key1,'x');assert.equal(v.key2,'y');assert.equal(v.stopped,1);assert.equal(v.total,14)
+})
+
+test('Exception recovery reclaims abandoned native temporaries and preserves live aliases', () => {
+    const v=execute(`live=["keep","alive"]
+alias=live
+def explode(int n):
+    abandoned=[list(range(40)),list(range(40))]
+    raise ValueError("temporary "+str(n))
+count=0
+for iteration in range(80):
+    try:
+        explode(iteration)
+    except ValueError:
+        count+=1
+last=alias[1]
+`,{maxSlices:12000})
+    assert.equal(v.count,80);assert.equal(v.last,'alive');assert.deepEqual(v.live,['keep','alive'])
+})
+
+test('Native exception handlers unwind calls and preserve finally on return break and rethrow', () => {
+    const v=execute(`events=[]
+def fail(int n):
+    temporary=list(range(20))
+    if n==0:
+        raise ValueError("bad value")
+    return 100//n
+def recover(int n):
+    try:
+        return fail(n)
+    except ValueError as err:
+        events.append(1)
+        return 7
+    finally:
+        events.append(2)
+a=recover(0)
+b=recover(5)
+message=""
+try:
+    fail(0)
+except ValueError as error:
+    message=str(error)
+zero=0
+try:
+    zero=10//0
+except ZeroDivisionError:
+    zero=99
+outer=0
+try:
+    try:
+        raise KeyError("missing")
+    except ValueError:
+        outer=1
+    finally:
+        events.append(3)
+except KeyError:
+    outer=2
+for num in range(3):
+    try:
+        break
+    finally:
+        events.append(4)
+`,{maxSlices:4000})
+    assert.deepEqual([v.a,v.b,v.zero,v.outer],[7,20,99,2]);assert.equal(v.message,'bad value');assert.deepEqual(v.events,[1,2,2,3,4])
+})
+
+test('Native closures share captured cells after return and lambda calls remain independent', () => {
+    for(const optimization of ['reference','balanced','aggressive']) {
+        const v=execute(`def make(int start):
+    state=start
+    def increment(int amount):
+        nonlocal state
+        state+=amount
+        return state
+    return increment
+first=make(10)
+second=make(100)
+a=first(2)
+b=first(3)
+c=second(7)
+def multiplier(int factor):
+    return lambda x: x*factor
+double=multiplier(2)
+d=double(6)
+def text_holder(str start):
+    text=start
+    def change(int n):
+        nonlocal text
+        text=text+str(n)
+        return text
+    return change
+holder=text_holder("A")
+one=holder(1)
+two=holder(2)
+for iteration in range(150):
+    first=make(iteration)
+e=first(2)
+`,{maxSlices:3000,optimization})
+        assert.deepEqual([v.a,v.b,v.c,v.d,v.e],[12,15,107,12,151]);assert.equal(v.one,'A1');assert.equal(v.two,'A12')
+    }
+})
 
 test('Native comprehensions, bitwise precedence and set/dictionary operators', () => {
     const v=execute(`d={str(x):[x*x] for x in range(5) if x%2==0}

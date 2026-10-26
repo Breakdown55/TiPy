@@ -63,7 +63,7 @@ class Evaluator:
     def expr(self, item):
         self.tick()
         kind = item["kind"]
-        if item.get("evaluations"):raise NotStatic("argument evaluation snapshots")
+        if item.get("evaluations") or item.get("cell"):raise NotStatic("argument snapshots or captured variables")
         if complex_type(item.get("type","")) or is_dict(item.get("type", "")) or item.get("type") in {"fixed", "str"} or kind in {"stdlib", "cast_int", "to_fixed", "decimal", "compare_chain", "text_print", "text_input", "dict_contains", "dict_method", "dict_index", "hash"}:
             raise NotStatic("native numeric or runtime effect")
         if kind == "void_constant": return None
