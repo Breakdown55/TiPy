@@ -13,7 +13,7 @@ TOKEN = re.compile(
     r"|(?P<DECIMAL>[0-9]+\.[0-9]+)"
     r"|(?P<NUMBER>0[xX][0-9a-fA-F]+|[0-9]+)"
     r"|(?P<NAME>[A-Za-z_][A-Za-z_0-9]*)"
-    r"|(?P<OP>->|==|!=|<=|>=|//=|\*=|%=|\+=|-=|//|[=+*%\-()<>:,.\[\]])"
+    r"|(?P<OP>->|==|!=|<=|>=|//=|\*=|%=|\+=|-=|//|[=+*%\-()<>:,.\[\]{}])"
     r"|(?P<INVALID>.)"
 )
 
@@ -51,20 +51,20 @@ def tokenize(source, *, expand_defines=True):
                 at_line_start = False
             if kind != "NEWLINE":
                 at_line_start = False
-            if kind == "NAME" and text in {"int", "i16", "u8", "bool", "void", "str"}:
+            if kind == "NAME" and text in {"int", "i16", "u8", "bool", "void", "str", "dict"}:
                 token["kind"] = "TYPE"
             elif kind == "NAME" and text in {"True", "False"}:
                 token["kind"] = "BOOL"
-            elif kind == "NAME" and text in {"if", "elif", "else", "pass", "while", "break", "continue", "def", "return", "for", "in", "and", "or", "not"}:
+            elif kind == "NAME" and text in {"if", "elif", "else", "pass", "while", "break", "continue", "def", "return", "for", "in", "and", "or", "not", "del"}:
                 token["kind"] = text.upper()
             elif kind == "NUMBER":
                 token["value"] = int(text, 16 if text.lower().startswith("0x") else 10)
             if kind != "NEWLINE" or not delimiters:
                 tokens.append(token)
-            if kind == "OP" and text in {"(", "["}:
+            if kind == "OP" and text in {"(", "[", "{"}:
                 delimiters.append(text)
-            elif kind == "OP" and text in {")", "]"}:
-                if delimiters and delimiters[-1] == {")": "(", "]": "["}[text]:
+            elif kind == "OP" and text in {")", "]", "}"}:
+                if delimiters and delimiters[-1] == {")": "(", "]": "[", "}": "{"}[text]:
                     delimiters.pop()
         if kind == "NEWLINE":
             line += 1

@@ -1,0 +1,15 @@
+scores = {"Alice": 10, "Bob": 20}
+scores["Alice"] += 5
+scores["Carol"] = scores.get("Carol", 0) + 7
+
+backup = scores.copy()
+scores.update({"Bob": 3})
+del scores["Bob"]
+
+clear()
+int y = 0
+for name, score in scores.items():
+    print(name, 0, y)
+    print(score, 60, y)
+    y += 8
+render()

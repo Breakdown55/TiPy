@@ -2,10 +2,10 @@
 
 from .list_runtime import runtime_assembly, HEAP_BYTES, RUNTIME_TARGET
 from .optimizer import optimize
+from .types import managed, is_dict, dict_types, release
 
 
 def generate(tree, symbols, *, optimize_graphics=True):
-    def managed(type_name): return type_name == "str" or type_name.endswith("[]")
     if "static_frames" in tree:
         from .framebuffer_backend import generate_frames
         return generate_frames(tree["static_frames"])
@@ -122,18 +122,18 @@ def generate(tree, symbols, *, optimize_graphics=True):
         else:
             emit(f"ld ({item['symbol']}),hl")
 
-    def runtime(name, arguments):
+    def runtime(name, arguments, prefix="__arr_"):
         for argument in arguments:
             if isinstance(argument, int):
                 emit(f"ld hl,{argument & 65535}")
             else:
                 expression(argument)
             emit("push hl")
-        emit(f"call __arr_{name}")
+        emit(f"call {prefix}{name}")
         for argument in reversed(arguments):
             emit("pop de")
             if isinstance(argument, dict) and argument.get("owned"):
-                emit("push hl", "push de", "call __arr_release", "pop de", "pop hl")
+                emit("push hl", "push de", f"call {release(argument['type'])}", "pop de", "pop hl")
 
     def read_length():
         # HL points to the stable descriptor. Length is a word at offset two.
@@ -144,6 +144,29 @@ def generate(tree, symbols, *, optimize_graphics=True):
         kind = item["kind"]
         if kind == "void_constant":
             return
+        elif kind == "stack_dict":
+            emit("pop hl", "push hl")
+        elif kind == "dict":
+            key, value = dict_types(item["type"])
+            runtime("new", [int(key == "str"), int(value == "str"), len(item["entries"])], "__dict_")
+            emit("push hl")
+            for entry in item["entries"]:
+                runtime("set", [{"kind": "stack_dict", "type": item["type"]}, entry["key"], entry["value"]], "__dict_")
+            emit("pop hl")
+        elif kind == "hash":
+            argument = item["arguments"][0]
+            if argument["type"] == "str": runtime("hash_str", [argument], "__dict_")
+            else: expression(argument)
+        elif kind == "dict_index":
+            runtime("get", [item["base"], item["index"]], "__dict_")
+        elif kind == "dict_method":
+            name = item["name"]
+            if name == "get": name = "get_default"
+            if name == "pop" and len(item["arguments"]) == 2: name = "pop_default"
+            runtime(name, [item["base"], *item["arguments"]], "__dict_")
+        elif kind == "dict_contains":
+            runtime("contains", [item["left"], item["right"]], "__dict_")
+            if item["negate"]: emit("ld a,l", "xor 1", "ld l,a")
         elif kind == "string":
             data = tuple(ord(c) for c in item["value"])
             if data not in constant_data: constant_data[data] = f"__constant_data_{len(constant_data)}"
@@ -169,7 +192,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
             else:
                 emit("call __text_draw", *(["pop de"] * 4))
             if temporary:
-                emit("pop de", "push hl", "push de", "call __arr_release", "pop de", "pop hl")
+                emit("pop de", "push hl", "push de", f"call {release(value['type'])}", "pop de", "pop hl")
         elif kind in {"number", "boolean"}:
             emit(f"ld hl,{int(item['value']) & 0xFFFF}")
         elif kind == "decimal":
@@ -247,7 +270,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 emit("push hl")
             read_length()
             if argument.get("owned"):
-                emit("pop de", "push hl", "push de", "call __arr_release", "pop de", "pop hl")
+                emit("pop de", "push hl", "push de", f"call {release(argument['type'])}", "pop de", "pop hl")
         elif kind == "builtin":
             name, arguments = item["name"], item["arguments"]
             if name == "range":
@@ -423,7 +446,11 @@ def generate(tree, symbols, *, optimize_graphics=True):
             if kind == "expression_statement":
                 expression(statement["value"])
                 if statement["value"].get("owned"):
-                    emit("push hl", "call __arr_release", "pop de")
+                    emit("push hl", f"call {release(statement['value']['type'])}", "pop de")
+                continue
+            if kind == "dict_delete":
+                target = statement["target"]
+                runtime("delete", [target["base"], target["index"]], "__dict_")
                 continue
             if kind == "collect":
                 emit("pop hl", "push hl", "push hl")
@@ -448,7 +475,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 emit("ex de,hl", "pop hl", f"call __gfx_{mode}")
                 mark(end); pixels_used.add(mode)
                 continue
-            if kind == "index_assign":
+            if kind in {"index_assign", "dict_assign"}:
                 target = statement["target"]
                 expression(target["base"])
                 emit("push hl")
@@ -458,7 +485,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
                     # Preserve the original descriptor/index, and evaluate the
                     # index exactly once even if it contains a function call.
                     emit("pop de", "pop hl", "push hl", "push de", "push hl", "push de",
-                         "call __arr_get", "pop de", "pop de", "push hl")
+                         f"call {'__dict_get' if kind == 'dict_assign' else '__arr_get'}", "pop de", "pop de", "push hl")
                 expression(statement["value"])
                 if statement["operator"] != "=":
                     emit("ex de,hl", "pop hl")
@@ -472,9 +499,11 @@ def generate(tree, symbols, *, optimize_graphics=True):
                         emit(f"call __math_{helper}")
                     else:
                         emit(*(["add hl,de"] if operator == "+=" else ["or a", "sbc hl,de"]))
-                emit("push hl", "call __arr_set", "pop de", "pop de", "pop de")
-                if target["base"].get("owned"):
-                    emit("push de", "call __arr_release", "pop de")
+                emit("push hl", f"call {'__dict_set' if kind == 'dict_assign' else '__arr_set'}")
+                for argument in (statement["value"], target["index"], target["base"]):
+                    emit("pop de")
+                    if argument.get("owned"):
+                        emit("push de", f"call {release(argument['type'])}", "pop de")
                 continue
             if kind == "return":
                 if statement["value"] is not None:
@@ -494,6 +523,33 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 mark(end)
                 continue
             if kind == "for":
+                if statement["iteration_kind"] == "dict":
+                    source = statement["sources"][0]
+                    iterator, entry, version = statement["iterator_0"], statement["iteration_index"], statement["dict_version"]
+                    expression(source)
+                    if not source.get("owned"): emit("push hl", "call __arr_retain", "pop de")
+                    emit("push hl"); load(iterator)
+                    emit("push hl", "call __dict_release", "pop de", "pop hl"); store(iterator)
+                    for offset, slot in ((14, entry), (18, version)):
+                        load(iterator); emit(f"ld de,{offset}", "add hl,de", "ld e,(hl)", "inc hl", "ld d,(hl)", "ex de,hl"); store(slot)
+                    start, advance, end = label(), label(), label()
+                    mark(start); load(entry); emit("ld a,h", "or l", f"jp z,{end}")
+                    offsets = (4,6) if statement["dict_view"] == "items" else (6,) if statement["dict_view"] == "values" else (4,)
+                    for offset, target in zip(offsets, statement["targets"]):
+                        load(entry); emit(f"ld de,{offset}", "add hl,de", "ld e,(hl)", "inc hl", "ld d,(hl)", "ex de,hl")
+                        if managed(target["type"]):
+                            emit("push hl", "call __arr_retain", "pop de", "push hl")
+                            load(target); emit("push hl", f"call {release(target['type'])}", "pop de", "pop hl")
+                        store(target)
+                    loops.append((advance,end)); statements(statement["body"]); loops.pop()
+                    mark(advance)
+                    load(iterator); emit("ld de,18", "add hl,de", "ld e,(hl)", "inc hl", "ld d,(hl)", "push de")
+                    load(version); emit("pop de", "or a", "sbc hl,de")
+                    unchanged = label(); emit(f"jp z,{unchanged}", "ld hl,13", "jp __arr_fail"); mark(unchanged)
+                    load(entry); emit("ld de,8", "add hl,de", "ld e,(hl)", "inc hl", "ld d,(hl)", "ex de,hl"); store(entry)
+                    emit(f"jp {start}"); mark(end)
+                    load(iterator); emit("push hl", "call __dict_release", "pop de", "ld hl,0"); store(iterator)
+                    continue
                 if statement["iteration_kind"] == "tuple":
                     rows = statement["iterable"]["values"]
                     pointer, index = statement["iterator_0"], statement["iteration_index"]
@@ -655,7 +711,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
                     emit("push hl", "call __arr_retain", "pop de")
                 emit("push hl")
                 load(statement)
-                emit("push hl", "call __arr_release", "pop de", "pop hl")
+                emit("push hl", f"call {release(statement['type'])}", "pop de", "pop hl")
             store(statement)
 
     if errors_used:
@@ -690,7 +746,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
             emit("push hl")
             for value in array_locals:
                 load({**value, "symbol": value["label"]})
-                emit("push hl", "call __arr_release", "pop de")
+                emit("push hl", f"call {release(value['type'])}", "pop de")
             emit("pop hl")
         emit("ld sp,ix", "pop ix", "ret")
     if text_used:
@@ -707,7 +763,8 @@ def generate(tree, symbols, *, optimize_graphics=True):
         code.extend({"mul": MULTIPLY, "div": FLOOR_DIVIDE}[name] for name in sorted(math_used))
     required = set(RUNTIME_TARGET.findall("\n".join(code)))
     if required:
-        code.extend(["", "; Used array runtime routines and their dependencies", runtime_assembly(required)])
+        dictionary_types = {dict_types(node["type"]) for node in walk(tree) if is_dict(node.get("type", ""))}
+        code.extend(["", "; Used heap runtime routines and their dependencies", runtime_assembly(required, dictionary_types)])
     if pixels_used:
         from .graphics_runtime import graphics_assembly
         code.append(graphics_assembly(pixels_used))

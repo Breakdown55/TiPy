@@ -29,6 +29,18 @@ class Parser:
     def program(self):
         return {"kind": "program", "body": self.statements("EOF")}
 
+    def type_name(self):
+        name = self.take("TYPE")["value"]
+        if name == "dict":
+            if self.current["value"] != "[": return "dict[int,int]"
+            self.take("OP", "[")
+            key = self.take("TYPE")["value"]
+            self.take("OP", ",")
+            value = self.take("TYPE")["value"]
+            self.take("OP", "]")
+            return f"dict[{key},{value}]"
+        return name
+
     def statements(self, stop):
         statements = []
         while self.current["kind"] != stop:
@@ -59,7 +71,7 @@ class Parser:
                 while True:
                     parameter = self.current
                     inferred = parameter["kind"] == "NAME"
-                    parameter_type = "int" if inferred else self.take("TYPE")["value"]
+                    parameter_type = "int" if inferred else self.type_name()
                     if self.current["value"] == "[":
                         self.take("OP", "[")
                         self.take("OP", "]")
@@ -73,7 +85,7 @@ class Parser:
             return_type = "auto"
             if self.current["value"] == "->":
                 self.take("OP", "->")
-                return_type = self.take("TYPE")["value"]
+                return_type = self.type_name()
             if self.current["value"] == "[":
                 self.take("OP", "[")
                 self.take("OP", "]")
@@ -85,6 +97,11 @@ class Parser:
             value = None if self.current["kind"] == "NEWLINE" else self.expression()
             self.take("NEWLINE")
             return node("return", start, value=value)
+        if start["kind"] == "DEL":
+            self.take("DEL")
+            target = self.expression()
+            self.take("NEWLINE")
+            return node("dict_delete", start, target=target)
         if start["kind"] == "FOR":
             self.take("FOR")
             names = self.targets()
@@ -107,7 +124,7 @@ class Parser:
             self.take("NEWLINE")
             return node("pass", start)
         if start["kind"] == "TYPE":
-            type_name = self.take("TYPE")["value"]
+            type_name = self.type_name()
             name = self.take("NAME")["value"]
             self.take("OP", "=")
             result = node("declare", start, type=type_name, name=name, value=self.expression())
@@ -224,9 +241,21 @@ class Parser:
         if token["kind"] == "DECIMAL":
             self.take("DECIMAL")
             return node("decimal", token, value=token["value"])
-        if token["kind"] == "TYPE" and token["value"] == "int":
+        if token["kind"] == "TYPE" and token["value"] in {"int", "dict"}:
             self.take("TYPE")
-            return self.call(token)
+            return self.postfix(self.call(token))
+        if token["value"] == "{":
+            self.take("OP", "{")
+            entries = []
+            if self.current["value"] != "}":
+                while True:
+                    key = self.expression(); self.take("OP", ":")
+                    entries.append({"key": key, "value": self.expression()})
+                    if self.current["value"] != ",": break
+                    self.take("OP", ",")
+                    if self.current["value"] == "}": break
+            self.take("OP", "}")
+            return self.postfix(node("dict", token, entries=entries))
         if token["kind"] == "NUMBER":
             self.take("NUMBER")
             return node("number", token, value=token["value"])

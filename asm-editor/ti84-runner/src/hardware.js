@@ -265,7 +265,7 @@ export class Ti84Runner {
         } while (!single && this.machine.tStateCount - start < budget && (count % 256 !== 0 || performance.now() < deadline))
         if (this.done && this.listErrorAddress !== undefined) {
             const code = this.machine.memory[this.listErrorAddress]
-            if (code) throw new Error(({ 1: 'Array index out of range', 2: 'Cannot pop an empty array', 3: 'Array heap is out of memory', 4: 'Value not found in array', 5: 'Remainder divisor cannot be zero', 6: 'min/max requires a non-empty sequence', 7: 'range step cannot be zero', 8: 'Division divisor cannot be zero', 9: 'randint lower bound exceeds upper bound', 10: 'sleep must be between 0 and 32.767 seconds', 11: 'Input position must leave room for text and a cursor' })[code] ?? 'Runtime error')
+            if (code) throw new Error(({ 1: 'Array index out of range', 2: 'Cannot pop an empty array', 3: 'Heap is out of memory', 4: 'Value not found in array', 5: 'Remainder divisor cannot be zero', 6: 'min/max requires a non-empty sequence', 7: 'range step cannot be zero', 8: 'Division divisor cannot be zero', 9: 'randint lower bound exceeds upper bound', 10: 'sleep must be between 0 and 32.767 seconds', 11: 'Input position must leave room for text and a cursor', 12: 'Dictionary key not found', 13: 'Dictionary changed during iteration' })[code] ?? 'Runtime error')
         }
     }
 }

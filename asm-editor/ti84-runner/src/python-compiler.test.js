@@ -48,6 +48,26 @@ function execute(source, measurements) {
     for (const [name,symbol] of Object.entries(result.symbols)) {
         const address = runner.assembly.asm.scopes[0].symbols.get(symbol.label).value
         let value = runner.machine.memory[address]
+        if(symbol.type.startsWith('dict[')) {
+            const readWord=a=>runner.machine.memory[a] | (runner.machine.memory[a+1]<<8)
+            const readString=pointer=>String.fromCharCode(...runner.machine.memory.slice(readWord(pointer),readWord(pointer)+readWord(pointer+2)))
+            const pointer=readWord(address),length=readWord(pointer+2)
+            const [keyType,valueType]=symbol.type.slice(5,-1).split(',')
+            const entries=[]
+            let entry=readWord(pointer+14)
+            while(entry) {
+                assert.ok(entries.length<length,'Dictionary order links must be finite and match length')
+                let key=readWord(entry+4),element=readWord(entry+6)
+                if(keyType==='str') key=readString(key)
+                else if(key&0x8000) key-=65536
+                if(valueType==='str') element=readString(element)
+                else if(valueType==='i16' && element&0x8000) element-=65536
+                entries.push([key,element]);entry=readWord(entry+8)
+            }
+            assert.equal(entries.length,length)
+            values[name]=new Map(entries)
+            continue
+        }
         if (symbol.type.endsWith('[]') || symbol.type==='str') {
             const pointer = value | (runner.machine.memory[address + 1] << 8)
             const readWord = a => runner.machine.memory[a] | (runner.machine.memory[a + 1] << 8)
@@ -70,6 +90,140 @@ function execute(source, measurements) {
     }
     return values
 }
+
+test('Integer hash maps grow, handle colliding buckets and tombstones, and keep insertion order', t => {
+    const source=`d={}
+for i in range(80):
+    d[i*8]=i
+for i in range(0,80,3):
+    del d[i*8]
+d[0]=999
+d[8]+=10
+int missing=d.get(-1,123)
+int popped=d.pop(16)
+int fallback=d.pop(-7,456)
+int existing=d.setdefault(8,777)
+int inserted=d.setdefault(-8,888)
+bool present=8 in d
+bool absent=-1 not in d
+int size=len(d)
+int ordered=[k for k in d]
+int pairs=[k+v for k,v in d.items()]
+int values=[v for v in d.values()]
+`
+    const measurements={}
+    const result=execute(source,measurements)
+    const expected=new Map(Array.from({length:80},(_,i)=>[i*8,i]).filter(([key])=>key%24!==0))
+    expected.set(0,999);expected.set(8,11);expected.delete(16);expected.set(-8,888)
+    assert.deepEqual(result.d,expected)
+    assert.equal(result.missing,123);assert.equal(result.popped,2);assert.equal(result.fallback,456)
+    assert.equal(result.existing,11);assert.equal(result.inserted,888)
+    assert.equal(result.present,1);assert.equal(result.absent,1);assert.equal(result.size,expected.size)
+    assert.deepEqual(result.ordered,[...expected.keys()])
+    assert.deepEqual(result.pairs,[...expected].map(([k,v])=>k+v))
+    assert.deepEqual(result.values,[...expected.values()])
+    assert.doesNotMatch(measurements.assembly,/__dict_copy:/)
+    t.diagnostic(`Integer hashmap: ${measurements.bytes} bytes`)
+})
+
+test('String dictionaries compare contents, own key/value lifetimes and transfer popped values', () => {
+    const result=execute(`def identity(str value) -> str:
+    return value
+d={"Alice":"first","Bob":"second","Alice":"updated"}
+str key=identity("Alice")
+str read=d[key]
+str popped=d.pop("Bob")
+str missing=d.get("missing","fallback")
+str added=d.setdefault("Carol","third")
+str existing=d.setdefault("Alice","unused")
+bool found=identity("Alice") in d
+str after=d[identity("Carol")]
+d.clear()
+str still=read
+int count=len(d)
+`)
+    assert.equal(result.read,'updated');assert.equal(result.popped,'second')
+    assert.equal(result.missing,'fallback');assert.equal(result.added,'third')
+    assert.equal(result.existing,'updated');assert.equal(result.after,'third')
+    assert.equal(result.found,1);assert.equal(result.still,'updated');assert.equal(result.count,0)
+    assert.deepEqual(result.d,new Map())
+    const shared=execute('str value="same"\nd={value:value}\nvalue="changed"\nd["same"]=d["same"]\nstr held=d.pop("same")\nstr fallback=d.pop("missing","fallback")')
+    assert.equal(shared.held,'same');assert.equal(shared.fallback,'fallback')
+})
+
+test('Dictionary aliases, copies, updates, explicit empty types and recursive return cleanup work', () => {
+    const result=execute(`dict[str,int] empty={}
+empty["A"]=1
+alias=empty
+copy=dict(empty)
+alias["B"]=2
+copy.update({"A":10,"C":3})
+copy.update(copy)
+def make(int n) -> dict[str,str]:
+    local={"key":"value"}
+    if n>0:
+        return make(n-1)
+    return local
+dict[str,str] final={}
+for i in range(120):
+    final=make(3)
+str value=final["key"]
+int order=[v for k,v in copy.items()]
+`,{maxSlices:4000})
+    assert.deepEqual(result.empty,new Map([['A',1],['B',2]]))
+    assert.deepEqual(result.alias,result.empty)
+    assert.deepEqual(result.copy,new Map([['A',10],['C',3]]))
+    assert.equal(result.value,'value');assert.deepEqual(result.order,[10,3])
+})
+
+test('Dictionary iteration preserves order and detects structural mutation before dereferencing entries', () => {
+    const result=execute(`d={1:10,2:20,3:30}
+def total(dict[int,int] values) -> int:
+    result=0
+    for k,v in values.items():
+        if k==2:
+            continue
+        result+=v
+    return result
+int sum=total(d)
+for k in d.keys():
+    d[k]+=1
+int ordered=[v for v in d.values()]
+`)
+    assert.equal(result.sum,40);assert.deepEqual(result.ordered,[11,21,31])
+    assert.throws(()=>execute('d={1:2}\nfor k in d:\n    d[3]=4'),/changed during iteration/)
+    assert.throws(()=>execute('d={1:2}\nint x=d[9]'),/Dictionary key not found/)
+    assert.throws(()=>execute('d={1:2}\ndel d[9]'),/Dictionary key not found/)
+    assert.throws(()=>execute('d={}\nfor i in range(1000):\n    d[i]=i'),/out of memory/)
+})
+
+test('Dictionary render behavior agrees across optimization modes and tombstone reuse stays bounded', () => {
+    const source=readFileSync(resolve('../../examples/dictionaries.tip'),'utf8')
+    const reference={optimization:'reference'},balanced={optimization:'balanced'},aggressive={optimization:'aggressive'}
+    execute(source,reference);execute(source,balanced);execute(source,aggressive)
+    assert.deepEqual(aggressive.frames,reference.frames)
+    assert.deepEqual(balanced.frames,reference.frames)
+    assert.ok(aggressive.screen.some(n=>n))
+    const values=execute('d={}\nfor i in range(300):\n    d[i]=i\n    int value=d.pop(i)\nd[0]=7\nint result=d[0]',{maxSlices:3000})
+    assert.deepEqual(values.d,new Map([[0,7]]));assert.equal(values.result,7)
+})
+
+test('True string hash collisions still distinguish keys, including deletion and reinsertion', () => {
+    const hashes=new Map()
+    let collision
+    for(let i=0;i<100000 && !collision;i++) {
+        const key='key'+i
+        let h=5381
+        for(const c of key) h=((h*33)^c.charCodeAt(0))&65535
+        if(hashes.has(h)) collision=[hashes.get(h),key]
+        else hashes.set(h,key)
+    }
+    assert.ok(collision)
+    const [a,b]=collision
+    const result=execute(`d={"${a}":1,"${b}":2}\nint first=d["${a}"]\nint second=d["${b}"]\nint ha=hash("${a}")\nint hb=hash("${b}")\ndel d["${a}"]\nint retained=d["${b}"]\nd["${a}"]=3`)
+    assert.equal(result.ha,result.hb);assert.equal(result.first,1);assert.equal(result.second,2);assert.equal(result.retained,2)
+    assert.deepEqual(result.d,new Map([[b,2],[a,3]]))
+})
 
 test('Print draws transparent glyph strokes at pixel coordinates with explicit rendering', () => {
     const seed=Uint8Array.from({length:768},()=>0x55)

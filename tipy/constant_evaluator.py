@@ -5,6 +5,8 @@ Framebuffer bits remain symbolic until explicitly cleared/set, so the optimizer
 does not assume calculator RAM starts at zero.
 """
 
+from .types import is_dict
+
 
 class NotStatic(Exception):
     pass
@@ -61,7 +63,7 @@ class Evaluator:
     def expr(self, item):
         self.tick()
         kind = item["kind"]
-        if item.get("type") in {"fixed", "str"} or kind in {"stdlib", "cast_int", "to_fixed", "decimal", "compare_chain", "text_print", "text_input"}:
+        if is_dict(item.get("type", "")) or item.get("type") in {"fixed", "str"} or kind in {"stdlib", "cast_int", "to_fixed", "decimal", "compare_chain", "text_print", "text_input", "dict_contains", "dict_method", "dict_index", "hash"}:
             raise NotStatic("native numeric or runtime effect")
         if kind == "void_constant": return None
         if kind in {"number", "boolean"}:

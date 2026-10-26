@@ -3,6 +3,7 @@
 from copy import deepcopy
 from .constant_evaluator import Evaluator, STATIC_ERRORS, NotStatic
 from .framebuffer_backend import lower_frames
+from .types import managed
 
 
 def walk(item):
@@ -197,7 +198,7 @@ def pure_total(item):
 
 def inline_small_functions(tree):
     def cheap_argument(item):
-        if item.get("type") == "str" or item.get("type", "").endswith("[]"): return False
+        if managed(item.get("type", "")): return False
         if item["kind"] in {"number", "boolean", "name"}: return True
         if item["kind"] in {"negate", "not"}: return cheap_argument(item["value"])
         if item["kind"] in {"add", "subtract", "multiply", "compare", "and", "or"}:
@@ -208,7 +209,7 @@ def inline_small_functions(tree):
         body = [item for item in function["body"] if item["kind"] != "pass"]
         if len(body) != 1 or body[0]["kind"] != "return" or body[0]["value"] is None: continue
         value = body[0]["value"]
-        if value["type"] == "str" or value["type"].endswith("[]") or not pure_total(value): continue
+        if managed(value["type"]) or not pure_total(value): continue
         if sum("kind" in node for node in walk(value)) > 8: continue
         params = [function["locals"][p["name"]]["label"] for p in function["params"]]
         if any(node.get("storage") == "frame" and node.get("symbol") not in params for node in walk(value) if node.get("kind") == "name"): continue

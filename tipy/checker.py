@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from .errors import CompileError
+from .types import is_dict, dict_types, managed
 
 PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
 GRAPHICS_BUILTINS = PIXEL_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
@@ -19,6 +20,9 @@ def check(tree):
     checked["temporaries"] = {}
 
     def normalize(name):
+        if is_dict(name):
+            key, value = dict_types(name)
+            return f"dict[{normalize(key)},{normalize(value)}]"
         if name.endswith("[]"):
             return normalize(name[:-2]) + "[]"
         return "i16" if name == "int" else name
@@ -77,6 +81,9 @@ def check(tree):
         raise CompileError(f"Variable {name!r} has not been declared", item)
 
     def compatible(target, source_type, constant, item):
+        if is_dict(target) or is_dict(source_type):
+            if target != source_type: raise CompileError(f"Cannot assign {source_type} to {target}", item)
+            return
         if "str" in {target, source_type}:
             if target != source_type: raise CompileError(f"Cannot assign {source_type} to {target}", item)
             return
@@ -155,6 +162,39 @@ def check(tree):
         elif kind == "string":
             value_type = "str"
             item["owned"] = True
+        elif kind == "call" and item["name"] == "dict":
+            if len(item["arguments"]) > 1:
+                raise CompileError("dict expects zero arguments or another dictionary", item)
+            if item["arguments"]:
+                base = item["arguments"][0]
+                value_type, _ = expression(base)
+                if not is_dict(value_type): raise CompileError("dict expects another dictionary", item)
+                item.update(kind="dict_method", name="copy", base=base, arguments=[], owned=True)
+            else:
+                item.update(kind="dict", entries=[], owned=True)
+                value_type, constant = expression(item, expected_element=expected_element)
+        elif kind == "dict":
+            key_type, element = dict_types(expected_element) if expected_element and is_dict(expected_element) else (None, None)
+            for entry in item["entries"]:
+                kt, kc = expression(entry["key"], expected_element=key_type)
+                vt, vc = expression(entry["value"], expected_element=element)
+                if kt not in {"i16", "u8", "str"}: raise CompileError("Dictionary keys must be integers or strings", entry["key"])
+                if vt not in {"i16", "u8", "bool", "str"}: raise CompileError("Dictionary values must be integers, bools, or strings", entry["value"])
+                if key_type is None: key_type = "str" if kt == "str" else "i16"
+                if element is None: element = vt if vt in {"str", "bool"} else "i16"
+                compatible(key_type, kt, kc, entry["key"]); compatible(element, vt, vc, entry["value"])
+            key_type, element = key_type or "i16", element or "i16"
+            if key_type not in {"i16", "str"} or element not in {"i16", "u8", "bool", "str"}:
+                raise CompileError("Dictionary types require int/str keys and scalar int/bool/str values", item)
+            value_type = f"dict[{key_type},{element}]"
+            item["owned"] = True
+        elif kind == "call" and item["name"] == "hash" and item["name"] not in functions:
+            if "hash" in context["locals"] or "hash" in globals_: raise CompileError("Variable 'hash' is not callable", item)
+            if len(item["arguments"]) != 1: raise CompileError("hash expects one integer or string", item)
+            t, _ = expression(item["arguments"][0])
+            if t not in {"i16", "u8", "str"}: raise CompileError("hash expects one integer or string", item)
+            item["kind"] = "hash"
+            value_type = "i16"
         elif kind == "tuple":
             raise CompileError("Tuple values currently require an unpacked for loop over a literal list", item)
         elif kind == "name":
@@ -181,6 +221,28 @@ def check(tree):
             item["owned"] = True
         elif kind in {"index", "method"}:
             array_type, _ = expression(item["base"], expected_element=expected_element)
+            if is_dict(array_type):
+                key_type, element = dict_types(array_type)
+                if kind == "index":
+                    kt, kc = expression(item["index"], expected_element=key_type)
+                    compatible(key_type, kt, kc, item["index"])
+                    item["kind"] = "dict_index"
+                    value_type = element
+                else:
+                    name, args = item["name"], item["arguments"]
+                    counts = {"get": (2,), "setdefault": (2,), "pop": (1,2), "clear": (0,), "copy": (0,), "update": (1,)}
+                    if name in {"keys", "values", "items"}: raise CompileError("Dictionary views currently require a for loop", item)
+                    if name not in counts or len(args) not in counts[name]: raise CompileError("Unsupported dictionary method or argument count; get/setdefault need an explicit default", item)
+                    for i, arg in enumerate(args):
+                        expected = array_type if name == "update" else key_type if i == 0 else element
+                        t, c = expression(arg, expected_element=expected)
+                        compatible(expected, t, c, arg)
+                    item["kind"] = "dict_method"
+                    value_type = array_type if name == "copy" else "void" if name in {"clear", "update"} else element
+                if managed(value_type): item["owned"] = True
+                item["type"] = value_type
+                if value_type == "void" and not allow_void: raise CompileError("A void function does not produce a value", item)
+                return value_type, None
             if not array_type.endswith("[]"):
                 raise CompileError("Indexing and list methods require an array", item)
             element = array_type[:-2]
@@ -286,7 +348,7 @@ def check(tree):
             if len(item["arguments"]) != 1:
                 raise CompileError("len expects one array", item)
             argument_type, _ = expression(item["arguments"][0])
-            if not argument_type.endswith("[]") and argument_type != "str":
+            if not managed(argument_type):
                 raise CompileError("len expects an array", item)
             item["kind"] = "length"
             value_type = "i16"
@@ -301,7 +363,7 @@ def check(tree):
                 compatible(parameter["type"], argument_type, value, argument)
             item["symbol"] = function["label"]
             value_type = function["return_type"]
-            if value_type.endswith("[]") or value_type == "str":
+            if managed(value_type):
                 item["owned"] = True
             if context["function"]:
                 context["function"]["calls"].add(item["name"])
@@ -310,6 +372,10 @@ def check(tree):
         elif kind == "membership":
             left_type, left_constant = expression(item["left"])
             right_type, _ = expression(item["right"], expected_element="bool" if left_type == "bool" else None)
+            if is_dict(right_type):
+                compatible(dict_types(right_type)[0], left_type, left_constant, item)
+                item.update(kind="dict_contains", type="bool")
+                return "bool", None
             if not right_type.endswith("[]"):
                 raise CompileError("in requires an array or range on the right", item)
             compatible(right_type[:-2], left_type, left_constant, item)
@@ -321,13 +387,14 @@ def check(tree):
             value_type, constant = "bool", not operand if operand is not None else None
         elif kind == "negate":
             operand_type, operand = expression(item["value"], allow_min_magnitude=True)
-            if operand_type in {"bool", "str"} or operand_type.endswith("[]"):
+            if operand_type == "bool" or managed(operand_type):
                 raise CompileError("Cannot negate a bool or array", item)
             value_type = operand_type if operand_type == "fixed" else "i16"
             constant = -operand if operand is not None else None
         else:
             left_type, left = expression(item["left"])
             right_type, right = expression(item["right"])
+            if is_dict(left_type) or is_dict(right_type): raise CompileError("Dictionary arithmetic/comparison is not supported", item)
             if "fixed" in {left_type, right_type}:
                 if kind not in {"add", "subtract", "multiply", "compare"} or any(t not in {"fixed", "i16", "u8"} for t in (left_type, right_type)):
                     raise CompileError("Unsupported fixed-point operation", item)
@@ -391,7 +458,7 @@ def check(tree):
                 continue
             if kind == "collect":
                 element, constant = expression(statement["value"])
-                if element.endswith("[]") or element in {"void", "str"}:
+                if managed(element) or element == "void":
                     raise CompileError("Comprehensions require scalar elements", statement)
                 expected = statement.get("expected_element")
                 if expected:
@@ -401,13 +468,18 @@ def check(tree):
                 continue
             if kind == "index_assign":
                 target_type, _ = expression(statement["target"])
-                source_type, value = expression(statement["value"])
+                source_type, value = expression(statement["value"], expected_element=target_type)
                 if statement["operator"] != "=":
                     if target_type not in {"i16", "u8"} or source_type not in {"i16", "u8"}:
                         raise CompileError("Array arithmetic requires integers", statement)
                     source_type, value = "i16", None
                 compatible(target_type, source_type, value, statement)
                 statement["type"] = target_type
+                if statement["target"]["kind"] == "dict_index": statement["kind"] = "dict_assign"
+                continue
+            if kind == "dict_delete":
+                expression(statement["target"])
+                if statement["target"]["kind"] != "dict_index": raise CompileError("del currently requires a dictionary key", statement)
                 continue
             if kind == "return":
                 function = context["function"]
@@ -514,15 +586,55 @@ def check(tree):
                     context["initialized"] = before
                     continue
                 mode = iterable.get("name") if iterable["kind"] == "call" and iterable.get("name") in {"enumerate", "zip"} and iterable.get("name") not in functions else "array"
-                sources = iterable["arguments"] if mode == "zip" else iterable["arguments"][:1] if mode == "enumerate" else [iterable]
+                view = iterable["name"] if iterable["kind"] == "method" and iterable["name"] in {"keys", "values", "items"} else None
+                if view and iterable["arguments"]: raise CompileError("Dictionary views take no arguments", iterable)
+                sources = [iterable["base"]] if view else iterable["arguments"] if mode == "zip" else iterable["arguments"][:1] if mode == "enumerate" else [iterable]
                 if mode == "zip" and not sources or mode == "enumerate" and len(iterable["arguments"]) not in {1, 2}:
                     raise CompileError(f"Invalid arguments to {mode}", iterable)
                 types = []
                 for source in sources:
                     iterable_type, _ = expression(source)
-                    if not iterable_type.endswith("[]"):
+                    if not iterable_type.endswith("[]") and not (is_dict(iterable_type) and mode == "array"):
                         raise CompileError("A for loop requires an array or range", source)
                     types.append(iterable_type)
+                if len(types) == 1 and is_dict(types[0]):
+                    key_type, element = dict_types(types[0])
+                    elements = [key_type, element] if view == "items" else [element] if view == "values" else [key_type]
+                    names = statement.get("names", [statement["name"]])
+                    if len(names) != len(elements): raise CompileError(f"This dictionary iteration requires {len(elements)} target name(s)", statement)
+                    before = context["initialized"].copy()
+                    targets = []
+                    for name, t in zip(names, elements):
+                        if name in functions or name in GRAPHICS_BUILTINS or name == "len": raise CompileError("Loop variable conflicts with a function name", statement)
+                        symbol = context["locals"].get(name)
+                        if symbol is None:
+                            symbol = {"type": t, "size": 2, "label": f"__var_{len(globals_)}"}
+                            globals_[name] = symbol
+                            if name.startswith("$comp_"): checked["temporaries"][symbol["label"]] = symbol
+                        if symbol.pop("loop_inferred", False): symbol["type"] = t
+                        compatible(symbol["type"], t, None, statement)
+                        targets.append({**symbol, "symbol": symbol["label"]})
+                        context["initialized"].add(name)
+                    for field, t in (("iterator_0", types[0]), ("iteration_index", "i16"), ("dict_version", "i16")):
+                        if context["function"]:
+                            if field not in statement:
+                                function = context["function"]
+                                function["frame_size"] += 2
+                                if function["frame_size"] > 128: raise CompileError("Function locals exceed the current 128-byte stack frame limit", statement)
+                                symbol = {"type": t, "size": 2, "storage": "frame", "offset": -function["frame_size"], "label": f"__local_{len(context['locals'])}"}
+                                context["locals"][f"${field}{len(context['locals'])}"] = symbol
+                            else:
+                                symbol = statement[field]; symbol["type"] = t
+                        else:
+                            symbol = {"type": t, "size": 2, "label": f"__tmp_{len(checked['temporaries'])}"}
+                            checked["temporaries"][symbol["label"]] = symbol
+                        statement[field] = {**symbol, "symbol": symbol["label"]}
+                    statement.update(iteration_kind="dict", dict_view=view or "keys", sources=sources, targets=targets, target=targets[-1])
+                    if view: iterable["kind"] = "dict_view"
+                    statements(statement["body"], loop_depth + 1)
+                    context["initialized"] = before
+                    continue
+                if view: raise CompileError("Dictionary views require a dictionary", iterable)
                 elements = [t[:-2] for t in types]
                 if mode == "enumerate":
                     start = iterable["arguments"][1] if len(iterable["arguments"]) == 2 else {"kind": "number", "value": 0, "line": statement["line"], "column": statement["column"]}

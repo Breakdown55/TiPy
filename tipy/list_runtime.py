@@ -8,7 +8,7 @@ The small emitter below is only an authoring aid; all operations run as Z80.
 import re
 
 HEAP_BYTES = 8192
-RUNTIME_TARGET = re.compile(r"\b(?:call|jp)\s+(__arr_[A-Za-z0-9_]+)\b")
+RUNTIME_TARGET = re.compile(r"\b(?:call|jp)\s+((?:__arr_|__dict_)[A-Za-z0-9_]+)\b")
 
 
 def add(a, b): return ("+", a, b)
@@ -138,7 +138,7 @@ class Routine:
         return "\n".join(self.code)
 
 
-def runtime_assembly(required=None):
+def runtime_assembly(required=None, dictionary_types=None):
     routines = []
 
     r = Routine("init")
@@ -372,6 +372,10 @@ def runtime_assembly(required=None):
 
     from .python_runtime import builtin_routines
     routines.extend(builtin_routines())
+    from .dict_runtime import routines as dictionary_routines
+    routines.extend(dictionary_routines(
+        key_strings=dictionary_types is None or any(key == "str" for key, _ in dictionary_types),
+        value_strings=dictionary_types is None or any(value == "str" for _, value in dictionary_types)))
     routines.append("""__arr_fail:
         ld (__list_error),hl
         ld sp,(__list_main_sp)
