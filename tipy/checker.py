@@ -1232,7 +1232,18 @@ def check(tree):
             if kind=="compare" and (managed(left_type) or managed(right_type)):
                 if left_type!=right_type and item["operator"] not in {"==","!="}:raise CompileError("Ordering requires matching collection types",item)
                 if is_dict(left_type) and item["operator"] not in {"==","!="}:raise CompileError("Dictionaries only support equality comparisons",item)
-                item.update(kind="collection_compare",type="bool",same_type=left_type==right_type)
+                same_type=left_type==right_type
+                if is_tuple(left_type) and is_tuple(right_type):
+                    a,b=tuple_types(left_type),tuple_types(right_type)
+                    da,db=dynamic_tuple(left_type),dynamic_tuple(right_type)
+                    # Runtime tuples carry their actual length. A homogeneous
+                    # tuple built from a list can equal a static literal tuple.
+                    if da and db:
+                        same_type=a==b or bool(a and b) and all(a[i%len(a)]==b[i%len(b)] for i in range(len(a)+len(b)))
+                    elif da:same_type=not b or bool(a) and all(t==a[i%len(a)] for i,t in enumerate(b))
+                    elif db:same_type=not a or bool(b) and all(t==b[i%len(b)] for i,t in enumerate(a))
+                    else:same_type=a==b
+                item.update(kind="collection_compare",type="bool",same_type=same_type)
                 return "bool",None
             if is_dict(left_type) or is_dict(right_type): raise CompileError("Dictionary arithmetic/comparison is not supported", item)
             if "fixed" in {left_type, right_type}:

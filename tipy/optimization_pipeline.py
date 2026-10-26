@@ -179,7 +179,7 @@ class ConstantPropagation:
 
 
 def pure_total(item):
-    if item.get("cell"):return False
+    if item.get("cell") or item.get("evaluations"):return False
     kind = item["kind"]
     if kind in {"number", "boolean", "name", "constant_list", "void_constant"}: return True
     if kind in {"negate", "not"}: return pure_total(item["value"])
@@ -199,7 +199,7 @@ def pure_total(item):
 
 def inline_small_functions(tree):
     def cheap_argument(item):
-        if managed(item.get("type", "")): return False
+        if managed(item.get("type", "")) or item.get("evaluations"): return False
         if item["kind"] in {"number", "boolean", "name"}: return True
         if item["kind"] in {"negate", "not"}: return cheap_argument(item["value"])
         if item["kind"] in {"add", "subtract", "multiply", "compare", "and", "or"}:
@@ -229,6 +229,9 @@ def inline_small_functions(tree):
                 argument = deepcopy(replacements[child["symbol"]])
                 child.clear(); child.update(argument)
         location = {key: node[key] for key in ("line", "column", "filename") if key in node}
+        # Keyword/default binding evaluates source arguments into caller slots.
+        # Keep those snapshots when replacing the call with its return value.
+        if node.get("evaluations"):replacement["evaluations"]=deepcopy(node["evaluations"])
         node.clear(); node.update(replacement); node.update(location)
         count += 1
     return count

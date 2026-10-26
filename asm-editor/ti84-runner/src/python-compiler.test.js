@@ -11,7 +11,7 @@ function execute(source, measurements) {
         ? ['-c','import json,sys; from tipy import compile_source; print(json.dumps(compile_source(sys.stdin.read(), optimize_graphics=False, optimization="reference")))']
         : ['-m','tipy','-','--optimization', measurements?.optimization ?? 'reference','--show','all']
     const processResult = spawnSync(python,args,{
-        cwd: resolve('../..'), input: source, encoding: 'utf8'
+        cwd: resolve('../..'), input: source, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024
     })
     assert.ifError(processResult.error)
     assert.equal(processResult.status,0,processResult.stderr)
@@ -90,6 +90,38 @@ function execute(source, measurements) {
     for (const [name,symbol] of Object.entries(result.symbols)) values[name]=decode(runner.assembly.asm.scopes[0].symbols.get(symbol.label).value,symbol.type)
     return values
 }
+
+const featureDemo = readFileSync(resolve('../../examples/feature_test.tip'),'utf8')
+const featureTitles = [...featureDemo.matchAll(/begin\("([^"]+)"\)/g)].map(match=>match[1])
+for(let page=1;page<=24;page++)test(`Feature demo page ${page} displays six native passes`,t=>{
+    const title=featureTitles[page-1]
+    const expected={}
+    execute(`clear()\nprint(${JSON.stringify(title)},0,0)\n`+Array.from({length:6},(_,i)=>`print("${i+1}: OK",0,${(i+1)*8})`).join('\n')+'\nprint("6/6 PASS",0,56)\nrender()',expected)
+    for(const optimization of ['reference','aggressive']) {
+        const observed={maxSlices:20000,optimization}
+        execute(featureDemo.replace(/test_01\(\)\s*$/,`test_${String(page).padStart(2,'0')}()`),observed)
+        for(let row=0;row<8;row++)assert.deepEqual(observed.graph.slice(row*96,(row+1)*96),expected.graph.slice(row*96,(row+1)*96),`Page ${page}, ${optimization}, row ${row}: expected ${row===0?title:row===7?'6/6 PASS':row+': OK'}`)
+        t.diagnostic(`${title}, ${optimization}: ${observed.bytes} bytes`)
+    }
+})
+test('Feature demo graphics page renders clipping, transparent text and all primitives',()=>{
+    const observed={}
+    execute(featureDemo.replace(/test_01\(\)\s*$/,'test_25()'),observed)
+    const pixel=(x,y)=>!!(observed.graph[y*12+(x>>3)]&(128>>(x&7)))
+    for(let x=0;x<96;x++)assert.ok(pixel(x,0)&&pixel(x,63))
+    for(let y=0;y<64;y++)assert.ok(pixel(0,y)&&pixel(95,y))
+    assert.ok(pixel(44,16));assert.ok(!pixel(45,16));assert.ok(!pixel(46,16))
+    for(let y=20;y<=40;y++)for(let x=65;x<=85;x++)assert.ok(pixel(x,y))
+    assert.ok(!pixel(94,5));assert.ok(!pixel(1,5))
+})
+test('Feature demo input page accepts 42 and ABC through native keyboard polling',()=>{
+    const observed={pollKeys:[...Array(55).fill(0),35,0,26,0,9,0,48,0,47,0,39,0,31,0,9],maxSlices:20000}
+    execute(featureDemo.replace(/test_01\(\)\s*$/,'test_26()'),observed)
+    const expected={}
+    execute('clear()\nrectangle(0,95,0,63,1,False)\nprint("26 INPUT",3,3)\npixel_on(80,20)\nprint("N: 42",3,16)\nprint("S: ABC",3,32)\nprint("INPUT PASS",3,50)\nrender()',expected)
+    assert.deepEqual(observed.graph,expected.graph)
+    assert.ok(observed.frames.length>4,'Native input should render intermediate cursor/answer frames')
+})
 
 test('Expanded language features preserve rendered output across optimization modes', () => {
     const source=readFileSync(resolve('../../examples/closures_and_containers.tip'),'utf8')
@@ -986,6 +1018,16 @@ bool ordered="Alice"<"Bob"
     assert.equal(values.first,'Alice');assert.equal(values.removed,'Bob');assert.equal(values.count,2)
     assert.deepEqual(values.matrix,[[1,9],[3,4],[5,6]])
     assert.equal(values.total,19);assert.deepEqual(values.held,[7,8,9]);assert.equal(values.same,1);assert.equal(values.ordered,1)
+})
+
+test('Inlining preserves default and keyword argument snapshots and their side effects',()=>{
+    for(const optimization of ['reference','balanced','aggressive']) {
+        assert.deepEqual(execute('events=[]\ndef operand(int value):\n    events.append(value)\n    return value\ndef add(int a,int b=4):\n    return a+b\ndef run():\n    first=add(operand(1))\n    second=add(b=operand(2),a=operand(3))\n    return first+second\nanswer=run()',{optimization}),{events:[1,2,3],answer:10})
+    }
+})
+
+test('Dynamic and literal tuple equality compares matching element schemas and actual lengths',()=>{
+    assert.deepEqual(execute('bool same=tuple([1,2])==(1,2)\nbool reversed=(1,2)==tuple([1,2])\nbool different=tuple([1,2])==(1,3)\nbool shorter=tuple([1])==(1,2)\nbool empty=tuple([])==()\nbool typed=tuple(["1"])==(1,)'),{same:1,reversed:1,different:0,shorter:0,empty:1,typed:0})
 })
 
 test('General tuple values, return inference and unpacking preserve fields and ownership', () => {

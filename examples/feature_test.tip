@@ -1,0 +1,592 @@
+# TiPy feature test suite -- 24 automatic pages and 2 interactive pages.
+# Change ONLY the final call to choose a page: test_01(), ... test_26().
+# Compile and Run after each change. Each page is a separate executable so
+# unused runtimes are omitted and the program fits TI-84 Plus RAM.
+# Expected automatic page: six OK lines, then "6/6 PASS".
+# This tests implemented features, not unsupported CPython features.
+
+import random
+import time
+import math
+from math import sin as sine
+
+#define WIDTH 96
+#define HEIGHT 64
+
+def begin(str title):
+    clear()
+    print(title, 0, 0)
+
+def check(int number, bool good) -> int:
+    print(str(number) + (": OK" if good else ": FAIL"), 0, number * 8)
+    return 1 if good else 0
+
+def finish(int passed):
+    print(str(passed) + "/6 " + ("PASS" if passed == 6 else "FAIL"), 0, 56)
+    render()
+
+def factorial(int n) -> int:
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+
+def add_default(int a, int b = 4) -> int:
+    return a + b
+
+def add_many(int first, *rest) -> int:
+    return first + sum(rest)
+
+def make_counter(int start):
+    value = start
+    def advance(int amount):
+        nonlocal value
+        value += amount
+        return value
+    return advance
+
+def make_multiplier(int factor):
+    return lambda value: value * factor
+
+def triple(int value) -> int:
+    return value * 3
+
+def positive(int value) -> bool:
+    return value > 0
+
+def mark(int[] events) -> bool:
+    events.append(1)
+    return True
+
+def pair_result():
+    return 7, "TiPy"
+
+def count_up(int count):
+    for value in range(count):
+        yield value
+
+def failing_generator():
+    yield 3
+    raise ValueError("generator")
+
+def cleanup_return(int[] events) -> int:
+    try:
+        return 7
+    finally:
+        events.append(9)
+
+class Counter:
+    def __init__(self, int value):
+        self.value = value
+    def add(self, int amount):
+        self.value += amount
+        return self.value
+    def read(self):
+        return self.value
+
+class NamedCounter(Counter):
+    def __init__(self, int value, str name):
+        self.value = value
+        self.name = name
+    def label(self):
+        return self.name
+
+# 01: explicit types, inference, signed values, wrapping and comparisons.
+def test_01():
+    begin("01 TYPES / INTS")
+    int a = 12
+    i16 b = -7
+    u8 byte = 255
+    bool enabled = True
+    u8 bytes = [0, 255]
+    bool flags = [False, True]
+    p = check(1, a + b == 5 and a - b == 19)
+    p += check(2, a * b == -84 and -a == -12)
+    p += check(3, byte == 255 and enabled and not False and bytes[1] == byte and flags[1])
+    int edge = 32767
+    edge += 1
+    p += check(4, edge == -32768 and edge < b and b < a)
+    p += check(5, -17 // 5 == -4 and -17 % 5 == 3)
+    p += check(6, abs(b) == 7 and 1 < a < 20 and a != b)
+    finish(p)
+
+# 02: bitwise precedence, shifts, power, modular power, divmod, assignment.
+def test_02():
+    begin("02 BITS / POWER")
+    p = check(1, (12 & 10) == 8 and (12 | 3) == 15 and (12 ^ 10) == 6)
+    p += check(2, ~0 == -1 and (3 << 4) == 48 and (-16 >> 2) == -4)
+    p += check(3, 2 ** 3 ** 2 == 512 and pow(3, 5) == 243)
+    p += check(4, pow(7, 8, 13) == 3)
+    q, r = divmod(-17, 5)
+    p += check(5, q == -4 and r == 3)
+    a = [3, 32, 2, 7]
+    a[0] <<= 2
+    a[1] >>= 3
+    a[2] **= 5
+    a[3] ^= 3
+    p += check(6, a == [12, 4, 32, 4])
+    finish(p)
+
+# 03: for/while, else, break/continue, short circuit, conditional expressions.
+def test_03():
+    begin("03 CONTROL FLOW")
+    total = 0
+    for n in range(6):
+        if n == 2:
+            continue
+        if n == 5:
+            break
+        total += n
+    p = check(1, total == 8)
+    n = 0
+    while n < 3:
+        n += 1
+    else:
+        total += 10
+    p += check(2, n == 3 and total == 18)
+    completed = False
+    for n in range(0):
+        pass
+    else:
+        completed = True
+    p += check(3, completed)
+    broken = False
+    while True:
+        break
+    else:
+        broken = True
+    p += check(4, not broken)
+    events = []
+    a = False and mark(events)
+    b = True or mark(events)
+    p += check(5, not a and b and len(events) == 0)
+    p += check(6, (10 if b else 20) == 10)
+    finish(p)
+
+# 04: ordinary, recursive, default, keyword, variadic and unpacked calls.
+def test_04():
+    begin("04 FUNCTIONS")
+    p = check(1, factorial(6) == 720)
+    p += check(2, add_default(3) == 7 and add_default(3, 8) == 11)
+    p += check(3, add_default(b=9, a=2) == 11)
+    p += check(4, add_many(1, 2, 3, 4) == 10)
+    args = [3, 5]
+    options = {"b": 6}
+    p += check(5, add_default(*args) == 8 and add_default(2, **options) == 8)
+    left = right = [1]
+    right.append(2)
+    p += check(6, left is right and left == [1, 2])
+    finish(p)
+
+# 05: returned closures, shared nonlocal cells, lambdas and callback state.
+def test_05():
+    begin("05 CLOSURES")
+    first = make_counter(10)
+    second = make_counter(100)
+    p = check(1, first(2) == 12)
+    p += check(2, first(3) == 15)
+    p += check(3, second(7) == 107 and first(0) == 15)
+    double = make_multiplier(2)
+    p += check(4, double(9) == 18)
+    p += check(5, list(map(double, [1, 2, 3])) == [2, 4, 6])
+    alias = first
+    p += check(6, alias(1) == 16 and first(0) == 16)
+    finish(p)
+
+# 06: strings, indexing, slices, concatenation, repetition and conversions.
+def test_06():
+    begin("06 STRINGS")
+    text = "TiPy"
+    p = check(1, len(text) == 4 and text[0] == "T" and text[-1] == "y")
+    p += check(2, text[1:3] == "iP" and text[::-1] == "yPiT")
+    p += check(3, "a" + "bc" == "abc" and "ab" * 3 == "ababab")
+    p += check(4, "ab" < "ac" and "iP" in text and "z" not in text)
+    p += check(5, ord("A") == 65 and chr(90) == "Z")
+    p += check(6, str(-12) == "-12" and str(True) == "True" and repr("x") == "'x'")
+    finish(p)
+
+# 07: all native search and case conversion methods.
+def test_07():
+    begin("07 TEXT METHODS")
+    text = "banana"
+    p = check(1, text.find("na") == 2 and text.rfind("na") == 4)
+    p += check(2, text.index("an") == 1 and text.rindex("an") == 3)
+    p += check(3, text.count("an") == 2 and text.find("z") == -1)
+    p += check(4, text.startswith("ban") and text.endswith("ana"))
+    p += check(5, "tIpY".upper() == "TIPY" and "tIpY".lower() == "tipy")
+    p += check(6, "hELLO".capitalize() == "Hello" and "hi THERE".title() == "Hi There" and "Ab".swapcase() == "aB")
+    finish(p)
+
+# 08: strip, split, join, replace, f-strings and integer formatting.
+def test_08():
+    begin("08 TEXT FORMATS")
+    p = check(1, "  hi  ".strip() == "hi" and "--hi--".strip("-") == "hi")
+    p += check(2, " hi ".lstrip() == "hi " and " hi ".rstrip() == " hi")
+    p += check(3, "a,b,c".split(",", 1) == ["a", "b,c"] and " a  b ".split() == ["a", "b"])
+    p += check(4, "-".join(["a", "b", "c"]) == "a-b-c")
+    p += check(5, "banana".replace("na", "!", 1) == "ba!na")
+    value = 42
+    p += check(6, f"{value:04d}" == "0042" and hex(value) == "0x2a" and bin(5) == "0b101" and oct(8) == "0o10")
+    finish(p)
+
+# 09: every native list mutation method; copies versus aliases.
+def test_09():
+    begin("09 LIST METHODS")
+    values = [1, 3]
+    values.insert(1, 2)
+    values.append(4)
+    p = check(1, values == [1, 2, 3, 4])
+    popped = values.pop()
+    values.remove(2)
+    p += check(2, popped == 4 and values == [1, 3])
+    values.extend([3, 5])
+    p += check(3, values.count(3) == 2 and values.index(5) == 3)
+    copy = values.copy()
+    copy.reverse()
+    p += check(4, copy == [5, 3, 3, 1] and values == [1, 3, 3, 5])
+    alias = values
+    alias[-1] = 9
+    p += check(5, values[-1] == 9 and copy[-1] == 1)
+    values.clear()
+    p += check(6, len(values) == 0 and len(alias) == 0)
+    finish(p)
+
+# 10: sorting, list operators, nested/string lists and slices.
+def test_10():
+    begin("10 LIST SHAPES")
+    values = [3, 1, 2]
+    ordered = sorted(values)
+    p = check(1, ordered == [1, 2, 3] and values == [3, 1, 2])
+    values.sort(reverse=True)
+    p += check(2, values == [3, 2, 1])
+    p += check(3, [1, 2] + [3] == [1, 2, 3] and [4] * 3 == [4, 4, 4])
+    p += check(4, values[::-1] == [1, 2, 3] and values[1:] == [2, 1])
+    matrix = [[1, 2], [3, 4]]
+    row = matrix[0]
+    row[1] = 9
+    p += check(5, matrix == [[1, 9], [3, 4]])
+    p += check(6, sorted(["z", "a", "b"]) == ["a", "b", "z"])
+    finish(p)
+
+# 11: tuples, multiple returns, nested/starred unpacking and loop unpacking.
+def test_11():
+    begin("11 TUPLES")
+    pair = pair_result()
+    number, name = pair
+    p = check(1, number == 7 and name == "TiPy" and pair[-1] == "TiPy")
+    p += check(2, tuple([1, 2, 3]) == (1, 2, 3) and (1,) + (2,) == (1, 2) and (3,) * 2 == (3, 3))
+    a, (b, c), *rest = (1, (2, 3), 4, 5)
+    p += check(3, a + b + c == 6 and rest == [4, 5])
+    head, *middle, last = [1, 2, 3, 4]
+    p += check(4, head == 1 and middle == [2, 3] and last == 4)
+    first, *tail = "abc"
+    p += check(5, first == "a" and tail == ["b", "c"])
+    total = 0
+    for x, y in [(1, 2), (3, 4)]:
+        total += x + y
+    p += check(6, total == 10 and (1, 2, 3)[::-1] == (3, 2, 1))
+    finish(p)
+
+# 12: list/set/dict comprehensions, nested loops, range, enumerate and zip.
+def test_12():
+    begin("12 COMPREHEND")
+    p = check(1, list(range(5, -1, -2)) == [5, 3, 1])
+    p += check(2, [n * n for n in range(6) if n % 2 == 0] == [0, 4, 16])
+    p += check(3, [x + y for x in [1, 2] for y in [10, 20]] == [11, 21, 12, 22])
+    p += check(4, {n % 3 for n in range(6)} == {0, 1, 2})
+    table = {n: n * n for n in range(3)}
+    p += check(5, table == {0: 0, 1: 1, 2: 4})
+    total = 0
+    for index, value in enumerate([10, 20], 1):
+        total += index * value
+    for x, y in zip([1, 2, 3], [4, 5]):
+        total += x * y
+    p += check(6, total == 64)
+    finish(p)
+
+# 13: hashed sets, membership, algebra, comparisons and update methods.
+def test_13():
+    begin("13 SETS")
+    values = set([1, 2, 2, 3])
+    p = check(1, len(values) == 3 and 2 in values and 4 not in values)
+    p += check(2, values | {4} == {1, 2, 3, 4} and values & {2, 4} == {2})
+    p += check(3, values - {2} == {1, 3} and values ^ {3, 4} == {1, 2, 4})
+    p += check(4, {1} < values and values >= {1, 2} and values.isdisjoint({8}))
+    copy = values.copy()
+    copy.add(4)
+    copy.discard(99)
+    copy.remove(1)
+    p += check(5, copy == {2, 3, 4} and values == {1, 2, 3})
+    copy.intersection_update({2, 4})
+    copy.difference_update({2})
+    copy.symmetric_difference_update({4, 5})
+    copy.update([6])
+    methods = values.intersection({1, 4}) == {1} and values.difference({2}) == {1, 3} and values.symmetric_difference({3}) == {1, 2}
+    single = {9}
+    taken = single.pop()
+    single.add(8)
+    single.clear()
+    p += check(6, copy == {5, 6} and values.union({4}) == {1, 2, 3, 4} and methods and taken == 9 and len(single) == 0 and values.issubset({1, 2, 3, 4}) and values.issuperset({1}))
+    finish(p)
+
+# 14: dictionary mutation, hashing, deletion, defaults, copies and ordering.
+def test_14():
+    begin("14 DICTIONARIES")
+    table = {"a": 1, "b": 2}
+    table["a"] += 2
+    p = check(1, table["a"] == 3 and "b" in table and "z" not in table)
+    p += check(2, table.get("missing", 9) == 9 and table.setdefault("c", 4) == 4)
+    p += check(3, table.pop("b") == 2 and table.pop("missing", 8) == 8)
+    copy = table.copy()
+    copy.update({"d": 5})
+    del copy["a"]
+    p += check(4, list(copy) == ["c", "d"] and table["a"] == 3)
+    integers = {1: 10, 17: 20, 33: 30}
+    del integers[17]
+    integers[49] = 40
+    p += check(5, integers[1] + integers[33] + integers[49] == 80 and hash("same") == hash("same"))
+    copy.clear()
+    p += check(6, len(copy) == 0 and len(table) == 2)
+    finish(p)
+
+# 15: managed/nested dictionary values, merging, and stored live views.
+def test_15():
+    begin("15 DICT VIEWS")
+    table = {"a": [1], "b": [2]}
+    keys = table.keys()
+    vals = table.values()
+    items = table.items()
+    table["c"] = [3]
+    p = check(1, len(keys) == 3 and "c" in keys)
+    p += check(2, list(vals) == [[1], [2], [3]])
+    p += check(3, ("b", [2]) in items and keys == {"a", "b", "c"})
+    merged = table | {"a": [9]}
+    p += check(4, merged["a"] == [9] and table["a"] == [1])
+    nested = {"outer": table}
+    child = nested["outer"]["b"]
+    child.append(8)
+    p += check(5, table["b"] == [2, 8])
+    p += check(6, items == table.copy().items() and list(keys) == ["a", "b", "c"])
+    finish(p)
+
+# 16: None, optional narrowing, identity and typed truth conversion.
+def test_16():
+    begin("16 NONE / TRUTH")
+    value = None
+    p = check(1, value is None and value == None)
+    value = 0
+    p += check(2, value is not None and value != None)
+    result = -1
+    if value is not None:
+        result = value + 7
+    p += check(3, result == 7 and not bool(value))
+    first = [1]
+    alias = first
+    other = [1]
+    p += check(4, first is alias and first is not other and first == other)
+    p += check(5, not bool(0) and bool(-1) and not bool("") and bool("x"))
+    p += check(6, not bool([]) and bool([0]) and 0 != None)
+    finish(p)
+
+# 17: classes, attributes, aliasing, inheritance and bound callbacks.
+def test_17():
+    begin("17 CLASSES")
+    counter = Counter(10)
+    p = check(1, counter.add(3) == 13 and counter.read() == 13)
+    alias = counter
+    alias.value = 20
+    p += check(2, counter.value == 20 and alias is counter)
+    p += check(3, counter is not Counter(20) and counter != Counter(20))
+    method = counter.add
+    p += check(4, method(2) == 22)
+    named = NamedCounter(5, "TiPy")
+    p += check(5, named.read() == 5 and named.label() == "TiPy")
+    p += check(6, list(map(method, [1, 2])) == [23, 25] and counter.value == 25)
+    finish(p)
+
+# 18: exceptions, messages, assert, try/else/finally and native unwinding.
+def test_18():
+    begin("18 EXCEPTIONS")
+    caught = False
+    try:
+        raise ValueError("expected")
+    except ValueError as error:
+        caught = str(error) == "expected"
+    p = check(1, caught)
+    zero = False
+    try:
+        result = 10 // 0
+    except ZeroDivisionError:
+        zero = True
+    p += check(2, zero)
+    asserted = False
+    try:
+        assert False, "expected"
+    except AssertionError:
+        asserted = True
+    p += check(3, asserted)
+    events = []
+    try:
+        events.append(1)
+    except ValueError:
+        events.append(99)
+    else:
+        events.append(2)
+    finally:
+        events.append(3)
+    p += check(4, events == [1, 2, 3])
+    returned = cleanup_return(events)
+    p += check(5, returned == 7 and events[-1] == 9)
+    rethrown = False
+    try:
+        try:
+            raise KeyError("missing")
+        except KeyError:
+            raise
+    except KeyError:
+        rethrown = True
+    p += check(6, rethrown)
+    finish(p)
+
+# 19: lazy generators, independent stacks, exhaustion and raised errors.
+def test_19():
+    begin("19 GENERATORS")
+    first = count_up(3)
+    second = count_up(2)
+    p = check(1, next(first) == 0 and next(first) == 1)
+    p += check(2, next(second) == 0 and next(first) == 2)
+    p += check(3, next(first, 99) == 99 and next(second) == 1)
+    p += check(4, list(count_up(4)) == [0, 1, 2, 3])
+    exhausted = False
+    try:
+        next(first)
+    except StopIteration:
+        exhausted = True
+    p += check(5, exhausted)
+    failed = False
+    broken = failing_generator()
+    initial = next(broken)
+    try:
+        next(broken)
+    except ValueError:
+        failed = True
+    p += check(6, initial == 3 and failed)
+    finish(p)
+
+# 20: iterators, map/filter, reductions and short-circuit consumption.
+def test_20():
+    begin("20 ITERATORS")
+    p = check(1, list(reversed([1, 2, 3])) == [3, 2, 1])
+    p += check(2, list(map(triple, [1, 2, 3])) == [3, 6, 9])
+    p += check(3, list(filter(positive, [-1, 0, 2, 3])) == [2, 3])
+    p += check(4, list(filter(None, ["", "A", "", "B"])) == ["A", "B"])
+    values = iter([0, 2, 3])
+    found = any(values)
+    p += check(5, found and next(values) == 3 and next(values, 9) == 9)
+    p += check(6, sum(iter([1, 2, 3]), 4) == 10 and min(iter([3, 1, 2])) == 1 and max([1, 2, 3]) == 3 and all([True, True]))
+    finish(p)
+
+# 21: boxed signed 32-bit arithmetic, shifts, conversions and formatting.
+def test_21():
+    begin("21 I32 NUMBERS")
+    i32 a = 100000
+    i32 b = -70000
+    p = check(1, a + b == i32(30000) and a - b == i32(170000))
+    p += check(2, a // b == i32(-2) and a % b == i32(-40000))
+    p += check(3, (a << 2) == i32(400000) and (b >> 1) == i32(-35000))
+    p += check(4, i32(3) ** 15 == i32(14348907) and abs(b) == i32(70000))
+    p += check(5, str(a) == "100000" and hex(i32(65536)) == "0x10000")
+    p += check(6, int(a) == -31072 and sorted([a, b]) == [b, a])
+    finish(p)
+
+# 22: native IEEE binary32, division, comparisons and integer conversions.
+def test_22():
+    begin("22 FLOAT MATH")
+    float a = 1.5
+    float b = -2.0
+    p = check(1, a + b == float(-0.5) and a - b == float(3.5))
+    p += check(2, a * b == float(-3.0) and a / b == float(-0.75))
+    p += check(3, 7 / 2 == float(3.5) and pow(float(2), 5) == float(32))
+    float large = 1e20
+    float small = 1e-20
+    p += check(4, large > float(100000) and small > float(0) and small < float(1))
+    p += check(5, int(float(-12.75)) == -12 and i32(float(100000)) == i32(100000))
+    p += check(6, abs(b) == float(2) and not bool(float(-0.0)) and bool(a))
+    finish(p)
+
+# 23: exact decimal parsing, float text, ties-to-even and special values.
+def test_23():
+    begin("23 FLOAT TEXT")
+    float value = 1.25
+    p = check(1, float("1.25") == value and float("-2.5e2") == float(-250))
+    p += check(2, str(value) == "1.25" and f"{value:.2f}" == "1.25")
+    p += check(3, round(float(2.5)) == 2 and round(float(3.5)) == 4)
+    p += check(4, round(float(1.25), 1) == float(1.2))
+    nan = float("nan")
+    inf = float("inf")
+    p += check(5, nan != nan and not (nan < value) and inf > float(1e30))
+    p += check(6, round(1250, -2) == 1200 and round(1350, -2) == 1400)
+    finish(p)
+
+# 24: native modules, aliases, deterministic RNG, timing and fixed-point trig.
+def test_24():
+    begin("24 NATIVE MODULES")
+    random.seed(123)
+    first = random.randint(1, 100)
+    random.seed(123)
+    p = check(1, random.randint(1, 100) == first)
+    in_range = True
+    for n in range(30):
+        value = random.randint(-3, 3)
+        if value < -3 or value > 3:
+            in_range = False
+    p += check(2, in_range and random.randint(7, 7) == 7)
+    p += check(3, math.sin(0) == 0 and math.cos(0) == 1)
+    angle = math.radians(90)
+    p += check(4, sine(angle) > 0.98 and sine(angle) <= 1.0)
+    p += check(5, WIDTH == 96 and HEIGHT == 64)
+    # Render before sleeping; sleep does not display buffered graphics.
+    render()
+    time.sleep(0.04)
+    p += check(6, True)
+    finish(p)
+
+# 25 INTERACTIVE: a visual graphics/input-buffer test, not six text checks.
+# Expected: border, diagonal X, outlined left box, solid right box, and dot.
+def test_25():
+    clear()
+    rectangle(0, 95, 0, 63, 1, False)
+    line(1, 10, 94, 62)
+    line(94, 10, 1, 62)
+    rectangle(8, 30, 20, 40, 2, False)
+    rectangle(65, 85, 20, 40, 1, True)
+    h_line(8, 48, 85, 48)
+    v_line(48, 12, 48, 58)
+    pixel_on(44, 16)
+    pixel_on(45, 16)
+    pixel_off(45, 16)
+    flip_pixel(46, 16)
+    flip_pixel(46, 16)
+    # These must be clipped, never wrap onto the opposite screen edge.
+    pixel_on(-1, 5)
+    pixel_on(96, 5)
+    pixel_on(5, -1)
+    pixel_on(5, 64)
+    print("25 GRAPHICS", 4, 2)
+    render()
+
+# 26 INTERACTIVE: enter 42, then ABC, pressing Enter after each answer.
+# The cursor blinks; ALPHA/Shift selects letters, DEL/Backspace edits.
+# Expected final bottom line: INPUT PASS. Existing pixels stay visible.
+def test_26():
+    clear()
+    rectangle(0, 95, 0, 63, 1, False)
+    print("26 INPUT", 3, 3)
+    pixel_on(80, 20)
+    render()
+    int number = input("N: ", 3, 16)
+    str text = input("S: ", 3, 32)
+    print("INPUT PASS" if number == 42 and text == "ABC" else "INPUT FAIL", 3, 50)
+    render()
+
+# SELECT ONE PAGE HERE. Change to test_02(), ..., test_26(), then compile.
+test_01()
