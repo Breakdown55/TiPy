@@ -34,6 +34,18 @@ test('HTTP compile runs Python with the selected in-memory entry and imports',as
         assert.doesNotMatch(stripes.assembly,/__heap_start|__fn_/)
     })
 })
+test('HTTP compile resolves callbacks throughout the complete feature demo',async()=>{
+    const source=await readFile(new URL('../../examples/feature_test.tip',import.meta.url),'utf8')
+    await withServer(process.env.TIPY_PYTHON || 'python',async url=>{
+        for(const page of ['01','05','17','20']) {
+            const response=await post(url,{files:{'main.tip':source.replace(/test_01\(\)\s*$/,`test_${page}()`)},entry:'main.tip'})
+            const result=await response.json()
+            assert.equal(response.status,200,JSON.stringify(result.error))
+            assert.equal(result.ok,true)
+        }
+    })
+})
+
 test('HTTP compile returns Python source locations and no assembly on failure',async () => {
     await withServer(process.env.TIPY_PYTHON || 'python',async url => {
         const response = await post(url,{ files: { 'main.tip': 'import utils\nint A=1', 'utils.tip': '# comment\nint B=missing' }, entry: 'main.tip' })

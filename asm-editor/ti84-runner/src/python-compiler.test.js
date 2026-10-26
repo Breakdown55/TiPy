@@ -7,7 +7,9 @@ import { Ti84Runner } from './hardware.js'
 
 function execute(source, measurements) {
     const python = process.env.TIPY_PYTHON || 'python'
-    const args = measurements?.optimizeGraphics === false
+    const args = measurements?.project
+        ? ['-c','import json,sys; from tipy.project import compile_project; from tipy.assembly_size import estimate; r=compile_project({"main.tip":sys.stdin.read()},"main.tip",optimization=sys.argv[1]); r["estimated_bytes"]=estimate(r["assembly"]); print(json.dumps(r))',measurements?.optimization ?? 'reference']
+        : measurements?.optimizeGraphics === false
         ? ['-c','import json,sys; from tipy import compile_source; print(json.dumps(compile_source(sys.stdin.read(), optimize_graphics=False, optimization="reference")))']
         : ['-m','tipy','-','--optimization', measurements?.optimization ?? 'reference','--show','all']
     const processResult = spawnSync(python,args,{
@@ -98,14 +100,14 @@ for(let page=1;page<=24;page++)test(`Feature demo page ${page} displays six nati
     const expected={}
     execute(`clear()\nprint(${JSON.stringify(title)},0,0)\n`+Array.from({length:6},(_,i)=>`print("${i+1}: OK",0,${(i+1)*8})`).join('\n')+'\nprint("6/6 PASS",0,56)\nrender()',expected)
     for(const optimization of ['reference','aggressive']) {
-        const observed={maxSlices:20000,optimization}
+        const observed={maxSlices:20000,optimization,project:true}
         execute(featureDemo.replace(/test_01\(\)\s*$/,`test_${String(page).padStart(2,'0')}()`),observed)
         for(let row=0;row<8;row++)assert.deepEqual(observed.graph.slice(row*96,(row+1)*96),expected.graph.slice(row*96,(row+1)*96),`Page ${page}, ${optimization}, row ${row}: expected ${row===0?title:row===7?'6/6 PASS':row+': OK'}`)
         t.diagnostic(`${title}, ${optimization}: ${observed.bytes} bytes`)
     }
 })
 test('Feature demo graphics page renders clipping, transparent text and all primitives',()=>{
-    const observed={}
+    const observed={project:true}
     execute(featureDemo.replace(/test_01\(\)\s*$/,'test_25()'),observed)
     const pixel=(x,y)=>!!(observed.graph[y*12+(x>>3)]&(128>>(x&7)))
     for(let x=0;x<96;x++)assert.ok(pixel(x,0)&&pixel(x,63))
@@ -115,7 +117,7 @@ test('Feature demo graphics page renders clipping, transparent text and all prim
     assert.ok(!pixel(94,5));assert.ok(!pixel(1,5))
 })
 test('Feature demo input page accepts 42 and ABC through native keyboard polling',()=>{
-    const observed={pollKeys:[...Array(55).fill(0),35,0,26,0,9,0,48,0,47,0,39,0,31,0,9],maxSlices:20000}
+    const observed={pollKeys:[...Array(55).fill(0),35,0,26,0,9,0,48,0,47,0,39,0,31,0,9],maxSlices:20000,project:true}
     execute(featureDemo.replace(/test_01\(\)\s*$/,'test_26()'),observed)
     const expected={}
     execute('clear()\nrectangle(0,95,0,63,1,False)\nprint("26 INPUT",3,3)\npixel_on(80,20)\nprint("N: 42",3,16)\nprint("S: ABC",3,32)\nprint("INPUT PASS",3,50)\nrender()',expected)

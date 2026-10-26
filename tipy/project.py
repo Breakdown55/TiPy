@@ -127,15 +127,52 @@ def resolve_module_calls(tree, imports, selections=None):
             raise CompileError(f"Ambiguous function {name!r}; use module.{name}(...) instead", item)
         return candidates[0] if candidates else name
 
-    def visit(item):
+    def bound_names(item):
+        """Lexical bindings must win over file-qualified function exports."""
+        names=set()
+        def collect(value):
+            if isinstance(value,list):
+                for child in value:collect(child)
+            elif isinstance(value,dict):
+                kind=value.get("kind")
+                if kind in {"function","class"}:
+                    names.add(value["name"]);return
+                if kind in {"lambda","comprehension"}:return
+                if kind in {"declare","assign","target_name"}:names.add(value["name"])
+                if kind in {"for","unpack_assign","chain_assign"}:names.update(value.get("names",[value.get("name")]))
+                if kind=="except" and value.get("name"):names.add(value["name"])
+                for child in value.values():collect(child)
+        collect(item)
+        return names
+
+    module_bindings={filename:bound_names([n for n in tree["body"] if n.get("filename")==filename]) for filename in imports}
+
+    def visit(item, lexical=frozenset()):
         if isinstance(item, list):
             for value in item:
-                visit(value)
+                visit(value,lexical)
             return
         if not isinstance(item, dict):
             return
         filename = item.get("filename")
         if filename:
+            lexical=lexical | module_bindings[filename]
+            if item["kind"] in {"function","lambda"}:
+                for parameter in item["params"]:
+                    if parameter.get("default") is not None:visit(parameter["default"],lexical)
+                body=item["body"] if item["kind"]=="function" else item["value"]
+                local=bound_names(body)|{p["name"] for p in item["params"]}
+                visit(body,lexical|local)
+                return
+            if item["kind"]=="comprehension":
+                local=set(lexical)
+                for clause in item["clauses"]:
+                    visit(clause["iterable"],local)
+                    local.update(clause["names"])
+                    if clause.get("unpack_pattern"):local.update(bound_names(clause["unpack_pattern"]))
+                    visit(clause["filters"],local)
+                visit(item.get("key"),local);visit(item["value"],local)
+                return
             if item["kind"] in {"declare", "parameter", "for", "assign"}:
                 bindings = item.get("names", [item["name"]])
                 for binding in bindings:
@@ -143,16 +180,16 @@ def resolve_module_calls(tree, imports, selections=None):
                         raise CompileError(f"{binding!r} is an imported module name", item)
                     if binding in selections[filename]:
                         raise CompileError(f"{binding!r} is an imported function name", item)
-            if item["kind"] == "method" and item["base"]["kind"] == "name" and item["base"]["name"] in imports[filename]:
+            if item["kind"] in {"method","attribute"} and item["base"]["kind"] == "name" and item["base"]["name"] in imports[filename]:
                 module, name = item["base"]["name"], item["name"]
                 qualified = exports[module + ".tip"].get(name)
                 if qualified is None:
                     raise CompileError(f"Module {module!r} has no function {name!r}", item)
                 del item["base"]
-                item.update(kind="call", name=qualified)
-            elif item["kind"] == "call":
+                item.update(kind="call" if item["kind"]=="method" else "name", name=qualified)
+            elif item["kind"] in {"call","name"} and item["name"] not in lexical:
                 item["name"] = resolve_bare(item["name"], filename, item)
         for value in list(item.values()):
-            visit(value)
+            visit(value,lexical)
 
     visit(tree)

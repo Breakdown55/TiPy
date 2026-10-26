@@ -5,6 +5,20 @@ from tipy.errors import CompileError
 
 
 class ProjectTests(unittest.TestCase):
+    def test_function_values_resolve_in_entry_and_imported_modules(self):
+        utility='def triple(int x):\n    return x*3'
+        for source in ('def triple(int x):\n    return x*3\nvalues=list(map(triple,[1,2]))',
+                       'import utils\ncallback=utils.triple\nvalues=list(map(callback,[1,2]))',
+                       'from utils import triple as times_three\nvalues=list(map(times_three,[1,2]))'):
+            result=compile_project({'main.tip':source,'utils.tip':utility},'main.tip')
+            self.assertEqual(result['symbols']['values']['type'],'i16[]')
+
+    def test_lexical_function_values_shadow_exports(self):
+        source='def triple(int x):\n    return x*3\ndef outer():\n    def triple(int x):\n        return x+1\n    return list(map(triple,[1,2]))\nvalues=outer()\nnumbers=[triple for triple in [4,5]]'
+        result=compile_project({'main.tip':source},'main.tip')
+        self.assertEqual(result['symbols']['values']['type'],'i16[]')
+        self.assertEqual(result['symbols']['numbers']['type'],'i16[]')
+
     def test_qualified_array_return_and_existing_bare_calls(self):
         utils = "def get_evens(int[] x) -> int[]:\n    int evens=[]\n    for num in x:\n        if num%2==0:\n            evens.append(num)\n    return evens"
         for call in ["utils.get_evens(x)", "get_evens(x)"]:
