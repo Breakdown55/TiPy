@@ -8,7 +8,7 @@ The small emitter below is only an authoring aid; all operations run as Z80.
 import re
 
 HEAP_BYTES = 8192
-RUNTIME_TARGET = re.compile(r"\b(?:call|jp)\s+((?:__arr_|__dict_)[A-Za-z0-9_]+)\b")
+RUNTIME_TARGET = re.compile(r"\b(?:call|jp)\s+((?:__arr_|__dict_|__obj_|__str_|__set_)[A-Za-z0-9_]+)\b")
 
 
 def add(a, b): return ("+", a, b)
@@ -138,7 +138,9 @@ class Routine:
         return "\n".join(self.code)
 
 
-def runtime_assembly(required=None, dictionary_types=None):
+def runtime_assembly(required=None, dictionary_types=None, object_types=None):
+    from .types import complex_type, managed
+    nested = object_types is None or any(complex_type(t) for t in object_types)
     routines = []
 
     r = Routine("init")
@@ -216,6 +218,8 @@ def runtime_assembly(required=None, dictionary_types=None):
     r.set("refs", sub(word(add("object", 8)), 1))
     r.write(add("object", 8), "refs")
     def destroy():
+        if nested:
+            r.if_(("uge", word(add("object", 6)), 32765), lambda:r.invoke("children_release","object"))
         r.invoke("free", word("object"))
         r.invoke("free", "object")
     r.if_(("eq", "refs", 0), destroy)
@@ -223,8 +227,8 @@ def runtime_assembly(required=None, dictionary_types=None):
     routines.append(r.finish())
 
     r = Routine("bytes", ("object", "count"))
-    r.if_(("eq", word(add("object", 6)), 2), lambda: r.ret(add("count", "count")))
-    r.ret("count")
+    r.if_(("eq", word(add("object", 6)), 1), lambda: r.ret("count"))
+    r.ret(add("count", "count"))
     routines.append(r.finish())
 
     for name, backwards in [("copy_bytes", False), ("move_back", True)]:
@@ -263,19 +267,29 @@ def runtime_assembly(required=None, dictionary_types=None):
     r.ret(add(word("object"), call("bytes", "object", "index")))
     routines.append(r.finish())
 
-    r = Routine("get", ("object", "index"), ("pointer",))
+    r = Routine("get", ("object", "index"), ("pointer", "value"))
+    if nested:r.set("index",call("normalize","object","index"))
     r.set("pointer", call("address", "object", "index"))
     r.if_(("eq", word(add("object", 6)), 1), lambda: r.ret(byte("pointer")))
-    r.ret(word("pointer"))
+    r.set("value",word("pointer"))
+    if nested:
+        r.if_(("eq",word(add("object",6)),32765),lambda:r.set("value",call("retain","value")))
+        r.if_(("eq",word(add("object",6)),32766),lambda:r.if_(("ne",byte(add(word(add("object",10)),"index")),0),lambda:r.set("value",call("retain","value"))))
+    r.ret("value")
     routines.append(r.finish())
 
     r = Routine("set", ("object", "index", "value"), ("pointer",))
     r.set("pointer", call("address", "object", "index"))
+    if nested:
+        def replace_managed():
+            r.set("value",call("retain","value"));r.expr(("call","__obj_release",word("pointer")))
+        r.if_(("eq",word(add("object",6)),32765),replace_managed)
     r.if_(("eq", word(add("object", 6)), 1), lambda: r.write("pointer", "value", 1), lambda: r.write("pointer", "value"))
     r.ret()
     routines.append(r.finish())
 
     r = Routine("append", ("object", "value"), ("length", "pointer"))
+    if nested:r.if_(("eq",word(add("object",6)),32765),lambda:r.set("value",call("retain","value")))
     r.set("length", word(add("object", 2)))
     r.invoke("reserve", "object", add("length", 1))
     r.set("pointer", add(word("object"), call("bytes", "object", "length")))
@@ -285,8 +299,9 @@ def runtime_assembly(required=None, dictionary_types=None):
     routines.append(r.finish())
 
     r = Routine("insert", ("object", "index", "value"), ("length", "pointer", "width", "bytes"))
+    if nested:r.if_(("eq",word(add("object",6)),32765),lambda:r.set("value",call("retain","value")))
     r.set("length", word(add("object", 2)))
-    r.set("width", word(add("object", 6)))
+    r.set("width", call("bytes","object",1))
     r.if_(("negative", "index"), lambda: r.set("index", add("index", "length")))
     r.if_(("negative", "index"), lambda: r.set("index", 0))
     r.if_(("uge", "index", "length"), lambda: r.set("index", "length"))
@@ -304,7 +319,8 @@ def runtime_assembly(required=None, dictionary_types=None):
     r.if_(("eq", "length", 0), lambda: r.fail(2))
     r.set("index", call("normalize", "object", "index"))
     r.set("value", call("get", "object", "index"))
-    r.set("width", word(add("object", 6)))
+    if nested:r.if_(("eq",word(add("object",6)),32765),lambda:r.expr(("call","__obj_release","value")))
+    r.set("width", call("bytes","object",1))
     r.set("pointer", call("address", "object", "index"))
     r.set("bytes", call("bytes", "object", sub(sub("length", "index"), 1)))
     r.invoke("copy_bytes", "pointer", add("pointer", "width"), "bytes")
@@ -313,11 +329,19 @@ def runtime_assembly(required=None, dictionary_types=None):
     routines.append(r.finish())
 
     for name in ["index", "count"]:
-        r = Routine(name, ("object", "value"), ("i", "count", "length"))
+        r = Routine(name, ("object", "value"), ("i", "count", "length", "found", "current"))
         r.set("i", 0); r.set("count", 0)
         r.set("length", word(add("object", 2)))
         def search():
-            r.if_(("eq", call("get", "object", "i"), "value"),
+            if nested:
+                r.set("current",("call","__obj_read","object","i"))
+                def compare():
+                    r.set("found",("call","__obj_equal","current","value"))
+                r.set("found",0)
+                r.if_(("eq",word(add("object",6)),32765),compare,lambda:r.if_(("eq","current","value"),lambda:r.set("found",1)))
+                condition=("ne","found",0)
+            else: condition=("eq",call("get","object","i"),"value")
+            r.if_(condition,
                   (lambda: r.ret("i")) if name == "index" else (lambda: r.set("count", add("count", 1))))
             r.set("i", add("i", 1))
         r.while_(("ult", "i", "length"), search)
@@ -325,13 +349,15 @@ def runtime_assembly(required=None, dictionary_types=None):
         else: r.ret("count")
         routines.append(r.finish())
 
-    r = Routine("remove", ("object", "value"), ("index",))
+    r = Routine("remove", ("object", "value"), ("index", "removed"))
     r.set("index", call("index", "object", "value"))
-    r.invoke("pop", "object", "index")
+    r.set("removed",call("pop", "object", "index"))
+    if nested:r.if_(("eq",word(add("object",6)),32765),lambda:r.expr(("call","__obj_release","removed")))
     r.ret()
     routines.append(r.finish())
 
     r = Routine("clear", ("object",))
+    if nested:r.if_(("eq",word(add("object",6)),32765),lambda:r.invoke("children_release","object"))
     r.invoke("free", word("object"))
     for offset in [0, 2, 4]: r.write(add("object", offset), 0)
     r.ret()
@@ -345,6 +371,7 @@ def runtime_assembly(required=None, dictionary_types=None):
     r.set("bytes", call("bytes", "other", "added"))
     r.invoke("copy_bytes", "destination", word("other"), "bytes")
     r.write(add("object", 2), add("length", "added"))
+    if nested:r.invoke("retain_elements","object","length","added")
     r.ret()
     routines.append(r.finish())
 
@@ -354,28 +381,51 @@ def runtime_assembly(required=None, dictionary_types=None):
     r.invoke("reserve", "result", "length")
     r.invoke("copy_bytes", word("result"), word("object"), call("bytes", "object", "length"))
     r.write(add("result", 2), "length")
+    if nested:r.invoke("retain_elements","result",0,"length")
     r.ret("result")
     routines.append(r.finish())
 
-    r = Routine("reverse", ("object",), ("i", "j", "value"))
+    r = Routine("reverse", ("object",), ("i", "j", "value", "other"))
     r.set("i", 0)
     r.if_(("eq", word(add("object", 2)), 0), lambda: r.ret())
     r.set("j", sub(word(add("object", 2)), 1))
     def swap():
         r.set("value", call("get", "object", "i"))
-        r.invoke("set", "object", "i", call("get", "object", "j"))
+        r.set("other",call("get", "object", "j"))
+        r.invoke("set", "object", "i", "other")
         r.invoke("set", "object", "j", "value")
+        if nested:
+            def drop():
+                r.expr(("call","__obj_release","value"));r.expr(("call","__obj_release","other"))
+            r.if_(("eq",word(add("object",6)),32765),drop)
         r.set("i", add("i", 1)); r.set("j", sub("j", 1))
     r.while_(("ult", "i", "j"), swap)
     r.ret()
     routines.append(r.finish())
 
+    from .object_runtime import routines as object_routines
+    routines.extend(object_routines(has_dict=dictionary_types is None or bool(dictionary_types)))
+    from .sequence_runtime import routines as sequence_routines
+    routines.extend(sequence_routines())
+    from .string_runtime import routines as string_routines
+    routines.extend(string_routines())
+    from .set_runtime import routines as set_routines
+    routines.extend(set_routines())
+    r=Routine("retain_elements",("object","start","count"),("i",))
+    r.if_(("ne",word(add("object",6)),32765),lambda:r.ret())
+    r.set("i",0)
+    def retain_element():
+        r.invoke("retain",word(add(word("object"),add(add("start","i"),add("start","i")))))
+        r.set("i",add("i",1))
+    r.while_(("ult","i","count"),retain_element)
+    r.ret();routines.append(r.finish())
+
     from .python_runtime import builtin_routines
-    routines.extend(builtin_routines())
+    routines.extend(builtin_routines(nested))
     from .dict_runtime import routines as dictionary_routines
     routines.extend(dictionary_routines(
         key_strings=dictionary_types is None or any(key == "str" for key, _ in dictionary_types),
-        value_strings=dictionary_types is None or any(value == "str" for _, value in dictionary_types)))
+        value_strings=dictionary_types is None or any(managed(value) for _, value in dictionary_types)))
     routines.append("""__arr_fail:
         ld (__list_error),hl
         ld sp,(__list_main_sp)

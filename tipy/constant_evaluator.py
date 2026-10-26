@@ -5,7 +5,7 @@ Framebuffer bits remain symbolic until explicitly cleared/set, so the optimizer
 does not assume calculator RAM starts at zero.
 """
 
-from .types import is_dict
+from .types import is_dict,complex_type
 
 
 class NotStatic(Exception):
@@ -63,7 +63,8 @@ class Evaluator:
     def expr(self, item):
         self.tick()
         kind = item["kind"]
-        if is_dict(item.get("type", "")) or item.get("type") in {"fixed", "str"} or kind in {"stdlib", "cast_int", "to_fixed", "decimal", "compare_chain", "text_print", "text_input", "dict_contains", "dict_method", "dict_index", "hash"}:
+        if item.get("evaluations"):raise NotStatic("argument evaluation snapshots")
+        if complex_type(item.get("type","")) or is_dict(item.get("type", "")) or item.get("type") in {"fixed", "str"} or kind in {"stdlib", "cast_int", "to_fixed", "decimal", "compare_chain", "text_print", "text_input", "dict_contains", "dict_method", "dict_index", "hash"}:
             raise NotStatic("native numeric or runtime effect")
         if kind == "void_constant": return None
         if kind in {"number", "boolean"}:
@@ -133,7 +134,9 @@ class Evaluator:
             finally:
                 self.frame, self.function = previous, previous_function
                 self.depth -= 1
+        if kind=="conditional":return self.expr(item["body"] if self.expr(item["condition"]) else item["alternative"])
         if kind == "negate": return i16(-self.expr(item["value"]))
+        if kind == "invert":return i16(~self.expr(item["value"]))
         if kind == "not": return not self.expr(item["value"])
         if kind == "and": return bool(self.expr(item["left"]) and self.expr(item["right"]))
         if kind == "or": return bool(self.expr(item["left"]) or self.expr(item["right"]))
@@ -142,6 +145,9 @@ class Evaluator:
             result = value in self.expr(item["right"])
             return not result if item["negate"] else result
         left, right = self.expr(item["left"]), self.expr(item["right"])
+        if kind in {"bit_and","bit_or","bit_xor","shift_left","shift_right","power"}:
+            if kind in {"shift_left","shift_right","power"} and right<0:raise NotStatic("negative count")
+            return i16({"bit_and":lambda:left&right,"bit_or":lambda:left|right,"bit_xor":lambda:left^right,"shift_left":lambda:0 if right>=16 else left<<right,"shift_right":lambda:left>>min(right,16),"power":lambda:pow(left,right,65536)}[kind]())
         if kind == "compare":
             return {"==": lambda: left == right, "!=": lambda: left != right,
                     "<": lambda: left < right, ">": lambda: left > right,

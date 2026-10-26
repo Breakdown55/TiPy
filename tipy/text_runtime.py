@@ -48,7 +48,11 @@ def draw():
                 r.set("row", add("row", 1))
             r.while_(("ult", "row", 7), row)
             r.set("x", add("x", 6))
-        r.if_(("eq", "glyph", 10), newline, glyph)
+        def tab():
+            r.set("col",sub("x","origin"))
+            r.while_(("uge","col",48),lambda:r.set("col",sub("col",48)))
+            r.set("x",add("x",sub(48,"col")))
+        r.if_(("eq", "glyph", 10), newline,lambda:r.if_(("eq","glyph",9),tab,lambda:r.if_(("eq","glyph",13),lambda:r.set("x","origin"),glyph)))
         r.set("index", add("index", 1))
     r.while_(("ult", "index", "length"), character)
     r.write("@__text_end_x", "x"); r.write("@__text_end_y", "y")
@@ -244,7 +248,7 @@ def input_routine(used):
 
 def assembly(used):
     from .text_font import FONT, EXTRA
-    code = [draw()]
+    code = [draw()] if "draw" in used else []
     if "number" in used: code.append(number())
     if "bool" in used:
         code.append("""__text_bool:
@@ -260,8 +264,9 @@ __text_false: db 70,97,108,115,101
 __text_true: db 84,114,117,101""")
     if "input_int" in used: code.append(parse_integer())
     if "input" in used: code.append(input_routine(used))
-    font = {**FONT, **EXTRA}
-    code.extend(["__text_end_x: dw 0", "__text_end_y: dw 0", "__text_font:"])
-    for char in range(32, 127):
-        code.append("        db " + ",".join(str(b) for b in [*font[chr(char)], 0]))
+    if "draw" in used:
+        font = {**FONT, **EXTRA}
+        code.extend(["__text_end_x: dw 0", "__text_end_y: dw 0", "__text_font:"])
+        for char in range(32, 127):
+            code.append("        db " + ",".join(str(b) for b in [*font[chr(char)], 0]))
     return "\n".join(code)

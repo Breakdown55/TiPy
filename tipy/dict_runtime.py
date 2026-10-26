@@ -154,7 +154,7 @@ def routines(key_strings=True, value_strings=True):
     r.set("slot", dc("find", "object", "key"))
     def replace():
         r.retain_value()
-        r.if_(("ne", word(add("object", 12)), 0), lambda: r.invoke("release", word(add("slot", 6))))
+        r.if_(("ne", word(add("object", 12)), 0), lambda: r.expr(("call","__obj_release",word(add("slot",6)))))
         r.write(add("slot", 6), "value"); r.ret()
     r.if_(("ne", "slot", 0), replace)
     r.set("capacity", word(add("object", 4)))
@@ -195,7 +195,7 @@ def routines(key_strings=True, value_strings=True):
     r.if_(("eq", "previous", 0), lambda: r.write(add("object", 14), "next"), lambda: r.write(add("previous", 8), "next"))
     r.if_(("eq", "next", 0), lambda: r.write(add("object", 16), "previous"), lambda: r.write(add("next", 10), "previous"))
     r.if_(("ne", word(add("object", 10)), 0), lambda: r.invoke("release", word(add("slot", 4))))
-    r.if_(("ne", "drop_value", 0), lambda: r.if_(("ne", word(add("object", 12)), 0), lambda: r.invoke("release", "value")))
+    r.if_(("ne", "drop_value", 0), lambda: r.if_(("ne", word(add("object", 12)), 0), lambda: r.expr(("call","__obj_release","value"))))
     r.write("slot", 2)
     r.write(add("object", 2), sub(word(add("object", 2)), 1))
     r.write(add("object", 18), add(word(add("object", 18)), 1))
@@ -218,7 +218,7 @@ def routines(key_strings=True, value_strings=True):
     def destroy_entry():
         r.set("next", word(add("entry", 8)))
         r.if_(("ne", word(add("object", 10)), 0), lambda: r.invoke("release", word(add("entry", 4))))
-        r.if_(("ne", word(add("object", 12)), 0), lambda: r.invoke("release", word(add("entry", 6))))
+        r.if_(("ne", word(add("object", 12)), 0), lambda: r.expr(("call","__obj_release",word(add("entry",6)))))
         r.set("entry", "next")
     r.while_(("ne", "entry", 0), destroy_entry)
     r.invoke("free", word("object"))
@@ -244,4 +244,49 @@ def routines(key_strings=True, value_strings=True):
     r = SpecializedMap("copy", ("object",), ("result",))
     r.set("result", dc("new", word(add("object", 10)), word(add("object", 12)), word(add("object", 2))))
     r.invoke_dict("update", "result", "object"); r.ret("result"); result.append(r.finish())
+    r=SpecializedMap("merge",("left","right"),("result",))
+    r.set("result",dc("copy","left"));r.invoke_dict("update","result","right");r.ret("result");result.append(r.finish())
+
+    r=SpecializedMap("view",("object","mode"),("result",))
+    r.set("result",call("tuple_new","@__dict_view_flags",2))
+    r.invoke("tuple_set","result",0,"object");r.invoke("tuple_set","result",1,"mode")
+    r.ret("result");result.append(r.finish()+"\n__dict_view_flags: db 1,0")
+    r=SpecializedMap("view_target",("view",))
+    r.ret(call("retain",word(word("view"))));result.append(r.finish())
+    r=SpecializedMap("view_len",("view",))
+    r.ret(word(add(word(word("view")),2)));result.append(r.finish())
+
+    r=SpecializedMap("materialize",("object","mode","width","flags"),("result","entry","value"))
+    r.set("result",call("new","width"));r.invoke("reserve","result",word(add("object",2)))
+    r.set("entry",word(add("object",14)))
+    def materialize():
+        def pair():
+            r.set("value",call("tuple_new","flags",2))
+            r.invoke("tuple_set","value",0,word(add("entry",4)));r.invoke("tuple_set","value",1,word(add("entry",6)))
+            r.invoke("append","result","value");r.invoke("release","value")
+        def scalar():
+            r.if_(("eq","mode",0),lambda:r.set("value",word(add("entry",4))),lambda:r.set("value",word(add("entry",6))))
+            r.invoke("append","result","value")
+        r.if_(("eq","mode",2),pair,scalar)
+        r.set("entry",word(add("entry",8)))
+    r.while_(("ne","entry",0),materialize)
+    r.ret("result");result.append(r.finish())
+
+    r=SpecializedMap("view_contains",("value","view"),("object","mode","entry","slot","key","candidate"))
+    r.set("object",word(word("view")));r.set("mode",word(add(word("view"),2)))
+    r.if_(("eq","mode",0),lambda:r.ret(dc("contains","value","object")))
+    def pair_contains():
+        r.set("key",word(word("value")));r.set("candidate",word(add(word("value"),2)))
+        r.set("slot",dc("find","object","key"));r.if_(("eq","slot",0),lambda:r.ret(0))
+        r.if_(("ne",word(add("object",12)),0),lambda:r.ret(("call","__obj_equal","candidate",word(add("slot",6)))))
+        r.if_(("eq","candidate",word(add("slot",6))),lambda:r.ret(1));r.ret(0)
+    r.if_(("eq","mode",2),pair_contains)
+    r.set("entry",word(add("object",14)))
+    def value_contains():
+        r.if_(("ne",word(add("object",12)),0),
+            lambda:r.if_(("ne",("call","__obj_equal","value",word(add("entry",6))),0),lambda:r.ret(1)),
+            lambda:r.if_(("eq","value",word(add("entry",6))),lambda:r.ret(1)))
+        r.set("entry",word(add("entry",8)))
+    r.while_(("ne","entry",0),value_contains)
+    r.ret(0);result.append(r.finish())
     return result

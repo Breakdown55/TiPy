@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from .errors import CompileError
-from .types import is_dict, dict_types, managed
+from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_types, dynamic_tuple, is_set, element as element_type, is_view, view_types, iterable_element
 
 PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
 GRAPHICS_BUILTINS = PIXEL_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
@@ -11,8 +11,12 @@ PYTHON_BUILTINS = {"range", "list", "abs", "sum", "min", "max", "any", "all", "e
 
 def check(tree):
     checked = deepcopy(tree)
+    from .syntax_lowering import prepare as lower_syntax
+    lower_syntax(checked)
     from .comprehensions import prepare
     prepare(checked)
+    from .inference import infer_returns
+    infer_returns(checked)
     globals_ = {}
     functions = {}
     global_calls = []
@@ -20,6 +24,8 @@ def check(tree):
     checked["temporaries"] = {}
 
     def normalize(name):
+        if is_set(name):return f"set[{normalize(element_type(name))}]"
+        if is_tuple(name):return name[:name.index("[")]+"["+",".join(normalize(t) for t in tuple_types(name))+"]"
         if is_dict(name):
             key, value = dict_types(name)
             return f"dict[{normalize(key)},{normalize(value)}]"
@@ -45,7 +51,7 @@ def check(tree):
                 return isinstance(value, list) and any(valued_return(v) for v in value)
             statement["return_type"] = "i16" if valued_return(statement["body"]) else "void"
         statement["return_type"] = normalize(statement["return_type"])
-        if statement["return_type"] in {"void[]", "str[]"}:
+        if statement["return_type"] == "void[]":
             raise CompileError("An array cannot have void elements", statement)
         statement["label"] = f"__fn_{len(functions)}"
         statement["requires_globals"] = set()
@@ -55,7 +61,7 @@ def check(tree):
         names = set()
         for parameter in statement["params"]:
             parameter["type"] = normalize(parameter["type"])
-            if parameter["type"] in {"void", "void[]", "str[]"}:
+            if parameter["type"] in {"void", "void[]"}:
                 raise CompileError("A parameter cannot be void", parameter)
             if parameter["name"] in names:
                 raise CompileError(f"Duplicate parameter {parameter['name']!r}", parameter)
@@ -81,6 +87,16 @@ def check(tree):
         raise CompileError(f"Variable {name!r} has not been declared", item)
 
     def compatible(target, source_type, constant, item):
+        if is_view(target) or is_view(source_type):
+            if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}",item)
+            return
+        if is_set(target) or is_set(source_type):
+            if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}",item)
+            return
+        if is_tuple(target) or is_tuple(source_type):
+            if target.startswith("tuple_var[") and is_tuple(source_type) and all(t==tuple_types(target)[0] for t in tuple_types(source_type)):return
+            if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}",item)
+            return
         if is_dict(target) or is_dict(source_type):
             if target != source_type: raise CompileError(f"Cannot assign {source_type} to {target}", item)
             return
@@ -106,7 +122,82 @@ def check(tree):
         elif target == "u8" and source_type != "u8":
             raise CompileError("Cannot narrow an i16 expression to u8 without a proven range", item)
 
-    def expression(item, allow_min_magnitude=False, allow_void=False, expected_element=None):
+    expression_depth=0
+    def expression(*args,**kwargs):
+        nonlocal expression_depth
+        expression_depth+=1
+        try:return _expression(*args,**kwargs)
+        finally:expression_depth-=1
+
+    def scratch(type_name,index):
+        pool=context.setdefault("scratch",{})
+        key=(expression_depth,index,type_name)
+        if key in pool:return pool[key]
+        if context["function"]:
+            function=context["function"];function["frame_size"]+=2
+            if function["frame_size"]>4096:raise CompileError("Function frame exceeds 4096 bytes",function)
+            slot={"type":type_name,"size":2,"storage":"frame","offset":-function["frame_size"],"label":f"__local_{len(context['locals'])}"}
+            context["locals"][f"$argument_{len(context['locals'])}"]=slot
+        else:
+            slot={"type":type_name,"size":2,"label":f"__tmp_{len(checked['temporaries'])}"}
+            checked["temporaries"][slot["label"]]=slot
+        slot={**slot,"symbol":slot["label"]};pool[key]=slot;return slot
+
+    def freeze_arguments(item,evaluations):
+        refs={};snapshots=[]
+        for i,value in enumerate(evaluations):
+            slot=scratch(value["type"],i)
+            refs[id(value)]={**slot,"kind":"name","name":f"$argument_{i}"}
+            snapshots.append({"slot":slot,"value":value})
+        def replace(value):
+            if isinstance(value,dict):
+                if id(value) in refs:return refs[id(value)]
+                return {key:replace(v) for key,v in value.items()}
+            if isinstance(value,list):return [replace(v) for v in value]
+            return value
+        for field in ("base","arguments","left","right","value"):
+            if field in item:item[field]=replace(item[field])
+        item["evaluations"]=snapshots
+
+    def bind_keywords(arguments,names,defaults,item):
+        result=[None]*len(names);order=[];keyword=False;position=0
+        for arg in arguments:
+            if arg["kind"]=="keyword":
+                keyword=True
+                if arg["name"] not in names:raise CompileError(f"Unexpected keyword {arg['name']!r}",arg)
+                index=names.index(arg["name"]);value=arg["value"]
+            else:
+                if keyword:raise CompileError("Positional arguments must precede keywords",arg)
+                index=position;position+=1;value=arg
+            if index>=len(names):raise CompileError("Too many arguments",item)
+            if result[index] is not None:raise CompileError(f"Repeated argument {names[index]!r}",arg)
+            result[index]=value;order.append(value)
+        for i,name in enumerate(names):
+            if result[i] is None:
+                if name not in defaults:raise CompileError(f"Missing argument {name!r}",item)
+                result[i]=deepcopy(defaults[name])
+        return result,order
+
+    def iterable_list(source,t,item):
+        if is_dict(t) or is_set(t) or is_view(t):
+            mode="keys"
+            if is_view(t):
+                mode,map_type=view_types(t)
+                source={"kind":"view_target","base":source,"type":map_type,"owned":True}
+            else:map_type=t
+            result=iterable_element(t)+"[]"
+            return {"kind":"dict_list","base":source,"mode":mode,"mapping_type":map_type,"type":result,"owned":True},result
+        if t=="str":return {"kind":"string_builtin","name":"to_list","arguments":[source],"type":"str[]","owned":True},"str[]"
+        if is_tuple(t):
+            field=iterable_element(t)
+            if field is None:raise CompileError("A typed list requires matching tuple field types",item)
+            from .types import width
+            result=field+"[]"
+            return {"kind":"sequence_builtin","name":"to_list","arguments":[source,width(result)],"type":result,"owned":True},result
+        if t.endswith("[]"):return source,t
+        raise CompileError("Value is not iterable",item)
+
+    def _expression(item, allow_min_magnitude=False, allow_void=False, expected_element=None):
         kind = item["kind"]
         constant = None
         if kind == "number":
@@ -152,6 +243,23 @@ def check(tree):
                 raise CompileError("int expects a scalar numeric value", item)
             item["kind"] = "cast_int"
             value_type = "i16"
+        elif kind=="call" and item["name"] in {"str","chr","ord","repr"} and item["name"] not in functions:
+            name,args=item["name"],item["arguments"]
+            if name=="str" and not args:
+                item.update(kind="string",value="",type="str",owned=True);return "str",None
+            if len(args)!=1:raise CompileError(f"{name} expects one value",item)
+            t,_=expression(args[0])
+            if name=="ord":
+                if t!="str":raise CompileError("ord expects a string",item)
+                item.update(kind="string_builtin",name="ord",type="i16");return "i16",None
+            if name=="chr":
+                if t not in {"i16","u8"}:raise CompileError("chr expects an integer",item)
+                helper="chr"
+            elif t=="str":helper="repr" if name=="repr" else "identity"
+            elif t in {"i16","u8"}:helper="number"
+            elif t=="bool":helper="boolean"
+            else:raise CompileError("str conversion currently requires a scalar value",item)
+            item.update(kind="string_builtin",name=helper,type="str",owned=True);return "str",None
         elif kind == "compare_chain":
             types = [expression(arg)[0] for arg in item["operands"]]
             if any(t not in {"i16", "u8"} for t in types):
@@ -162,6 +270,81 @@ def check(tree):
         elif kind == "string":
             value_type = "str"
             item["owned"] = True
+        elif kind=="set" or kind=="call" and item["name"]=="set":
+            hint=element_type(expected_element) if expected_element and is_set(expected_element) else None
+            if kind=="call":
+                args=item["arguments"]
+                if len(args)>1:raise CompileError("set expects zero or one iterable",item)
+                if not args:item.update(kind="set",values=[])
+                else:
+                    source=args[0];t,_=expression(source)
+                    if is_set(t):item.update(kind="set_method",name="copy",base=source,arguments=[],type=t,owned=True);return t,None
+                    if is_dict(t) or is_view(t):source,t=iterable_list(source,t,item)
+                    if t=="str":source={"kind":"string_builtin","name":"to_list","arguments":[source],"type":"str[]","owned":True};t="str[]"
+                    if is_tuple(t):
+                        fields=tuple_types(t)
+                        if fields and len(set(fields))>1:raise CompileError("Set elements must have one type",item)
+                        key=fields[0] if fields else hint or "i16"
+                    elif t.endswith("[]"):key=t[:-2]
+                    else:raise CompileError("set requires an iterable",item)
+                    if key not in {"i16","u8","str"}:raise CompileError("Set elements must be integers or strings",item)
+                    key="i16" if key=="u8" else key
+                    item.update(kind="set_from",base=source,type=f"set[{key}]",owned=True);return item["type"],None
+            key=hint
+            for value in item["values"]:
+                t,c=expression(value,expected_element=key)
+                if t not in {"i16","u8","str"}:raise CompileError("Set elements must be integers or strings",value)
+                if key is None:key="str" if t=="str" else "i16"
+                compatible(key,t,c,value)
+            key=key or "i16"
+            if key not in {"i16","str"}:raise CompileError("Set elements must be integers or strings",item)
+            item.update(type=f"set[{key}]",owned=True);return item["type"],None
+        elif kind=="fstring":
+            for part in item["values"]:expression(part)
+            item.update(type="str",owned=True);return "str",None
+        elif kind=="call" and item["name"]=="tuple":
+            args=item["arguments"]
+            if len(args)>1:raise CompileError("tuple expects zero or one iterable",item)
+            if not args:
+                item.update(kind="tuple",values=[],type="tuple[]",owned=True);return "tuple[]",None
+            source=args[0];t,_=expression(source)
+            if is_tuple(t):item.update(kind="sequence_builtin",name="retain",type=t,owned=True);return t,None
+            if is_dict(t) or is_view(t) or is_set(t):source,t=iterable_list(source,t,item)
+            if t=="str":
+                source={"kind":"string_builtin","name":"to_list","arguments":[source],"type":"str[]","owned":True};t="str[]"
+            if not t.endswith("[]"):raise CompileError("tuple requires an iterable",item)
+            result=f"tuple_var[{t[:-2]}]"
+            item.update(kind="sequence_builtin",name="to_tuple",arguments=[source,int(managed(t[:-2]))],type=result,owned=True);return result,None
+        elif kind=="format_value" or kind=="call" and item["name"]=="format" and item["name"] not in functions:
+            import re
+            if kind=="call":
+                if len(item["arguments"]) not in {1,2}:raise CompileError("format expects a value and constant format string",item)
+                value=item["arguments"][0];spec="";conversion=-1
+                if len(item["arguments"])==2:
+                    if item["arguments"][1]["kind"]!="string":raise CompileError("Format spec must be constant",item)
+                    spec=item["arguments"][1]["value"]
+            else:value,spec,conversion=item["value"],item["spec"],item["conversion"]
+            t,_=expression(value)
+            if t not in {"i16","u8","bool","str"}:raise CompileError("Formatting currently requires a scalar value",item)
+            match=re.fullmatch(r"(?:(.)([<^>])|([<^>]))?([+ -])?(#)?(0)?(\d+)?([dsxXob])?",spec)
+            if not match:raise CompileError("Unsupported format specification",item)
+            fill,alignment,simple,sign,prefix,zero,digits,code=match.groups()
+            numeric=t in {"i16","u8","bool"} and conversion==-1
+            if code in {"d","x","X","o","b"} and not numeric:raise CompileError("Numeric format requires an integer",item)
+            helper="repr" if t=="str" and conversion in {114,97} else "identity" if t=="str" else "boolean" if t=="bool" and not code else "number"
+            converted={"kind":"string_builtin","name":helper,"arguments":[value],"type":"str","owned":True}
+            if code in {"x","X","o","b"}:
+                converted.update(name="radix",arguments=[value,{"x":4,"X":4,"o":3,"b":1}[code],int(code=="X"),int(bool(prefix))])
+            if sign in {"+"," "} and numeric:converted={"kind":"string_builtin","name":"sign","arguments":[converted,ord(sign)],"type":"str","owned":True}
+            if digits:
+                align=alignment or simple or (">" if numeric else "<")
+                converted={"kind":"string_builtin","name":"pad","arguments":[converted,int(digits),ord(fill or ("0" if zero else " ")),{"<":0,">":1,"^":2}[align],int(numeric)],"type":"str","owned":True}
+            location={key:item[key] for key in ("line","column","filename") if key in item}
+            item.clear();item.update(converted,**location);return "str",None
+        elif kind=="call" and item["name"] in {"bin","oct","hex"} and item["name"] not in functions:
+            if len(item["arguments"])!=1 or expression(item["arguments"][0])[0] not in {"i16","u8"}:raise CompileError("Radix conversion requires one integer",item)
+            item.update(kind="string_builtin",arguments=[item["arguments"][0],{"bin":1,"oct":3,"hex":4}[item["name"]],0,1],name="radix",type="str",owned=True)
+            return "str",None
         elif kind == "call" and item["name"] == "dict":
             if len(item["arguments"]) > 1:
                 raise CompileError("dict expects zero arguments or another dictionary", item)
@@ -179,12 +362,12 @@ def check(tree):
                 kt, kc = expression(entry["key"], expected_element=key_type)
                 vt, vc = expression(entry["value"], expected_element=element)
                 if kt not in {"i16", "u8", "str"}: raise CompileError("Dictionary keys must be integers or strings", entry["key"])
-                if vt not in {"i16", "u8", "bool", "str"}: raise CompileError("Dictionary values must be integers, bools, or strings", entry["value"])
+                if vt not in {"i16", "u8", "bool", "str"} and not managed(vt): raise CompileError("Dictionary values must be scalar values or containers", entry["value"])
                 if key_type is None: key_type = "str" if kt == "str" else "i16"
-                if element is None: element = vt if vt in {"str", "bool"} else "i16"
+                if element is None: element = vt if managed(vt) or vt in {"str", "bool"} else "i16"
                 compatible(key_type, kt, kc, entry["key"]); compatible(element, vt, vc, entry["value"])
             key_type, element = key_type or "i16", element or "i16"
-            if key_type not in {"i16", "str"} or element not in {"i16", "u8", "bool", "str"}:
+            if key_type not in {"i16", "str"} or element not in {"i16", "u8", "bool", "str"} and not managed(element):
                 raise CompileError("Dictionary types require int/str keys and scalar int/bool/str values", item)
             value_type = f"dict[{key_type},{element}]"
             item["owned"] = True
@@ -196,31 +379,157 @@ def check(tree):
             item["kind"] = "hash"
             value_type = "i16"
         elif kind == "tuple":
-            raise CompileError("Tuple values currently require an unpacked for loop over a literal list", item)
+            fields=[expression(v)[0] for v in item["values"]]
+            value_type="tuple["+",".join(fields)+"]";item["owned"]=True
         elif kind == "name":
             symbol = lookup(item["name"], item)
             bind(item, symbol)
             value_type = symbol["type"]
+        elif kind=="conditional":
+            t,_=expression(item["condition"])
+            if t!="bool":raise CompileError("A conditional expression requires a bool condition",item)
+            t,c=expression(item["body"],expected_element=expected_element)
+            other,value=expression(item["alternative"],expected_element=expected_element)
+            compatible(t,other,value,item)
+            value_type=t
+            if managed(t):item["owned"]=True
         elif kind == "comprehension":
             before = context["initialized"].copy()
             item["collect"]["expected_element"] = expected_element
             statements([item["loop"]])
             context["initialized"] = before
-            value_type = item["collect"]["type"] + "[]"
+            collection=item.get("collection","list")
+            value_type = item["collect"]["type"] + "[]" if collection=="list" else f"set[{item['collect']['type']}]" if collection=="set" else f"dict[{item['collect']['key_type']},{item['collect']['type']}]"
             item["owned"] = True
         elif kind == "list":
-            element = expected_element
-            if element in {"void", "str"} or element and element.endswith("[]"):
+            hint = expected_element
+            if hint and hint.endswith("[]"):hint=hint[:-2]
+            element = None
+            if hint == "void":
                 raise CompileError("Arrays need a scalar element type", item)
             for value in item["values"]:
-                value_type, value_constant = expression(value)
+                value_type, value_constant = expression(value,expected_element=hint)
                 if element is None:
-                    element = "bool" if value_type == "bool" else "i16"
+                    element = value_type if managed(value_type) or value_type in {"bool","fixed"} else hint or "i16"
                 compatible(element, value_type, value_constant, value)
-            value_type = (element or "i16") + "[]"
+            value_type = (element or hint or "i16") + "[]"
             item["owned"] = True
+        elif kind=="slice":
+            source,_=expression(item["base"])
+            if not (source=="str" or source.endswith("[]") or is_tuple(source)):raise CompileError("Slicing requires a string, list, or tuple",item)
+            values=[]
+            for field in ("start","stop","step"):
+                if item[field] is None:values.append(None);continue
+                t,c=expression(item[field])
+                if t not in {"i16","u8"}:raise CompileError("Slice bounds must be integers",item[field])
+                values.append(c)
+            if values[2]==0:raise CompileError("Slice step cannot be zero",item)
+            if is_tuple(source):
+                fields=tuple_types(source)
+                if dynamic_tuple(source) or any(item[f] is not None and c is None for f,c in zip(("start","stop","step"),values)):
+                    if len(set(fields))>1:raise CompileError("A dynamic tuple slice requires matching field types",item)
+                    value_type=f"tuple_var[{fields[0]}]" if fields else "tuple[]"
+                else:value_type="tuple["+",".join(fields[slice(*values)])+"]"
+            else:value_type=source
+            item.update(type=value_type,owned=True)
+            return value_type,None
+        elif kind=="call" and item["name"]=="sorted" and item["name"] not in functions:
+            args=item["arguments"]
+            if not args:raise CompileError("sorted expects a list",item)
+            reverse={"kind":"boolean","value":False,"type":"bool"}
+            if len(args)>2:raise CompileError("sorted expects a list and optional reverse",item)
+            if len(args)==2:
+                option=args[1]
+                if option["kind"]!="keyword" or option["name"]!="reverse":raise CompileError("Use sorted(values, reverse=bool)",item)
+                reverse=option["value"]
+            original=args[0];t,_=expression(original);rt,_=expression(reverse)
+            source,t=iterable_list(original,t,item)
+            if rt!="bool":raise CompileError("reverse must be bool",item)
+            item.update(kind="sequence_builtin",name="sorted",arguments=[source,reverse],type=t,owned=True)
+            freeze_arguments(item,[original,reverse])
+            return t,None
         elif kind in {"index", "method"}:
             array_type, _ = expression(item["base"], expected_element=expected_element)
+            if is_set(array_type):
+                if kind!="method":raise CompileError("Sets do not support indexing",item)
+                key=element_type(array_type);name,args,base=item["name"],item["arguments"],item["base"]
+                single={"add","discard","remove"};noargs={"clear","copy","pop"}
+                algebra={"union","intersection","difference","symmetric_difference"}
+                updates={"update","intersection_update","difference_update","symmetric_difference_update"}
+                predicates={"issubset","issuperset","isdisjoint"}
+                original=[]
+                if name in single:
+                    if len(args)!=1:raise CompileError("Set operation expects one element",item)
+                    t,c=expression(args[0],expected_element=key);compatible(key,t,c,args[0]);result="void"
+                elif name in noargs:
+                    if args:raise CompileError("Set operation takes no arguments",item)
+                    result=array_type if name=="copy" else key if name=="pop" else "void"
+                elif name in algebra|updates|predicates:
+                    if name in predicates|{"symmetric_difference","symmetric_difference_update"} and len(args)!=1:raise CompileError("Set operation expects one iterable",item)
+                    converted=[]
+                    for arg in args:
+                        t,_=expression(arg)
+                        original.append(arg)
+                        if t==array_type:converted.append(arg);continue
+                        if t=="str":arg={"kind":"string_builtin","name":"to_list","arguments":[arg],"type":"str[]","owned":True};t="str[]"
+                        if t.endswith("[]"):other=t[:-2]
+                        elif is_tuple(t):
+                            fields=tuple_types(t);other=fields[0] if fields and len(set(fields))==1 else key if not fields else "invalid"
+                        else:other="invalid"
+                        if other!=key:raise CompileError("Set operation requires matching element types",item)
+                        converted.append({"kind":"set_from","base":arg,"type":array_type,"owned":True})
+                    args=converted
+                    result=array_type if name in algebra else "bool" if name in predicates else "void"
+                else:raise CompileError(f"Unsupported set method {name}",item)
+                item.update(kind="set_method",arguments=args,type=result)
+                if managed(result):item["owned"]=True
+                if result=="void" and not allow_void:raise CompileError("A void function does not produce a value",item)
+                if original:freeze_arguments(item,[base,*original])
+                return result,None
+            if array_type=="str":
+                if kind=="index":
+                    if expression(item["index"])[0] not in {"i16","u8"}:raise CompileError("String index must be integer",item)
+                    item.update(kind="string_index",type="str",owned=True);return "str",None
+                name,args,base=item["name"],item["arguments"],item["base"]
+                num=lambda n:{"kind":"number","value":n,"type":"i16"}
+                missing={"kind":"missing"}
+                source_length=lambda:{"kind":"length","arguments":[base],"type":"i16"}
+                provided=[]
+                if name in {"upper","lower","capitalize","title","swapcase"}:
+                    if args:raise CompileError(f"{name} takes no arguments",item)
+                    native=[];result="str"
+                elif name=="join":
+                    bound,provided=bind_keywords(args,["iterable"],{},item);t,_=expression(bound[0])
+                    if t!="str[]" and not (is_tuple(t) and all(v=="str" for v in tuple_types(t))):raise CompileError("join requires strings",item)
+                    native=bound;result="str"
+                elif name in {"find","rfind","index","rindex","count","startswith","endswith"}:
+                    bound,provided=bind_keywords(args,["sub","start","end"],{"start":num(0),"end":missing},item)
+                    if expression(bound[0])[0]!="str":raise CompileError("String search requires a string",item)
+                    if expression(bound[1])[0] not in {"i16","u8"}:raise CompileError("String bounds must be integers",item)
+                    if bound[2]["kind"]=="missing":bound[2]=source_length()
+                    elif expression(bound[2])[0] not in {"i16","u8"}:raise CompileError("String bounds must be integers",item)
+                    native=bound;result="bool" if name in {"startswith","endswith"} else "i16"
+                elif name=="replace":
+                    bound,provided=bind_keywords(args,["old","new","count"],{"count":num(-1)},item)
+                    for arg in bound[:2]:
+                        if expression(arg)[0]!="str":raise CompileError("replace expects strings",item)
+                    if expression(bound[2])[0] not in {"i16","u8"}:raise CompileError("replace count must be integer",item)
+                    native=bound;result="str"
+                elif name=="split":
+                    bound,provided=bind_keywords(args,["sep","maxsplit"],{"sep":missing,"maxsplit":num(-1)},item)
+                    whitespace=bound[0]["kind"]=="missing"
+                    if not whitespace and expression(bound[0])[0]!="str":raise CompileError("split separator must be a string",item)
+                    if expression(bound[1])[0] not in {"i16","u8"}:raise CompileError("maxsplit must be integer",item)
+                    native=[0 if whitespace else bound[0],bound[1],int(whitespace)];result="str[]"
+                elif name in {"strip","lstrip","rstrip"}:
+                    bound,provided=bind_keywords(args,["chars"],{"chars":missing},item)
+                    default=bound[0]["kind"]=="missing"
+                    if not default and expression(bound[0])[0]!="str":raise CompileError("strip characters must be a string",item)
+                    native=[0 if default else bound[0],{"strip":0,"lstrip":1,"rstrip":2}[name],int(default)];name="strip";result="str"
+                else:raise CompileError(f"Unsupported string method {name!r}",item)
+                item.update(kind="string_method",name=name,arguments=native,type=result)
+                if managed(result):item["owned"]=True
+                freeze_arguments(item,[base,*provided]);return result,None
             if is_dict(array_type):
                 key_type, element = dict_types(array_type)
                 if kind == "index":
@@ -231,7 +540,11 @@ def check(tree):
                 else:
                     name, args = item["name"], item["arguments"]
                     counts = {"get": (2,), "setdefault": (2,), "pop": (1,2), "clear": (0,), "copy": (0,), "update": (1,)}
-                    if name in {"keys", "values", "items"}: raise CompileError("Dictionary views currently require a for loop", item)
+                    if name in {"keys", "values", "items"}:
+                        if args:raise CompileError("Dictionary views take no arguments",item)
+                        value_type=f"view[{name},{array_type}]"
+                        item.update(kind="dict_view_expr",type=value_type,owned=True)
+                        return value_type,None
                     if name not in counts or len(args) not in counts[name]: raise CompileError("Unsupported dictionary method or argument count; get/setdefault need an explicit default", item)
                     for i, arg in enumerate(args):
                         expected = array_type if name == "update" else key_type if i == 0 else element
@@ -244,6 +557,18 @@ def check(tree):
                 if value_type == "void" and not allow_void: raise CompileError("A void function does not produce a value", item)
                 return value_type, None
             if not array_type.endswith("[]"):
+                if is_tuple(array_type) and kind=="index":
+                    t,index=expression(item["index"])
+                    fields=tuple_types(array_type)
+                    if t not in {"i16","u8"}:raise CompileError("Tuple index must be integer",item)
+                    if index is not None:
+                        if not dynamic_tuple(array_type) and not -len(fields)<=index<len(fields):raise CompileError("Tuple index out of range",item)
+                        value_type=fields[index%len(fields)]
+                    elif fields and len(set(fields))==1:value_type=fields[0]
+                    else:raise CompileError("A dynamic tuple index requires matching field types",item)
+                    if managed(value_type):item["owned"]=True
+                    item["type"]=value_type
+                    return value_type,None
                 raise CompileError("Indexing and list methods require an array", item)
             element = array_type[:-2]
             if kind == "index":
@@ -251,8 +576,19 @@ def check(tree):
                 if index_type not in {"i16", "u8"}:
                     raise CompileError("An array index must be an integer", item["index"])
                 value_type = element
+                if managed(value_type):item["owned"]=True
             else:
                 method = item["name"]
+                if method=="sort":
+                    args=item["arguments"]
+                    reverse={"kind":"boolean","value":False,"type":"bool"}
+                    if args:
+                        if len(args)!=1 or args[0]["kind"]!="keyword" or args[0]["name"]!="reverse":raise CompileError("Use sort(reverse=bool)",item)
+                        reverse=args[0]["value"]
+                    if expression(reverse)[0]!="bool":raise CompileError("reverse must be bool",item)
+                    item["arguments"]=[reverse];item["type"]="void"
+                    if not allow_void:raise CompileError("A void function does not produce a value",item)
+                    return "void",None
                 counts = {"append": (1,), "insert": (2,), "pop": (0, 1), "remove": (1,),
                           "clear": (0,), "extend": (1,), "reverse": (0,), "copy": (0,),
                           "count": (1,), "index": (1,)}
@@ -268,7 +604,7 @@ def check(tree):
                     else:
                         compatible(element, argument_type, value, argument)
                 value_type = element if method == "pop" else "i16" if method in {"count", "index"} else array_type if method == "copy" else "void"
-                if method == "copy":
+                if managed(value_type):
                     item["owned"] = True
         elif kind == "call" and item["name"] in PYTHON_BUILTINS and item["name"] not in functions:
             name, arguments = item["name"], item["arguments"]
@@ -291,6 +627,18 @@ def check(tree):
                     raise CompileError("range step cannot be zero", item)
                 value_type = "i16[]"
             elif name == "list":
+                if count and (is_dict(types[0]) or is_view(types[0]) or is_set(types[0])):
+                    converted,t=iterable_list(arguments[0],types[0],item)
+                    location={k:item[k] for k in ("line","column","filename") if k in item}
+                    item.clear();item.update(converted,**location);return t,None
+                if count and types[0]=="str":
+                    item.update(kind="string_builtin",name="to_list",type="str[]",owned=True);return "str[]",None
+                if count and is_tuple(types[0]):
+                    fields=tuple_types(types[0])
+                    if fields and len(set(fields))!=1:raise CompileError("A typed list requires matching tuple field types",item)
+                    t=(fields[0] if fields else "i16")+"[]"
+                    from .types import width
+                    item.update(kind="sequence_builtin",name="to_list",arguments=[arguments[0],width(t)],type=t,owned=True);return t,None
                 if count and not types[0].endswith("[]"):
                     raise CompileError("list expects an array or range", item)
                 value_type = types[0] if count else (expected_element or "i16") + "[]"
@@ -304,6 +652,7 @@ def check(tree):
                     raise CompileError(f"{name} expects an array or range", item)
                 if name == "sum" and count == 2 and types[1] not in {"i16", "u8"}:
                     raise CompileError("sum start must be an integer", item)
+                if name=="sum" and types[0][:-2] not in {"i16","u8","bool"}:raise CompileError("sum requires numeric elements",item)
                 value_type = "bool" if name in {"any", "all"} else "i16" if name == "sum" else types[0][:-2]
             else:
                 if any(t not in {"i16", "u8"} for t in types):
@@ -311,7 +660,7 @@ def check(tree):
                 value_type = "i16"
                 item["scalar"] = True
             item["kind"] = "builtin"
-            if value_type.endswith("[]"):
+            if managed(value_type):
                 item["owned"] = True
         elif kind == "call" and item["name"] in {"print", "input"}:
             name, arguments = item["name"], item["arguments"]
@@ -350,17 +699,36 @@ def check(tree):
             argument_type, _ = expression(item["arguments"][0])
             if not managed(argument_type):
                 raise CompileError("len expects an array", item)
+            if is_view(argument_type):item.update(kind="view_length",type="i16");return "i16",None
             item["kind"] = "length"
             value_type = "i16"
         elif kind == "call":
             function = functions.get(item["name"])
             if function is None:
                 raise CompileError(f"Function {item['name']!r} has not been defined", item)
-            if len(item["arguments"]) != len(function["params"]):
-                raise CompileError(f"{item['name']} expects {len(function['params'])} arguments, got {len(item['arguments'])}", item)
-            for argument, parameter in zip(item["arguments"], function["params"]):
+            params=function["params"];args=item["arguments"]
+            variadic=params[-1] if params and params[-1].get("variadic") else None
+            regular=params[:-1] if variadic else params
+            extras=[];ordinary=[];positional=0
+            for arg in args:
+                if arg["kind"]!="keyword":
+                    if variadic and positional>=len(regular):extras.append(arg)
+                    else:ordinary.append(arg)
+                    positional+=1
+                else:ordinary.append(arg)
+            defaults={p["name"]:p["default_ref"] for p in regular if "default_ref" in p}
+            if not variadic and not defaults and not any(a["kind"]=="keyword" for a in args) and len(args)!=len(params):
+                raise CompileError(f"{item['name']} expects {len(params)} arguments, got {len(args)}",item)
+            bound,order=bind_keywords(ordinary,[p["name"] for p in regular],defaults,item)
+            if variadic:bound.append({"kind":"tuple","values":extras,"line":item["line"],"column":item["column"]})
+            item["arguments"]=bound
+            for argument, parameter in zip(bound, params):
                 argument_type, value = expression(argument, expected_element=parameter["type"][:-2] if parameter["type"].endswith("[]") else parameter["type"])
                 compatible(parameter["type"], argument_type, value, argument)
+            if defaults or variadic or any(a["kind"]=="keyword" for a in args):
+                # Snapshot the original expressions, then pack varargs from their snapshots.
+                supplied=[a["value"] if a["kind"]=="keyword" else a for a in args]
+                freeze_arguments(item,supplied)
             item["symbol"] = function["label"]
             value_type = function["return_type"]
             if managed(value_type):
@@ -372,8 +740,14 @@ def check(tree):
         elif kind == "membership":
             left_type, left_constant = expression(item["left"])
             right_type, _ = expression(item["right"], expected_element="bool" if left_type == "bool" else None)
-            if is_dict(right_type):
-                compatible(dict_types(right_type)[0], left_type, left_constant, item)
+            if is_view(right_type):
+                compatible(iterable_element(right_type),left_type,left_constant,item)
+                item.update(kind="view_contains",type="bool");return "bool",None
+            if right_type=="str":
+                if left_type!="str":raise CompileError("String membership requires a string",item)
+                item.update(kind="string_contains",type="bool");return "bool",None
+            if is_dict(right_type) or is_set(right_type):
+                compatible(element_type(right_type) if is_set(right_type) else dict_types(right_type)[0], left_type, left_constant, item)
                 item.update(kind="dict_contains", type="bool")
                 return "bool", None
             if not right_type.endswith("[]"):
@@ -385,6 +759,10 @@ def check(tree):
             if operand_type != "bool":
                 raise CompileError("not requires bool", item)
             value_type, constant = "bool", not operand if operand is not None else None
+        elif kind=="invert":
+            t,c=expression(item["value"])
+            if t not in {"i16","u8"}:raise CompileError("Bitwise inversion requires an integer",item)
+            value_type="i16";constant=~c if c is not None else None
         elif kind == "negate":
             operand_type, operand = expression(item["value"], allow_min_magnitude=True)
             if operand_type == "bool" or managed(operand_type):
@@ -394,6 +772,42 @@ def check(tree):
         else:
             left_type, left = expression(item["left"])
             right_type, right = expression(item["right"])
+            if is_dict(left_type) and left_type==right_type and kind=="bit_or":
+                item.update(kind="dict_merge",type=left_type,owned=True);return left_type,None
+            if is_set(left_type) and left_type==right_type and kind in {"bit_or","bit_and","bit_xor","subtract"}:
+                item.update(kind="set_binary",name={"bit_or":"union","bit_and":"intersection","bit_xor":"symmetric_difference","subtract":"difference"}[kind],type=left_type,owned=True);return left_type,None
+            if kind in {"bit_and","bit_or","bit_xor","shift_left","shift_right","power"}:
+                if left_type not in {"i16","u8"} or right_type not in {"i16","u8"}:raise CompileError("Integer operator requires integers",item)
+                if kind in {"shift_left","shift_right","power"} and right is not None and right<0:raise CompileError("Shift count and integer exponent cannot be negative",item)
+                item["type"]="i16"
+                if left is not None and right is not None:
+                    constant={"bit_and":lambda:left&right,"bit_or":lambda:left|right,"bit_xor":lambda:left^right,"shift_left":lambda:0 if right>=16 else left<<right,"shift_right":lambda:left>>min(right,16),"power":lambda:pow(left,right,65536)}[kind]()
+                    constant=(constant+32768)%65536-32768
+                return "i16",constant
+            if is_set(left_type) and is_set(right_type) and kind=="compare":
+                if left_type!=right_type:raise CompileError("Set comparison requires matching element types",item)
+                item.update(kind="set_compare",type="bool");return "bool",None
+            if kind=="add" and left_type==right_type and not is_tuple(left_type) and (left_type=="str" or left_type.endswith("[]")):
+                item.update(kind="sequence_binary",name="concat",type=left_type,owned=True);return left_type,None
+            if kind=="add" and is_tuple(left_type) and is_tuple(right_type):
+                t="tuple["+",".join(tuple_types(left_type)+tuple_types(right_type))+"]"
+                item.update(kind="sequence_binary",name="concat",type=t,owned=True);return t,None
+            if kind=="multiply":
+                def sequence(t):return t=="str" or t.endswith("[]") or is_tuple(t)
+                if sequence(left_type) and right_type in {"i16","u8"} or sequence(right_type) and left_type in {"i16","u8"}:
+                    t=left_type if sequence(left_type) else right_type
+                    if is_tuple(t):
+                        count=right if sequence(left_type) else left
+                        if count is None or dynamic_tuple(t):t="tuple_cycle["+",".join(tuple_types(t))+"]"
+                        else:
+                            if len(tuple_types(t))*max(0,count)>4096:raise CompileError("Tuple repetition exceeds the container limit",item)
+                            t="tuple["+",".join(tuple_types(t)*max(0,count))+"]"
+                    item.update(kind="sequence_binary",name="repeat" if sequence(left_type) else "repeat_reverse",type=t,owned=True);return t,None
+            if kind=="compare" and (managed(left_type) or managed(right_type)):
+                if left_type!=right_type and item["operator"] not in {"==","!="}:raise CompileError("Ordering requires matching collection types",item)
+                if is_dict(left_type) and item["operator"] not in {"==","!="}:raise CompileError("Dictionaries only support equality comparisons",item)
+                item.update(kind="collection_compare",type="bool",same_type=left_type==right_type)
+                return "bool",None
             if is_dict(left_type) or is_dict(right_type): raise CompileError("Dictionary arithmetic/comparison is not supported", item)
             if "fixed" in {left_type, right_type}:
                 if kind not in {"add", "subtract", "multiply", "compare"} or any(t not in {"fixed", "i16", "u8"} for t in (left_type, right_type)):
@@ -457,17 +871,44 @@ def check(tree):
                 expression(statement["value"], allow_void=True)
                 continue
             if kind == "collect":
-                element, constant = expression(statement["value"])
-                if managed(element) or element == "void":
-                    raise CompileError("Comprehensions require scalar elements", statement)
                 expected = statement.get("expected_element")
+                element, constant = expression(statement["value"],expected_element=expected)
+                if element == "void":
+                    raise CompileError("Comprehensions require scalar elements", statement)
                 if expected:
-                    compatible(expected, element, constant, statement)
-                    element = expected
+                    leaf=element
+                    while leaf.endswith("[]"):leaf=leaf[:-2]
+                    if leaf!=expected:compatible(expected, element, constant, statement)
                 statement["type"] = element
+                if statement.get("collection")=="dict":
+                    key,_=expression(statement["key"])
+                    if key not in {"i16","u8","str"}:raise CompileError("Dictionary keys must be integers or strings",statement)
+                    statement["key_type"]="i16" if key=="u8" else key
+                if statement.get("collection")=="set" and element not in {"i16","u8","str"}:raise CompileError("Set elements must be integers or strings",statement)
                 continue
+            if kind=="unpack_assign":
+                source_type,_=expression(statement["value"])
+                names=statement["names"]
+                if is_tuple(source_type):
+                    fields=tuple_types(source_type)
+                    if dynamic_tuple(source_type):fields=[fields[i%len(fields)] for i in range(len(names))]
+                    elif len(fields)!=len(names):raise CompileError("Wrong number of values to unpack",statement)
+                elif source_type.endswith("[]"):fields=[source_type[:-2]]*len(names)
+                else:raise CompileError("Unpacking requires a list or tuple",statement)
+                targets=[]
+                for name,t in zip(names,fields):
+                    symbol=context["locals"].get(name)
+                    if symbol is None:
+                        symbol={"type":t,"size":2,"label":f"__var_{len(globals_)}"};globals_[name]=symbol
+                    elif symbol["type"]=="auto":symbol["type"]=t
+                    else:compatible(symbol["type"],t,None,statement)
+                    context["locals"][name]=symbol;context["initialized"].add(name)
+                    targets.append({**symbol,"symbol":symbol["label"]})
+                statement["targets"]=targets;continue
             if kind == "index_assign":
                 target_type, _ = expression(statement["target"])
+                base_type=statement["target"]["base"]["type"]
+                if base_type=="str" or is_tuple(base_type):raise CompileError("Strings and tuples are immutable",statement)
                 source_type, value = expression(statement["value"], expected_element=target_type)
                 if statement["operator"] != "=":
                     if target_type not in {"i16", "u8"} or source_type not in {"i16", "u8"}:
@@ -504,7 +945,17 @@ def check(tree):
             if kind == "for":
                 iterable = statement["iterable"]
                 names = statement.get("names", [statement["name"]])
-                if iterable["kind"] == "list" and (any(v["kind"] == "tuple" for v in iterable["values"]) or not iterable["values"] and len(names) > 1):
+                def primitive_field(value):
+                    if value["kind"] in {"number","boolean","decimal"}:return True
+                    if value["kind"]=="name":
+                        symbol=context["locals"].get(value["name"],globals_.get(value["name"],{}))
+                        return not managed(symbol.get("type","i16"))
+                    if value["kind"]=="negate":return primitive_field(value["value"])
+                    if value["kind"] in {"add","subtract","multiply","floor_divide","modulo"}:return primitive_field(value["left"]) and primitive_field(value["right"])
+                    return False
+                literal_rows=iterable.get("values",[])
+                fast_rows=all(row["kind"]=="tuple" and all(primitive_field(v) for v in row["values"]) for row in literal_rows)
+                if iterable["kind"] == "list" and len(names)>1 and (any(v["kind"] == "tuple" for v in literal_rows) and fast_rows or not literal_rows):
                     # Scalar rows have a known shape; no Python tuple objects or
                     # heap descriptors are needed for this iteration.
                     rows, constants, elements = iterable["values"], [], [None] * len(names)
@@ -594,12 +1045,17 @@ def check(tree):
                 types = []
                 for source in sources:
                     iterable_type, _ = expression(source)
-                    if not iterable_type.endswith("[]") and not (is_dict(iterable_type) and mode == "array"):
+                    if is_view(iterable_type) and mode=="array":
+                        view,mapping_type=view_types(iterable_type)
+                        sources[0]={"kind":"view_target","base":source,"type":mapping_type,"owned":True}
+                        iterable_type=mapping_type
+                    if not iterable_type.endswith("[]") and not is_tuple(iterable_type) and not ((is_dict(iterable_type) or is_set(iterable_type)) and mode == "array"):
                         raise CompileError("A for loop requires an array or range", source)
                     types.append(iterable_type)
-                if len(types) == 1 and is_dict(types[0]):
-                    key_type, element = dict_types(types[0])
-                    elements = [key_type, element] if view == "items" else [element] if view == "values" else [key_type]
+                if len(types) == 1 and (is_dict(types[0]) or is_set(types[0])):
+                    key_type, value_type = (element_type(types[0]),"i16") if is_set(types[0]) else dict_types(types[0])
+                    if is_set(types[0]) and view:raise CompileError("Sets have no dictionary views",statement)
+                    elements = [key_type, value_type] if view == "items" else [value_type] if view == "values" else [key_type]
                     names = statement.get("names", [statement["name"]])
                     if len(names) != len(elements): raise CompileError(f"This dictionary iteration requires {len(elements)} target name(s)", statement)
                     before = context["initialized"].copy()
@@ -620,7 +1076,7 @@ def check(tree):
                             if field not in statement:
                                 function = context["function"]
                                 function["frame_size"] += 2
-                                if function["frame_size"] > 128: raise CompileError("Function locals exceed the current 128-byte stack frame limit", statement)
+                                if function["frame_size"] > 4096: raise CompileError("Function frame exceeds 4096 bytes", statement)
                                 symbol = {"type": t, "size": 2, "storage": "frame", "offset": -function["frame_size"], "label": f"__local_{len(context['locals'])}"}
                                 context["locals"][f"${field}{len(context['locals'])}"] = symbol
                             else:
@@ -630,12 +1086,18 @@ def check(tree):
                             checked["temporaries"][symbol["label"]] = symbol
                         statement[field] = {**symbol, "symbol": symbol["label"]}
                     statement.update(iteration_kind="dict", dict_view=view or "keys", sources=sources, targets=targets, target=targets[-1])
-                    if view: iterable["kind"] = "dict_view"
+                    if view and iterable["kind"]=="method": iterable["kind"] = "dict_view"
                     statements(statement["body"], loop_depth + 1)
                     context["initialized"] = before
                     continue
                 if view: raise CompileError("Dictionary views require a dictionary", iterable)
-                elements = [t[:-2] for t in types]
+                elements=[]
+                for t in types:
+                    if is_tuple(t):
+                        fields=tuple_types(t)
+                        if fields and len(set(fields))>1:raise CompileError("Tuple iteration requires matching field types",statement)
+                        elements.append(fields[0] if fields else "i16")
+                    else:elements.append(t[:-2])
                 if mode == "enumerate":
                     start = iterable["arguments"][1] if len(iterable["arguments"]) == 2 else {"kind": "number", "value": 0, "line": statement["line"], "column": statement["column"]}
                     if expression(start)[0] not in {"i16", "u8"}:
@@ -643,6 +1105,8 @@ def check(tree):
                     statement["enumeration_start"] = start
                     elements.insert(0, "i16")
                 names = statement.get("names", [statement["name"]])
+                unpack_rows=mode=="array" and len(elements)==1 and is_tuple(elements[0]) and len(names)>1
+                if unpack_rows:elements=tuple_types(elements[0])
                 if len(names) != len(elements):
                     raise CompileError(f"This iteration requires {len(elements)} target name(s)", statement)
                 before = context["initialized"].copy()
@@ -658,7 +1122,7 @@ def check(tree):
                 statement["iteration_index"] = slot("iteration_index", "i16")
                 if mode == "enumerate":
                     statement["enumeration"] = slot("enumeration", "i16")
-                statement["sources"], statement["iteration_kind"] = sources, mode
+                statement["sources"], statement["iteration_kind"] = sources, "unpack_array" if unpack_rows else mode
                 targets = []
                 for name, element in zip(names, elements):
                     if name in functions or name == "len" or name in GRAPHICS_BUILTINS:
@@ -734,7 +1198,9 @@ def check(tree):
                               "size": 1 if target in {"u8", "bool"} else 2}
                 source_type, constant = expression(statement["value"], expected_element=target)
                 if source_type.endswith("[]"):
-                    target += "[]"
+                    leaf=source_type
+                    while leaf.endswith("[]"):leaf=leaf[:-2]
+                    if target==leaf:target=source_type
                     symbol["type"] = target
                     symbol["size"] = 2
                 compatible(target, source_type, constant, statement)
@@ -770,6 +1236,13 @@ def check(tree):
                         comprehension_slots(value)
             comprehension_slots(statement)
             kind = statement["kind"]
+            if kind=="unpack_assign":
+                for name in statement["names"]:
+                    if name not in local_symbols:
+                        size+=2
+                        local_symbols[name]={"type":"auto","size":2,"storage":"frame","offset":-size,"label":f"__local_{len(local_symbols)}"}
+                if size>4096:raise CompileError("Function frame exceeds 4096 bytes",statement)
+                continue
             if kind == "function":
                 raise CompileError("Nested functions are not supported", statement)
             if kind == "declare" or kind == "assign" and statement.get("inferred"):
@@ -782,8 +1255,8 @@ def check(tree):
                 # array descriptor even when its declared element type is u8.
                 width = 2
                 size += width
-                if size > 128:
-                    raise CompileError("Function locals exceed the current 128-byte stack frame limit", statement)
+                if size > 4096:
+                    raise CompileError("Function frame exceeds 4096 bytes", statement)
                 local_symbols[name] = {"type": type_name, "size": width,
                                        "storage": "frame", "offset": -size,
                                        "label": f"__local_{len(local_symbols)}"}
@@ -807,8 +1280,8 @@ def check(tree):
                         size += 2
                         local_symbols[name] = {"type": "i16", "size": 2, "storage": "frame", "offset": -size,
                                                "label": f"__local_{len(local_symbols)}", "loop_inferred": True}
-                if size > 128:
-                    raise CompileError("Function locals exceed the current 128-byte stack frame limit", statement)
+                if size > 4096:
+                    raise CompileError("Function frame exceeds 4096 bytes", statement)
                 size = allocate_locals(statement["body"], local_symbols, size)
             elif kind in {"if", "while"}:
                 size = allocate_locals(statement["body"], local_symbols, size)

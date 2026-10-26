@@ -26,8 +26,10 @@ def prepare(tree):
                     clause["name"], clause["names"] = targets[0], targets
                     rewrite(clause["filters"], local)
                 rewrite(item["value"], local)
+                if "key" in item:rewrite(item["key"],local)
                 location = {key: item[key] for key in ("line", "column", "filename") if key in item}
-                collect = {"kind": "collect", "value": item["value"], **location}
+                collect = {"kind": "collect", "value": item["value"], "collection":item.get("collection","list"), **location}
+                if "key" in item:collect["key"]=item["key"]
                 body = [collect]
                 for clause in reversed(clauses):
                     for condition in reversed(clause.pop("filters")):

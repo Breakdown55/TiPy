@@ -9,11 +9,12 @@ TOKEN = re.compile(
     r"(?P<SPACE>[ \t]+)"
     r"|(?P<COMMENT>\#[^\n]*)"
     r"|(?P<NEWLINE>\n)"
+    r'''|(?P<FSTRING>[fF](?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'))'''
     r'''|(?P<STRING>"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')'''
     r"|(?P<DECIMAL>[0-9]+\.[0-9]+)"
     r"|(?P<NUMBER>0[xX][0-9a-fA-F]+|[0-9]+)"
     r"|(?P<NAME>[A-Za-z_][A-Za-z_0-9]*)"
-    r"|(?P<OP>->|==|!=|<=|>=|//=|\*=|%=|\+=|-=|//|[=+*%\-()<>:,.\[\]{}])"
+    r"|(?P<OP>->|==|!=|<<=|>>=|\*\*=|<=|>=|//=|\*=|/=|%=|\+=|-=|&=|\|=|\^=|<<|>>|\*\*|//|[=+*/%&|^~\-()<>:,.\[\]{}])"
     r"|(?P<INVALID>.)"
 )
 
@@ -51,7 +52,7 @@ def tokenize(source, *, expand_defines=True):
                 at_line_start = False
             if kind != "NEWLINE":
                 at_line_start = False
-            if kind == "NAME" and text in {"int", "i16", "u8", "bool", "void", "str", "dict"}:
+            if kind == "NAME" and text in {"int", "i16", "u8", "bool", "void", "str", "dict", "tuple", "set"}:
                 token["kind"] = "TYPE"
             elif kind == "NAME" and text in {"True", "False"}:
                 token["kind"] = "BOOL"

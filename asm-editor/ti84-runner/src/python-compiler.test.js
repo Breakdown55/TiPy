@@ -44,52 +44,334 @@ function execute(source, measurements) {
     if (measurements) Object.assign(measurements, { bytes: runner.machineBytes, tStates: runner.machine.tStateCount,
         screen: runner.lcd.pixels.slice(), graph: runner.machine.memory.slice(0x9340,0x9640),
         report: result.optimization_report, assembly: result.assembly, frames })
-    const values = {}
-    for (const [name,symbol] of Object.entries(result.symbols)) {
-        const address = runner.assembly.asm.scopes[0].symbols.get(symbol.label).value
-        let value = runner.machine.memory[address]
-        if(symbol.type.startsWith('dict[')) {
-            const readWord=a=>runner.machine.memory[a] | (runner.machine.memory[a+1]<<8)
-            const readString=pointer=>String.fromCharCode(...runner.machine.memory.slice(readWord(pointer),readWord(pointer)+readWord(pointer+2)))
-            const pointer=readWord(address),length=readWord(pointer+2)
-            const [keyType,valueType]=symbol.type.slice(5,-1).split(',')
-            const entries=[]
-            let entry=readWord(pointer+14)
-            while(entry) {
-                assert.ok(entries.length<length,'Dictionary order links must be finite and match length')
-                let key=readWord(entry+4),element=readWord(entry+6)
-                if(keyType==='str') key=readString(key)
-                else if(key&0x8000) key-=65536
-                if(valueType==='str') element=readString(element)
-                else if(valueType==='i16' && element&0x8000) element-=65536
-                entries.push([key,element]);entry=readWord(entry+8)
-            }
-            assert.equal(entries.length,length)
-            values[name]=new Map(entries)
-            continue
+    const values = {},mem=runner.machine.memory,memo=new Map()
+    const word=a=>mem[a] | (mem[a+1]<<8)
+    const fields=text=>{
+        const result=[];let depth=0,start=0
+        for(let i=0;i<text.length;i++) {
+            if(text[i]==='[')depth++
+            else if(text[i]===']')depth--
+            else if(text[i]===',' && !depth){result.push(text.slice(start,i));start=i+1}
         }
-        if (symbol.type.endsWith('[]') || symbol.type==='str') {
-            const pointer = value | (runner.machine.memory[address + 1] << 8)
-            const readWord = a => runner.machine.memory[a] | (runner.machine.memory[a + 1] << 8)
-            const data = readWord(pointer)
-            const length = readWord(pointer + 2)
-            const width = readWord(pointer + 6)
-            const elements = Array.from({ length },(_,i) => {
-                let element = width === 1 ? runner.machine.memory[data + i] : readWord(data + i * 2)
-                if (symbol.type === 'i16[]' && element & 0x8000) element -= 65536
-                return element
-            })
-            values[name] = symbol.type==='str' ? String.fromCharCode(...elements) : elements
-            continue
-        }
-        if (symbol.size === 2) {
-            value |= runner.machine.memory[address + 1] << 8
-            if (value & 0x8000) value -= 65536
-        }
-        values[name] = value
+        if(text.slice(start))result.push(text.slice(start))
+        return result
     }
+    const decode=(address,type)=>{
+        if(type==='u8' || type==='bool')return mem[address]
+        const raw=word(address)
+        if(type==='str')return String.fromCharCode(...mem.slice(word(raw),word(raw)+word(raw+2)))
+        const tuple=type==='tuple[]' || /^(tuple|tuple_var|tuple_cycle)\[/.test(type) && !type.endsWith('[]')
+        const dict=type.startsWith('dict[') && !type.endsWith('[]')
+        const set=type.startsWith('set[') && !type.endsWith('[]')
+        if(tuple || dict || set || type.endsWith('[]')) {
+            if(memo.has(raw))return memo.get(raw)
+            const length=word(raw+2),data=word(raw),value=dict?new Map():set?new Set():[]
+            memo.set(raw,value)
+            if(dict || set) {
+                const [keyType,valueType]=set?[type.slice(4,-1),'i16']:fields(type.slice(5,-1));let entry=word(raw+14),count=0
+                while(entry) {
+                    assert.ok(count++<length,'Dictionary order links must be finite')
+                    if(set)value.add(decode(entry+4,keyType));else value.set(decode(entry+4,keyType),decode(entry+6,valueType));entry=word(entry+8)
+                }
+                assert.equal(count,length)
+            } else {
+                const types=tuple?fields(type.slice(type.indexOf('[')+1,-1)):null,step=word(raw+6)===1?1:2
+                for(let i=0;i<length;i++)value.push(decode(data+i*step,types?types[i%types.length]:type.slice(0,-2)))
+            }
+            return value
+        }
+        return raw&0x8000?raw-65536:raw
+    }
+    for (const [name,symbol] of Object.entries(result.symbols)) values[name]=decode(runner.assembly.asm.scopes[0].symbols.get(symbol.label).value,symbol.type)
     return values
 }
+
+test('Native comprehensions, bitwise precedence and set/dictionary operators', () => {
+    const v=execute(`d={str(x):[x*x] for x in range(5) if x%2==0}
+s={x%3 for x in range(8)}
+merged=d | {"0":[99],"a":[6]}
+u=s | {4}
+i=s & {1,4}
+diff=s-{1}
+xor=s ^ {1,4}
+bits=3 | 4 & 6 ^ 1
+inverse=~5
+left=3<<4
+right=-65>>3
+large=-10>>20
+zero=7<<20
+exponent=2**3**2
+negative=-2**2
+`,{maxSlices:3000})
+    assert.deepEqual(v.d,new Map([['0',[0]],['2',[4]],['4',[16]]]))
+    assert.deepEqual(v.merged,new Map([['0',[99]],['2',[4]],['4',[16]],['a',[6]]]))
+    assert.deepEqual(v.s,new Set([0,1,2]));assert.deepEqual(v.u,new Set([0,1,2,4]));assert.deepEqual(v.i,new Set([1]));assert.deepEqual(v.diff,new Set([0,2]));assert.deepEqual(v.xor,new Set([0,2,4]))
+    assert.deepEqual([v.bits,v.inverse,v.left,v.right,v.large,v.zero,v.exponent,v.negative],[7,-6,48,-9,-1,0,512,-4])
+})
+
+test('Native defaults are shared definition-time values and keyword calls preserve evaluation order', () => {
+    const v=execute(`events=[]
+def value(int x):
+    events.append(x)
+    return x
+def add(int a,int b=5):
+    return a+b
+def collect(int x,int[] values=[]):
+    values.append(x)
+    return values.copy()
+def total(int initial,*args):
+    for num in args:
+        initial+=num
+    return initial
+a=add(b=value(2),a=value(1))
+b=add(10)
+c=collect(1)
+d=collect(2)
+e=total(10,1,2,3)
+f=100 if a>2 else value(99)
+`,{maxSlices:3000})
+    assert.deepEqual(v.events,[2,1]);assert.deepEqual([v.a,v.b,v.e,v.f],[3,15,16,100]);assert.deepEqual(v.c,[1]);assert.deepEqual(v.d,[1,2])
+})
+
+test('Loop else only runs after completion and nested breaks belong to their own loop', () => {
+    const v=execute(`a=0
+for x in range(3):
+    if x==1:
+        break
+else:
+    a=99
+b=0
+for x in range(3):
+    for y in range(3):
+        break
+else:
+    b=7
+c=0
+while c<2:
+    c+=1
+    continue
+else:
+    c+=10
+`,{maxSlices:3000})
+    assert.deepEqual([v.a,v.b,v.c],[0,7,12])
+})
+
+test('Native sets preserve hashed membership, algebra, mutation and string ownership', () => {
+    const v=execute(`a={1,2,2,3}
+b=set([3,4])
+union=a.union(b)
+common=a.intersection(b)
+diff=a.difference(b)
+xor=a.symmetric_difference(b)
+bool subset=common < a
+bool disjoint=diff.isdisjoint(b)
+a.add(9)
+a.discard(2)
+a.remove(1)
+copy=a.copy()
+a.clear()
+names=set(["one","two","one"])
+name=names.pop()
+names.clear()
+bool found=3 in copy
+`,{maxSlices:3000})
+    assert.deepEqual(v.union,new Set([1,2,3,4]));assert.deepEqual(v.common,new Set([3]))
+    assert.deepEqual(v.diff,new Set([1,2]));assert.deepEqual(v.xor,new Set([1,2,4]))
+    assert.deepEqual(v.copy,new Set([3,9]));assert.equal(v.subset,1);assert.equal(v.disjoint,1);assert.equal(v.found,1);assert.equal(v.name,'one')
+})
+
+test('Stored dictionary views remain live and materialize typed keys values and items', () => {
+    const v=execute(`d={"a":[1],"b":[2]}
+keys=d.keys()
+vals=d.values()
+items=d.items()
+d["c"]=[3]
+count=len(keys)
+bool has="c" in keys
+bool val=[2] in vals
+bool item=("a",[1]) in items
+key_list=list(keys)
+value_list=list(vals)
+item_list=list(items)
+total=0
+for key,value in items:
+    total+=value[0]
+d.clear()
+after=len(keys)
+`,{maxSlices:3000})
+    assert.equal(v.count,3);assert.equal(v.after,0);assert.equal(v.has,1);assert.equal(v.val,1);assert.equal(v.item,1);assert.equal(v.total,6)
+    assert.deepEqual(v.key_list,['a','b','c']);assert.deepEqual(v.value_list,[[1],[2],[3]]);assert.deepEqual(v.item_list,[['a',[1]],['b',[2]],['c',[3]]])
+})
+
+test('Native string indexing and sequence slicing match Python bounds and step rules', () => {
+    const values=execute(`s="abcdef"
+a=s[1]
+b=s[-1]
+c=s[1:5:2]
+d=s[::-1]
+e=s[-100:100]
+f=s[4:1:-2]
+g=s[0:0]
+h=s[::32767]
+i=s[::-32768]
+names=["a","b","c"]
+back=names[::-1]
+names.clear()
+tuple_value=(1,"x",True)
+tail=tuple_value[1:]
+`,{maxSlices:3000})
+    assert.deepEqual([values.a,values.b,values.c,values.d,values.e,values.f,values.g,values.h,values.i],['b','f','bd','fedcba','abcdef','ec','','a','f'])
+    assert.deepEqual(values.back,['c','b','a']);assert.deepEqual(values.tail,['x',1])
+})
+
+test('Native strings search, strip, split, join, replace and case conversion preserve immutable values', () => {
+    const values=execute(`source="  Alpha beta Alpha  "
+trim=source.strip()
+left=source.lstrip()
+right=source.rstrip()
+words=trim.split()
+joined="-".join(words)
+first=source.find("Alpha")
+last=source.rfind("Alpha")
+count=source.count("Alpha")
+bool starts=trim.startswith("Alpha")
+bool ends=trim.endswith("Alpha")
+str changed=trim.replace("Alpha","X",1)
+`,{maxSlices:3000})
+    assert.equal(values.trim,'Alpha beta Alpha');assert.equal(values.left,'Alpha beta Alpha  ');assert.equal(values.right,'  Alpha beta Alpha')
+    assert.deepEqual(values.words,['Alpha','beta','Alpha']);assert.equal(values.joined,'Alpha-beta-Alpha')
+    assert.equal(values.first,2);assert.equal(values.last,13);assert.equal(values.count,2)
+    assert.equal(values.starts,1);assert.equal(values.ends,1);assert.equal(values.changed,'X beta Alpha')
+    const cases=execute(`a="hELLo".lower()
+b="hello".upper()
+c="hELLo WORLD".capitalize()
+d="hello WORLD".title()
+e="AbC!".swapcase()
+f="x,,y,".split(",")
+g=" abc def ".split(maxsplit=0)
+h="ab".replace("","-",2)
+i="abc".find("",4)
+j="abc".count("")
+`,{maxSlices:3000})
+    assert.deepEqual([cases.a,cases.b,cases.c,cases.d,cases.e],['hello','HELLO','Hello world','Hello World','aBc!'])
+    assert.deepEqual(cases.f,['x','','y','']);assert.deepEqual(cases.g,['abc def ']);assert.equal(cases.h,'-a-b');assert.equal(cases.i,-1);assert.equal(cases.j,4)
+})
+
+test('Keyword binding evaluates method receiver and arguments in their original order', () => {
+    const values=execute(`calls=[]
+def source():
+    calls.append(10)
+    return "a:b:c"
+def separator():
+    calls.append(20)
+    return ":"
+def maximum():
+    calls.append(30)
+    return 1
+result=source().split(maxsplit=maximum(),sep=separator())
+`,{maxSlices:3000})
+    assert.deepEqual(values.calls,[10,30,20]);assert.deepEqual(values.result,['a','b:c'])
+})
+
+test('Concatenation, repetition and stable sorting preserve list aliases', () => {
+    const values=execute(`a=[1]
+b=[1]
+rows=[b,a]
+ordered=sorted(rows)
+ordered[0][0]=9
+matrix=[[1]]*3
+matrix[0][0]=7
+joined=[1,2]+[3,4]
+numbers=sorted([3,-1,2],reverse=True)
+names=["z","a","b"]
+names.sort()
+text=3*"ab"+"!"
+empty="abc"*-2
+record=(1,"a")+(2,"b")
+twice=(1,"x")*2
+`,{maxSlices:3000})
+    assert.deepEqual(values.a,[1]);assert.deepEqual(values.b,[9]);assert.strictEqual(values.ordered[0],values.b)
+    assert.deepEqual(values.matrix,[[7],[7],[7]]);assert.strictEqual(values.matrix[0],values.matrix[2])
+    assert.deepEqual(values.joined,[1,2,3,4]);assert.deepEqual(values.numbers,[3,2,-1]);assert.deepEqual(values.names,['a','b','z'])
+    assert.equal(values.text,'ababab!');assert.equal(values.empty,'');assert.deepEqual(values.record,[1,'a',2,'b']);assert.deepEqual(values.twice,[1,'x',1,'x'])
+})
+
+test('Native f-strings, scalar conversion and integer formats need no host evaluation', () => {
+    const values=execute(`n=7
+text=f"score={n:04d}, {'x'!r}"
+sign=f"{-3:+05d}"
+base=f"{255:#06x}"
+left=f"{'x':.<5}"
+center=f"{'x':^5}"
+binary=bin(-5)
+octal=oct(15)
+hexadecimal=hex(255)
+code=ord("A")
+character=chr(66)
+boolean=str(True)
+integer=str(-32768)
+`)
+    assert.equal(values.text,"score=0007, 'x'");assert.equal(values.sign,'-0003')
+    assert.equal(values.base,'0x00ff')
+    assert.equal(values.left,'x....');assert.equal(values.center,'  x  ')
+    assert.equal(values.binary,'-0b101');assert.equal(values.octal,'0o17');assert.equal(values.hexadecimal,'0xff')
+    assert.equal(values.code,65);assert.equal(values.character,'B');assert.equal(values.boolean,'True');assert.equal(values.integer,'-32768')
+})
+
+test('Nested containers and string lists preserve aliases and reclaim owned children', () => {
+    const source=`str names=["Alice","Bob"]
+str first=names[0]
+names.append("Carol")
+str removed=names.pop(1)
+names.insert(0,"Zoe")
+names.reverse()
+str copied=names.copy()
+names.extend(copied)
+int count=names.count("Alice")
+names.remove("Zoe")
+int matrix=[[1,2],[3,4]]
+row=matrix[0]
+row[1]=9
+matrix.append([5,6])
+int total=0
+for values in matrix:
+    total+=values[1]
+dict[str,int[]] data={"row":[7,8]}
+held=data["row"]
+data.clear()
+held.append(9)
+bool same=matrix==[[1,9],[3,4],[5,6]]
+bool ordered="Alice"<"Bob"
+`
+    const values=execute(source,{maxSlices:2000})
+    assert.deepEqual(values.names,['Carol','Alice','Carol','Alice','Zoe'])
+    assert.deepEqual(values.copied,['Carol','Alice','Zoe'])
+    assert.equal(values.first,'Alice');assert.equal(values.removed,'Bob');assert.equal(values.count,2)
+    assert.deepEqual(values.matrix,[[1,9],[3,4],[5,6]])
+    assert.equal(values.total,19);assert.deepEqual(values.held,[7,8,9]);assert.equal(values.same,1);assert.equal(values.ordered,1)
+})
+
+test('General tuple values, return inference and unpacking preserve fields and ownership', () => {
+    const values=execute(`def pair(int n):
+    return n,"value"
+p=pair(7)
+a,b=p
+str text=p[1]
+int number=p[0]
+a,c=8,9
+rows=[("A",1),("B",2)]
+int total=0
+str last=""
+for name,value in rows:
+    total+=value
+    last=name
+for n in (1,2,3):
+    total+=n
+`,{maxSlices:2000})
+    assert.deepEqual(values.p,[7,'value']);assert.equal(values.a,8);assert.equal(values.b,'value')
+    assert.equal(values.text,'value');assert.equal(values.number,7);assert.equal(values.c,9)
+    assert.equal(values.total,9);assert.equal(values.last,'B')
+})
 
 test('Integer hash maps grow, handle colliding buckets and tombstones, and keep insertion order', t => {
     const source=`d={}

@@ -39,15 +39,15 @@ class DictionaryTests(unittest.TestCase):
 
     def test_invalid_types_and_view_usage_have_source_errors(self):
         cases = [('d={"A":1,2:3}', 'Cannot assign'), ('d={1:2,3:True}', 'Cannot assign'),
-                 ('d={True:1}', 'keys must'), ('d={1:[2]}', 'values must'),
-                 ('d={1:{2:3}}', 'values must'), ('dict[bool,int] d={}', 'Dictionary types'),
+                 ('d={True:1}', 'keys must'), ('d={1:[2],2:True}', 'Cannot assign'),
+                 ('d={1:{2:3},2:False}', 'Cannot assign'), ('dict[bool,int] d={}', 'Dictionary types'),
                  ('d={1:2}\nd["A"]=3', 'Cannot assign'), ('d={1:2}\nd[1]=True', 'Cannot assign'),
                  ('d={1:2}\nx=d.get(1)', 'explicit default'), ('d={1:2}\nx=d.get(1,False)', 'Cannot assign'),
                  ('d={1:2}\nfor a,b in d:\n    pass', 'requires 1 target'),
                  ('d={1:2}\nfor a in d.items():\n    pass', 'requires 2 target'),
-                 ('d={1:2}\nx=d.keys()', 'require a for'), ('d={1:2}\nx=d+1', 'arithmetic'),
+                 ('d={1:2}\nx=d.keys(1)', 'no arguments'), ('d={1:2}\nx=d+1', 'arithmetic'),
                  ('x=[1]\ndel x[0]', 'requires a dictionary'), ('d={1:2}\nx=True in d', 'Cannot assign'),
-                 ('d={1:2}\nx=[d for i in range(2)]', 'scalar'), ('x=hash([1])', 'hash expects')]
+                 ('d={1:2}\nd[2]=[]', 'Cannot assign'), ('x=hash([1])', 'hash expects')]
         for source, message in cases:
             with self.subTest(source=source), self.assertRaisesRegex(CompileError, message): compile_source(source)
 

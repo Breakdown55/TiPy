@@ -64,8 +64,8 @@ class FunctionTests(unittest.TestCase):
         self.assertEqual(caught.exception.line, 2)
 
     def test_frame_limits_produce_compile_errors(self):
-        source = "def large() -> void:\n" + "\n".join(f"    int A{i}=0" for i in range(65))
-        with self.assertRaisesRegex(CompileError, "128-byte"):
+        source = "def large() -> void:\n" + "\n".join(f"    int A{i}=0" for i in range(2049))
+        with self.assertRaisesRegex(CompileError, "4096 bytes"):
             compile_source(source)
         params = ",".join(f"int A{i}" for i in range(63))
         with self.assertRaisesRegex(CompileError, "62 parameters"):

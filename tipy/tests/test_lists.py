@@ -52,11 +52,11 @@ class ListTests(unittest.TestCase):
             ("int a=[1]\na.insert(True,2)", "index must be an integer"),
             ("int a=[1]\na.append(True)", "Cannot assign"),
             ("int a=[1]\na.append()", "argument count"),
-            ("int a=[1]\na.sort()", "Unsupported array method"),
+            ("int a=[1]\na.sort(reverse=1)", "reverse"),
             ("int a=[1]\nint x=a+1", "scalar operators"),
             ("int a=[1]\na[0]+=a", "requires integers"),
             ("int a=[1]\nif a:\n    pass", "must be bool"),
-            ("int a=[[1]]", "Cannot assign"),
+            ("int a=[[1],[True]]", "Cannot assign"),
             ("def f(int x) -> int:\n    return x\nint a=[1]\nint x=f(a)", "Cannot assign"),
         ]
         for source, message in cases:

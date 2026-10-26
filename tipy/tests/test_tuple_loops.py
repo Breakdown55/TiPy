@@ -14,12 +14,12 @@ class TupleLoopTests(unittest.TestCase):
 
     def test_tuple_shape_type_and_initialization_errors_are_source_errors(self):
         cases = [("for x,y in [(1,2),(3,)]:\n    pass", "2 values"),
-                 ("for x,y in [(1,2),3]:\n    pass", "2 values"),
+                 ("for x,y in [(1,2),3]:\n    pass", "Cannot assign"),
                  ("for x,y in [(1,True),(2,3)]:\n    pass", "Cannot assign"),
-                 ("for x,y in [([1],2)]:\n    pass", "scalar"),
-                 ("for x in [(1,2)]:\n    pass", "1 values"),
+                 ("for x,y,z in [([1],2)]:\n    pass", "2 target"),
+                 ("for x,y,z in [(1,2)]:\n    pass", "3 values"),
                  ("for x,y in []:\n    pass\nz=x", "may not be initialized"),
-                 ("x=(1,2)", "unpacked for loop")]
+                 ("x=(1,2)\na,b,c=x", "Wrong number")]
         for source, message in cases:
             with self.subTest(source=source), self.assertRaisesRegex(CompileError, message): compile_source(source)
 
