@@ -3,8 +3,10 @@
 from .list_runtime import Routine, add, sub, word, byte, call
 
 
-def routines(has_dict=True,has_i32=False):
+def routines(has_dict=True,has_i32=False,has_float=False,has_objects=False,has_views=False):
     out=[]
+    r=Routine("cell_get",("cell",),prefix="__obj_")
+    r.if_(("eq",word(add(word("cell"),2)),0),lambda:r.fail(18));r.ret(word(word("cell")));out.append(r.finish())
     r=Routine("optional_get",("object",),prefix="__obj_")
     r.if_(("eq","object",0),lambda:r.fail(17));r.ret(call("get","object",0));out.append(r.finish())
     r=Routine("cell_set",("cell","value"),("old",),prefix="__obj_")
@@ -12,7 +14,7 @@ def routines(has_dict=True,has_i32=False):
     def managed_field():
         r.expr(("call","__obj_release","old"))
     r.if_(("ne",byte(word(add("cell",10))),0),managed_field)
-    r.write(word("cell"),"value");r.ret("value");out.append(r.finish())
+    r.write(word("cell"),"value");r.write(add(word("cell"),2),1);r.ret("value");out.append(r.finish())
     for name in ("shift_left","shift_right"):
         r=Routine(name,("value","count"),prefix="__obj_")
         r.if_(("negative","count"),lambda:r.fail(14))
@@ -91,7 +93,7 @@ def routines(has_dict=True,has_i32=False):
         r.if_(("eq","width",32765),drop,lambda:r.if_(("ne",byte(add(word(add("object",10)),"index")),0),drop))
         r.set("index",add("index",1))
     r.while_(("ult","index",word(add("object",2))),child)
-    r.if_(("eq","width",32766),lambda:r.invoke("free",word(add("object",10))))
+    r.if_(("ne","width",32765),lambda:r.invoke("free",word(add("object",10))))
     r.ret();out.append(r.finish())
     r=Routine("read",("object","index"),prefix="__obj_")
     r.if_(("eq",word(add("object",6)),1),lambda:r.ret(byte(add(word("object"),"index"))))
@@ -99,6 +101,9 @@ def routines(has_dict=True,has_i32=False):
 
     r=Routine("compare",("left","right"),("index","limit","a","b","managed","comparison"),prefix="__obj_")
     r.if_(("eq","left","right"),lambda:r.ret(0))
+    if has_objects:r.if_(("eq",word(add("left",6)),32768),lambda:r.fail(14))
+    if has_views:r.if_(("eq",word(add("left",6)),32769),lambda:r.ret(("call","__dict_view_compare","left","right")))
+    if has_float:r.if_(("eq",word(add("left",6)),32762),lambda:r.ret(("call","__obj_f32_compare","left","right")))
     if has_i32:r.if_(("eq",word(add("left",6)),32763),lambda:r.ret(("call","__obj_i32_compare","left","right")))
     if has_dict:r.if_(("eq",word(add("left",6)),32767),lambda:r.fail(14))
     r.set("limit",word(add("left",2)))
@@ -122,8 +127,10 @@ def routines(has_dict=True,has_i32=False):
     r.if_(("ult",word(add("right",2)),word(add("left",2))),lambda:r.ret(1))
     r.ret(0);out.append(r.finish())
 
-    r=Routine("equal",("left","right"),("comparison","entry","slot","a","b"),prefix="__obj_")
+    r=Routine("equal",("left","right"),("comparison","entry","slot","a","b","index","is_managed"),prefix="__obj_")
     r.if_(("eq","left","right"),lambda:r.ret(1))
+    if has_objects:r.if_(("eq",word(add("left",6)),32768),lambda:r.ret(0))
+    if has_views:r.if_(("eq",word(add("left",6)),32769),lambda:r.ret(("call","__dict_view_equal","left","right")))
     def dict_equal():
         r.if_(("ne",word(add("left",2)),word(add("right",2))),lambda:r.ret(0))
         r.set("entry",word(add("left",14)))
@@ -138,6 +145,16 @@ def routines(has_dict=True,has_i32=False):
         r.while_(("ne","entry",0),entry)
         r.ret(1)
     if has_dict:r.if_(("eq",word(add("left",6)),32767),dict_equal)
-    r.set("comparison",("call","__obj_compare","left","right"))
-    r.if_(("eq","comparison",0),lambda:r.ret(1));r.ret(0);out.append(r.finish())
+    if has_float:
+        def float_equal():
+            r.set("comparison",("call","__obj_f32_compare","left","right"));r.if_(("eq","comparison",0),lambda:r.ret(1));r.ret(0)
+        r.if_(("eq",word(add("left",6)),32762),float_equal)
+    r.if_(("ne",word(add("left",2)),word(add("right",2))),lambda:r.ret(0));r.set("index",0)
+    def equal_element():
+        r.set("a",("call","__obj_read","left","index"));r.set("b",("call","__obj_read","right","index"));r.set("is_managed",0)
+        r.if_(("eq",word(add("left",6)),32765),lambda:r.set("is_managed",1))
+        r.if_(("eq",word(add("left",6)),32766),lambda:r.set("is_managed",byte(add(word(add("left",10)),"index"))))
+        r.if_(("ne","is_managed",0),lambda:r.if_(("eq",("call","__obj_equal","a","b"),0),lambda:r.ret(0)),lambda:r.if_(("ne","a","b"),lambda:r.ret(0)))
+        r.set("index",add("index",1))
+    r.while_(("ult","index",word(add("left",2))),equal_element);r.ret(1);out.append(r.finish())
     return out

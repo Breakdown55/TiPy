@@ -1,5 +1,5 @@
 """Return-shape inference before call checking; definite assignment is separate."""
-from .types import is_dict,dict_types,is_tuple,tuple_types,is_set,element,iterable_element,is_iterator,is_object
+from .types import is_dict,dict_types,is_tuple,tuple_types,is_set,element,iterable_element,is_iterator,is_object,is_view,view_types
 import re
 
 
@@ -29,7 +29,7 @@ def infer_returns(tree):
             return "fixed" if Decimal('-128')<=Decimal(n['value'])<=Decimal('127.99609375') else "float"
         if k=="true_divide":return "float"
         if k=="conditional":return merge(expr(n["body"],scope),expr(n["alternative"],scope))
-        if k=="name":return scope.get(n["name"],globals_.get(n["name"]))
+        if k=="name":return scope.get(n["name"],globals_.get(n["name"],f"closure[{n['name']}]" if n["name"] in functions else None))
         if k=="closure":
             functions[n["function"]]["capture_hints"]={v["name"]:scope.get(v["name"],globals_.get(v["name"])) for v in n["captures"]}
             return f"closure[{n['function']}]"
@@ -60,6 +60,34 @@ def infer_returns(tree):
             return t+"[]" if t else None
         if k=="call":
             name=n["name"]
+            if name in {"bool","any","all"}:return "bool"
+            if name in {"min","max","sum"} and n["arguments"]:
+                source=expr(n["arguments"][0],scope);e=iterable_element(source) if source else None
+                if e:
+                    if name!="sum":return e
+                    start=expr(n["arguments"][1],scope) if len(n["arguments"])==2 else "i16"
+                    return "float" if {e,start}&{"float","fixed"} else "i32" if "i32" in {e,start} else "i16"
+            if name in {"iter","reversed","map","filter","next","tuple"} and n["arguments"]:
+                def iterator(t):
+                    if not t:return None
+                    if is_iterator(t):return t
+                    e=iterable_element(t)
+                    if e is None:return None
+                    mode="string" if t=="str" else "keys" if is_dict(t) or is_set(t) else "sequence"
+                    if is_view(t):mode,t=view_types(t)
+                    return f"iter[{e},{mode},{t}]"
+                t=expr(n["arguments"][-1] if name in {"map","filter"} else n["arguments"][0],scope)
+                source=iterator(t)
+                if name=="next":return iterable_element(t) if t else None
+                if name=="tuple":
+                    e=iterable_element(t) if t else None;return f"tuple_var[{e}]" if e else None
+                if name in {"iter","reversed"}:return source
+                callback=expr(n["arguments"][0],scope)
+                if source and callback:
+                    if name=="filter" and callback=="none":return f"iter[{iterable_element(t)},filter_none,none,{source}]"
+                    if callback.startswith("closure["):
+                        f=functions[callback[8:-1]];result=iterable_element(t) if name=="filter" else f["return_type"]
+                        return f"iter[{result},{name},{callback},{source}]" if result!="auto" else None
             if name in classes:return f"object[{name}]"
             if name=="i32":return "i32"
             if name=="float":return "float"
@@ -115,6 +143,24 @@ def infer_returns(tree):
                     combined=merge(scope.get(n["name"],n.get("inferred_type")),t)
                     if combined and combined.startswith("optional["):n["inferred_type"]=combined;t=combined
                 if t:scope[n["name"]]=t
+            elif k in {"pattern_assign","unpack_assign"}:
+                source=expr(n["value"],scope)
+                def unpack(pattern,t):
+                    if not t:return
+                    if pattern["kind"]=="target_name":scope[pattern["name"]]=t;return
+                    if pattern["kind"]=="target_star":unpack(pattern["value"],t);return
+                    children=pattern["values"];fields=tuple_types(t) if is_tuple(t) else None;e=iterable_element(t)
+                    star=next((i for i,v in enumerate(children) if v["kind"]=="target_star"),-1)
+                    for i,v in enumerate(children):
+                        if i==star:
+                            rest=fields[i:len(fields)-(len(children)-i-1)] if fields else [e] if e else []
+                            if rest and len(set(rest))==1:unpack(v,rest[0]+"[]")
+                        else:
+                            index=i if star<0 or i<star else i-len(children)
+                            if fields and -len(fields)<=index<len(fields):unpack(v,fields[index])
+                            elif e:unpack(v,e)
+                target=n["target"] if k=="pattern_assign" else {"kind":"target_tuple","values":[{"kind":"target_name","name":name} for name in n["names"]]}
+                unpack(target,source)
             elif k=="return":
                 t=expr(n["value"],scope) if n["value"] else "void"
                 if t:returns.append(t)
@@ -158,11 +204,12 @@ def infer_returns(tree):
                         for v in n:yield from yields(v)
                 ts=list(yields(f["body"]))
                 if ts and all(ts) and len(set(ts))==1:f["yield_type"]=ts[0]
-        for name in automatic:
-            f=functions[name];scope={**{k:v for k,v in f.get("capture_hints",{}).items() if v},**{p["name"]:norm(p["type"]) for p in f["params"]}};returns=[]
+        for name in functions:
+            f=functions[name];scope={**f.get("inferred_locals",{}),**{k:v for k,v in f.get("capture_hints",{}).items() if v},**{p["name"]:norm(p["type"]) for p in f["params"]}};returns=[]
             scan(f["body"],scope,returns)
+            f["inferred_locals"]=scope.copy()
             annotate(f["body"],scope)
             if returns:
                 t=returns[0]
                 for other in returns[1:]:t=merge(t,other)
-                if t:f["return_type"]=t
+                if t and name in automatic:f["return_type"]=t

@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from .errors import CompileError
-from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_types, dynamic_tuple, is_set, element as element_type, is_view, view_types, iterable_element, is_cell, is_closure, is_iterator, iterator_types, is_optional, is_object
+from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_types, dynamic_tuple, is_set, element as element_type, is_view, view_types, iterable_element, is_cell, is_closure, is_iterator, iterator_types, is_optional, is_object,all_types
 
 PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
 GRAPHICS_BUILTINS = PIXEL_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
@@ -21,7 +21,7 @@ def check(tree):
     def uses_exceptions(n):
         if isinstance(n,dict):return n.get("kind") in {"try_except","try_finally","raise","assert"} or any(uses_exceptions(v) for v in n.values())
         return isinstance(n,list) and any(uses_exceptions(v) for v in n)
-    checked["tracing_heap"]=uses_exceptions(checked)
+    checked["tracing_heap"]=uses_exceptions(checked) or checked.get("closure_cycles",False)
     from .comprehensions import prepare
     prepare(checked)
     def yielded(n):
@@ -204,7 +204,7 @@ def check(tree):
                 return {key:replace(v) for key,v in value.items()}
             if isinstance(value,list):return [replace(v) for v in value]
             return value
-        for field in ("base","arguments","left","right","value","sources","values"):
+        for field in ("base","arguments","left","right","value","sources","values","bundle"):
             if field in item:item[field]=replace(item[field])
         item["evaluations"]=snapshots
 
@@ -274,9 +274,67 @@ def check(tree):
             if b["kind"]=="none" and a["kind"]=="name" and is_optional(a["type"]):result.add(a["name"])
         return result
 
+    def bind_star_arguments(item,params,args,callback,function):
+        prefix=args[:1] if item.get("method_receiver") else []
+        if prefix:params=params[1:];args=args[1:]
+        variadic=params[-1] if params and params[-1].get("variadic") else None
+        regular=params[:-1] if variadic else params
+        types=[p["type"] for p in regular]+([tuple_types(variadic["type"])[0]] if variadic else [])
+        t=types[0] if types else "i16"
+        if any(v!=t for v in types):raise CompileError("Dynamic argument unpacking requires matching parameter types",item)
+        supplied=([callback] if callback is not None else [])+prefix;pos=[];keywords=[];seen_keyword=False
+        for argument in args:
+            kind=argument["kind"];value=argument["value"] if kind in {"keyword","star_argument","keyword_unpack"} else argument
+            if kind=="star_argument":
+                actual,_=expression(value);value,actual=iterable_list(value,actual,item)
+                compatible(t+"[]",actual,None,argument)
+                value={"kind":"sequence_builtin","name":"copy","arguments":[value],"type":actual,"owned":True}
+                pos.append({"star":True,"value":value})
+            elif kind=="keyword_unpack":
+                seen_keyword=True;actual,_=expression(value)
+                compatible(f"dict[str,{t}]",actual,None,argument)
+                value={"kind":"dict_method","name":"copy","base":value,"arguments":[],"type":actual,"owned":True}
+                keywords.append({"mapping":True,"value":value})
+            else:
+                if kind=="keyword":seen_keyword=True
+                elif seen_keyword:raise CompileError("A positional argument cannot follow a keyword argument",argument)
+                actual,c=expression(value,expected_element=t);compatible(t,actual,c,argument)
+                if kind=="keyword":keywords.append({"mapping":False,"name":argument["name"],"value":value})
+                else:pos.append({"star":False,"value":value})
+            supplied.append(value)
+        location={k:item[k] for k in ("line","column","filename") if k in item}
+        defaults=[];has_default=[]
+        for p in regular:
+            value=deepcopy(p.get("default_ref"))
+            if p.get("default_capture"):
+                value={"kind":"closure_default","base":callback,"index":function["captures"].index(p["default_capture"]),"type":p["type"],**location}
+            has_default.append(value is not None)
+            if value is None:value={"kind":"zero_value","type":p["type"],**location}
+            else:
+                actual,c=expression(value,expected_element=p["type"]);compatible(p["type"],actual,c,value)
+            defaults.append(value)
+        result="tuple["+",".join(p["type"] for p in params)+"]"
+        item["bundle"]={"kind":"argument_bind","arguments":[{"kind":"argument_positional","segments":pos,"type":t+"[]","owned":True},{"kind":"argument_keywords","segments":keywords,"type":f"dict[str,{t}]" if keywords else "i16","owned":bool(keywords)},{"kind":"tuple","values":defaults,"type":"tuple["+",".join(p["type"] for p in regular)+"]","owned":True}],"names":[p["name"] for p in regular],"defaults":has_default,"variadic":bool(variadic),"keywords_used":bool(keywords),"element_type":t,"type":result,"owned":True,**location}
+        slot=scratch(result,90);ref={**slot,"kind":"name","name":"$bound_arguments"}
+        receivers=[{"kind":"checked_value","value":value,"type":value["type"],**location} for value in prefix]
+        item["arguments"]=[*receivers,*[{"kind":"bound_argument","base":ref,"index":i,"type":p["type"],"owned":managed(p["type"]),**location} for i,p in enumerate(params)]]
+        if callback is not None:item["base"]=callback
+        freeze_arguments(item,supplied)
+        item["evaluations"].append({"slot":slot,"value":item.pop("bundle")})
+        return item["arguments"]
+
     def _expression(item, allow_min_magnitude=False, allow_void=False, expected_element=None):
         kind = item["kind"]
         constant = None
+        if kind=="zero_value" or kind=="bound_argument":return item["type"],None
+        if kind=="call":
+            expanded=[]
+            for arg in item["arguments"]:
+                if arg["kind"]=="star_argument" and arg["value"]["kind"] in {"tuple","list"}:expanded.extend(arg["value"]["values"])
+                elif arg["kind"]=="keyword_unpack" and arg["value"]["kind"]=="dict" and all(e["key"]["kind"]=="string" for e in arg["value"]["entries"]) and len({e["key"]["value"] for e in arg["value"]["entries"]})==len(arg["value"]["entries"]):
+                    expanded.extend({"kind":"keyword","name":e["key"]["value"],"value":e["value"],"line":arg["line"],"column":arg["column"]} for e in arg["value"]["entries"])
+                else:expanded.append(arg)
+            item["arguments"]=expanded
         if kind=="none":item["type"]="none";return "none",None
         if kind=="identity":
             previous=context.get("skip_refinement",False);context["skip_refinement"]=True
@@ -333,6 +391,11 @@ def check(tree):
                 value_type = "void"
             else:
                 value_type = "fixed" if name.startswith("math.") else "void" if name == "random.seed" else "i16"
+        elif kind=="call" and item["name"]=="bool":
+            args=item["arguments"]
+            if len(args)>1:raise CompileError("bool expects zero or one value",item)
+            if not args:item.update(kind="boolean",value=False,type="bool");return "bool",False
+            expression(args[0]);item.update(kind="truth",type="bool");return "bool",None
         elif kind=="call" and item["name"] in {"iter","reversed","map","filter","next"} and item["name"] not in functions:
             name,args=item["name"],item["arguments"]
             if name in {"iter","reversed"}:
@@ -350,6 +413,10 @@ def check(tree):
                 item.update(kind="iterator_next",type=result,owned=managed(result));freeze_arguments(item,args);return result,None
             if len(args)<2 or name=="filter" and len(args)!=2:raise CompileError(f"Invalid arguments to {name}",item)
             callback=args[0];ct,_=expression(callback)
+            if name=="filter" and ct=="none":
+                source=args[1];t,_=expression(source);source,t=make_iterator(source,t,item)
+                result=iterable_element(t);item.update(kind="iterator_map",base=callback,sources=[source],type=f"iter[{result},filter_none,none,{t}]",owned=True)
+                freeze_arguments(item,args);return item["type"],None
             if not is_closure(ct):raise CompileError(f"{name} requires a function",callback)
             function=functions[ct[8:-1]];params=function["params"][int(bool(function.get("closure_env") or function.get("bound_method"))):]
             if len(params)!=len(args)-1:raise CompileError("Callback parameter count does not match iterables",item)
@@ -463,7 +530,7 @@ def check(tree):
                 else:
                     source=args[0];t,_=expression(source)
                     if is_set(t):item.update(kind="set_method",name="copy",base=source,arguments=[],type=t,owned=True);return t,None
-                    if is_dict(t) or is_view(t):source,t=iterable_list(source,t,item)
+                    if is_dict(t) or is_view(t) or is_iterator(t):source,t=iterable_list(source,t,item)
                     if t=="str":source={"kind":"string_builtin","name":"to_list","arguments":[source],"type":"str[]","owned":True};t="str[]"
                     if is_tuple(t):
                         fields=tuple_types(t)
@@ -493,7 +560,7 @@ def check(tree):
                 item.update(kind="tuple",values=[],type="tuple[]",owned=True);return "tuple[]",None
             source=args[0];t,_=expression(source)
             if is_tuple(t):item.update(kind="sequence_builtin",name="retain",type=t,owned=True);return t,None
-            if is_dict(t) or is_view(t) or is_set(t):source,t=iterable_list(source,t,item)
+            if is_dict(t) or is_view(t) or is_set(t) or is_iterator(t):source,t=iterable_list(source,t,item)
             if t=="str":
                 source={"kind":"string_builtin","name":"to_list","arguments":[source],"type":"str[]","owned":True};t="str[]"
             if not t.endswith("[]"):raise CompileError("tuple requires an iterable",item)
@@ -582,15 +649,18 @@ def check(tree):
             item["owned"]=managed(item["type"]);return item["type"],None
         elif kind=="closure":
             function=functions[item["function"]]
-            fields=[];capture_types={}
+            fields=[];capture_types={};bindings={}
             for captured in item["captures"]:
                 t,_=expression(captured);fields.append(t);capture_types[captured["name"]]=t[5:-1]
+                if captured["name"] in context["locals"]:bindings[captured["name"]]=context["locals"][captured["name"]]
             function["capture_types"]=capture_types
+            function["capture_bindings"]=bindings
             function["params"][0]["type"]="tuple["+",".join(fields)+"]"
             item.update(symbol=function["label"],type=f"closure[{function['name']}]",owned=True)
             return item["type"],None
         elif kind=="cell_ref":
-            symbol=lookup(item["name"],item)
+            symbol=context["locals"].get(item["name"])
+            if not symbol or not symbol.get("cell"):symbol=lookup(item["name"],item)
             if not symbol.get("cell"):raise CompileError("Captured variable needs a shared cell",item)
             bind(item,symbol);value_type=f"cell[{symbol['type']}]"
         elif kind == "name":
@@ -684,7 +754,7 @@ def check(tree):
                 function=functions[meta["methods"][name]]
                 if kind=="method":
                     base=item["base"];receiver={"kind":"checked_value","value":base,"type":array_type,"owned":base.get("owned",False),"line":base["line"],"column":base["column"]}
-                    value={**item,"kind":"call","name":function["name"],"arguments":[receiver,*item["arguments"]]};value.pop("base",None)
+                    value={**item,"kind":"call","name":function["name"],"arguments":[receiver,*item["arguments"]],"method_receiver":True};value.pop("base",None)
                     item.clear();item.update(value);return _expression(item,allow_min_magnitude,allow_void,expected_element)
                 function["bound_method"]=True
                 item.update(kind="bound_method",symbol=function["label"],type=f"closure[{function['name']}]",owned=True)
@@ -713,6 +783,7 @@ def check(tree):
                         t,_=expression(arg)
                         original.append(arg)
                         if t==array_type:converted.append(arg);continue
+                        if is_iterator(t) or is_dict(t) or is_view(t):arg,t=iterable_list(arg,t,item)
                         if t=="str":arg={"kind":"string_builtin","name":"to_list","arguments":[arg],"type":"str[]","owned":True};t="str[]"
                         if t.endswith("[]"):other=t[:-2]
                         elif is_tuple(t):
@@ -862,6 +933,22 @@ def check(tree):
             for argument in arguments:
                 t, c = expression(argument, expected_element=expected_element if name == "list" else None)
                 types.append(t); constants.append(c)
+            if name in {"sum","min","max","any","all"} and (count==1 or name=="sum"):
+                element=iterable_element(types[0])
+                fast=types[0].endswith("[]") and element in {"i16","u8","bool"} and (count==1 or types[1] in {"i16","u8"})
+                if element is not None and not fast:
+                    source,t=make_iterator(arguments[0],types[0],item)
+                    result="bool" if name in {"any","all"} else element
+                    start=0
+                    if name=="sum":
+                        if element not in {"i16","u8","bool","fixed","i32","float"}:raise CompileError("sum requires numeric elements",item)
+                        start_type=types[1] if count==2 else "i16"
+                        if start_type not in {"i16","u8","fixed","i32","float"}:raise CompileError("sum start must be numeric",item)
+                        result="float" if {element,start_type}&{"float","fixed"} else "i32" if "i32" in {element,start_type} else "i16"
+                        start=arguments[1] if count==2 else {"kind":"number","value":0,"type":"i16"}
+                        if result=="float" and start_type!="float":start={"kind":"float_cast","value":start,"source_type":start_type,"type":"float","owned":True}
+                        elif result=="i32" and start_type!="i32":start={"kind":"wide_cast","value":start,"type":"i32","owned":True}
+                    item.update(kind="iterator_aggregate",base=source,start=start,type=result,owned=managed(result));return result,None
             if name == "range":
                 if any(t not in {"i16", "u8"} for t in types):
                     raise CompileError("range arguments must be integers", item)
@@ -942,7 +1029,7 @@ def check(tree):
             if len(item["arguments"]) != 1:
                 raise CompileError("len expects one array", item)
             argument_type, _ = expression(item["arguments"][0])
-            if not managed(argument_type):
+            if not (argument_type=="str" or argument_type.endswith("[]") or is_tuple(argument_type) or is_dict(argument_type) or is_set(argument_type) or is_view(argument_type)):
                 raise CompileError("len expects an array", item)
             if is_view(argument_type):item.update(kind="view_length",type="i16");return "i16",None
             item["kind"] = "length"
@@ -960,7 +1047,24 @@ def check(tree):
                 raise CompileError(f"Function {item['name']!r} has not been defined", item)
             has_env=bool(function.get("closure_env") or function.get("bound_method"))
             params=function["params"][1:] if constructor or callback is not None and has_env else function["params"];args=item["arguments"]
-            variadic=params[-1] if params and params[-1].get("variadic") else None
+            def static_star(arg):
+                if arg["kind"]=="keyword_unpack":return False
+                if arg["kind"]!="star_argument":return True
+                value=arg["value"];t=None
+                if value["kind"]=="name":t=lookup(value["name"],value)["type"]
+                elif value["kind"]=="call" and value["name"] in functions:t=functions[value["name"]]["return_type"]
+                return t is not None and is_tuple(t) and not dynamic_tuple(t)
+            if any(a["kind"]=="star_argument" for a in args) and all(static_star(a) for a in args):
+                expanded=[];supplied=[]
+                for argument in args:
+                    if argument["kind"]=="star_argument":
+                        source=argument["value"];t,_=expression(source);supplied.append(source)
+                        expanded.extend({"kind":"bound_argument","base":source,"index":i,"type":field,"owned":managed(field),"line":argument["line"],"column":argument["column"]} for i,field in enumerate(tuple_types(t)))
+                    else:expanded.append(argument);supplied.append(argument["value"] if argument["kind"]=="keyword" else argument)
+                args=expanded;item["arguments"]=args;item["static_star_values"]=supplied
+            unpacked=any(a["kind"] in {"star_argument","keyword_unpack"} for a in args)
+            if unpacked:args=bind_star_arguments(item,params,args,callback,function)
+            variadic=params[-1] if not unpacked and params and params[-1].get("variadic") else None
             regular=params[:-1] if variadic else params
             extras=[];ordinary=[];positional=0
             for arg in args:
@@ -969,9 +1073,9 @@ def check(tree):
                     else:ordinary.append(arg)
                     positional+=1
                 else:ordinary.append(arg)
-            defaults={p["name"]:p["default_ref"] for p in regular if "default_ref" in p}
+            defaults={p["name"]:p["default_ref"] for p in regular if not unpacked and "default_ref" in p}
             for p in regular:
-                if "default_capture" in p:
+                if not unpacked and "default_capture" in p:
                     defaults[p["name"]]={"kind":"closure_default","base":callback,"index":function["captures"].index(p["default_capture"]),"type":p["type"],"line":item["line"],"column":item["column"]}
             if not variadic and not defaults and not any(a["kind"]=="keyword" for a in args) and len(args)!=len(params):
                 raise CompileError(f"{item['name']} expects {len(params)} arguments, got {len(args)}",item)
@@ -981,10 +1085,10 @@ def check(tree):
             for argument, parameter in zip(bound, params):
                 argument_type, value = expression(argument, expected_element=parameter["type"][:-2] if parameter["type"].endswith("[]") else parameter["type"])
                 compatible(parameter["type"], argument_type, value, argument)
-            if callback is not None:item["base"]=callback
-            if defaults or variadic or any(a["kind"]=="keyword" for a in args):
+            if callback is not None and not unpacked:item["base"]=callback
+            if defaults or variadic or any(a["kind"]=="keyword" for a in args) or "static_star_values" in item:
                 # Snapshot the original expressions, then pack varargs from their snapshots.
-                supplied=[a["value"] if a["kind"]=="keyword" else a for a in args]
+                supplied=item.pop("static_star_values",[a["value"] if a["kind"]=="keyword" else a for a in args])
                 freeze_arguments(item,([callback] if callback is not None else [])+supplied)
             item["symbol"] = function["label"]
             if callback is not None:item.update(kind="closure_call",has_env=has_env)
@@ -1039,6 +1143,33 @@ def check(tree):
             floating_hint="float" if expected_element=="float" and kind in {"add","subtract","multiply","true_divide"} else None
             left_type, left = expression(item["left"],expected_element=floating_hint)
             right_type, right = expression(item["right"],expected_element=floating_hint)
+            if kind=="compare" and (is_view(left_type) or is_view(right_type)):
+                left_mode=view_types(left_type)[0] if is_view(left_type) else "keys" if is_set(left_type) else None
+                right_mode=view_types(right_type)[0] if is_view(right_type) else "keys" if is_set(right_type) else None
+                op=item["operator"]
+                def different():
+                    if op not in {"==","!="}:raise CompileError("View ordering requires matching set-like views",item)
+                    values=[item["left"],item["right"]];item.update(kind="boolean",value=op=="!=",type="bool");freeze_arguments(item,values)
+                if left_mode!=right_mode or left_mode is None:different();return "bool",None
+                if left_mode=="values":
+                    if op not in {"==","!="}:raise CompileError("Dictionary values views do not support ordering",item)
+                    values=[item["left"],item["right"]];item.update(kind="identity",negate=op=="!=",type="bool");freeze_arguments(item,values);return "bool",None
+                maps=[];types=[]
+                for field,t in (("left",left_type),("right",right_type)):
+                    if is_view(t):
+                        _,mapping=view_types(t);maps.append({"kind":"view_target","base":item[field],"type":mapping,"owned":True});types.append(dict_types(mapping))
+                    else:maps.append(item[field]);types.append((element_type(t),"i16"))
+                if types[0][0]!=types[1][0] or left_mode=="items" and types[0][1]!=types[1][1]:different();return "bool",None
+                item.update(kind="view_compare",name=left_mode,left=maps[0],right=maps[1],type="bool");return "bool",None
+            if kind=="compare" and "none" in {left_type,right_type}:
+                if item["operator"] not in {"==","!="}:raise CompileError("None does not support ordering",item)
+                if any(t not in {"none"} and not managed(t) for t in (left_type,right_type)):
+                    values=[item["left"],item["right"]];item.update(kind="boolean",value=item["operator"]=="!=",type="bool");freeze_arguments(item,values)
+                else:
+                    values=[item["left"],item["right"]];item.update(kind="identity",negate=item["operator"]=="!=",type="bool")
+                    if any(v.get("owned") for v in values):freeze_arguments(item,values)
+                return "bool",None
+            if kind=="compare" and (is_optional(left_type) or is_optional(right_type)):raise CompileError("Check for None before comparing optional values",item)
             if "float" in {left_type,right_type} or kind=="true_divide":
                 if kind not in {"add","subtract","multiply","true_divide","compare","power"}:raise CompileError("Unsupported float operation",item)
                 count=kind=="power"
@@ -1133,7 +1264,7 @@ def check(tree):
                     constant = {"==": left == right, "!=": left != right, "<": left < right,
                                 ">": left > right, "<=": left <= right, ">=": left >= right}[op]
             else:
-                if "bool" in {left_type, right_type}:
+                if left_type not in {"i16","u8"} or right_type not in {"i16","u8"}:
                     raise CompileError("Addition, subtraction and remainder require integers", item)
                 value_type = "i16"
                 if kind in {"modulo", "floor_divide"} and right == 0 and not checked["tracing_heap"]:
@@ -1149,16 +1280,60 @@ def check(tree):
             raise CompileError(f"Constant result {constant} is outside i16 range", item)
         return value_type, constant
 
+    def bind_pattern(pattern,source):
+        kind=pattern["kind"]
+        if kind=="target_name":
+            name=pattern["name"]
+            if name in functions or name in GRAPHICS_BUILTINS:raise CompileError("Unpacking target conflicts with a function",pattern)
+            symbol=lookup(name,pattern,writing=True) if context["function"] and name in context["function"].get("captures",[]) else context["locals"].get(name)
+            if symbol is None:
+                symbol={"type":source,"size":2,"label":f"__var_{len(globals_)}"};globals_[name]=symbol;context["locals"][name]=symbol
+            elif symbol["type"]=="auto":symbol["type"]=source
+            else:compatible(symbol["type"],source,None,pattern)
+            pattern["type"]=source;bind(pattern,symbol);context["initialized"].add(name);context.get("refinements",set()).discard(name);return
+        if kind!="target_tuple":raise CompileError("A starred target must be inside an unpacking pattern",pattern)
+        children=pattern["values"];stars=[i for i,v in enumerate(children) if v["kind"]=="target_star"]
+        if len(stars)>1:raise CompileError("Only one starred target is allowed per unpacking level",pattern)
+        star=stars[0] if stars else -1;minimum=len(children)-int(star>=0)
+        pattern.update(source_type=source,star=star,minimum=minimum)
+        if is_iterator(source):
+            converted,t=iterable_list({"kind":"unpack_source","type":source},source,pattern)
+            converted["limit"]=None if star>=0 else minimum+1;pattern["conversion"]=converted;source=t
+        elif is_dict(source) or is_set(source) or is_view(source):
+            converted,t=iterable_list({"kind":"unpack_source","type":source},source,pattern);pattern["conversion"]=converted;source=t
+        if is_tuple(source):
+            fields=tuple_types(source)
+            if not dynamic_tuple(source) and (len(fields)<minimum or star<0 and len(fields)!=minimum):raise CompileError("Wrong number of values to unpack",pattern)
+            def field(index):return fields[index%len(fields)] if dynamic_tuple(source) else fields[index]
+        elif source=="str" or source.endswith("[]"):
+            fields=None
+            def field(index):return "str" if source=="str" else source[:-2]
+        else:raise CompileError("Unpacking requires an iterable",pattern)
+        pattern["type"]=source
+        for i,child in enumerate(children):
+            if i==star:
+                rest=fields[star:len(fields)-(len(children)-star-1)] if fields is not None and not dynamic_tuple(source) else fields if fields is not None else [field(0)]
+                if len(set(rest))>1:raise CompileError("A starred list requires one element type",child)
+                t=(rest[0] if rest else "i16")+"[]";child["type"]=t;bind_pattern(child["value"],t)
+            else:
+                offset=i if star<0 or i<star else i-len(children)
+                child["unpack_index"]=offset;bind_pattern(child,field(offset))
+
     def statements(body, loop_depth=0, top_level=False):
         reachable = True
         for statement in body:
             kind = statement["kind"]
+            if kind=="release_temp":
+                symbol=context["locals"][statement["name"]];statement["type"]=symbol["type"];bind(statement,symbol);continue
+            if kind=="pattern_assign":
+                t,_=expression(statement["value"]);bind_pattern(statement["target"],t);continue
             if kind=="attribute_assign":
                 target=statement["target"];t,_=expression(target["base"])
                 if not is_object(t):raise CompileError("Attribute assignment requires an object",statement)
                 fields=classes[t[7:-1]]["fields"];name=target["name"]
                 if name not in fields:raise CompileError(f"Cannot infer field type for {name!r}",statement)
                 expected=fields[name];actual,c=expression(statement["value"],expected_element=expected)
+                if any(is_object(t) for t in all_types(expected)):checked["tracing_heap"]=True
                 compatible(expected,actual,c,statement)
                 target.update(type=expected,index={"kind":"number","value":list(fields).index(name),"type":"i16"})
                 if statement["operator"]!="=" and expected not in {"i16","u8"}:raise CompileError("Compound field assignment requires integers",statement)
@@ -1251,6 +1426,10 @@ def check(tree):
             if kind=="unpack_assign":
                 source_type,_=expression(statement["value"])
                 names=statement["names"]
+                if source_type=="str" or is_iterator(source_type) or is_dict(source_type) or is_set(source_type) or is_view(source_type):
+                    location={k:statement[k] for k in ("line","column","filename") if k in statement}
+                    target={"kind":"target_tuple","values":[{"kind":"target_name","name":name,**location} for name in names],**location}
+                    bind_pattern(target,source_type);statement.update(kind="pattern_assign",target=target);continue
                 if is_tuple(source_type):
                     fields=tuple_types(source_type)
                     if dynamic_tuple(source_type):fields=[fields[i%len(fields)] for i in range(len(names))]
@@ -1289,6 +1468,7 @@ def check(tree):
                 if function is None:
                     raise CompileError("return must be inside a function", statement)
                 target = function["return_type"]
+                if target=="void" and isinstance(statement.get("value"),dict) and statement["value"].get("kind")=="none":statement["value"]=None
                 if target == "void":
                     if statement["value"] is not None:
                         raise CompileError("A void function cannot return a value", statement)
@@ -1535,13 +1715,16 @@ def check(tree):
                 old=context.get("refinements",set());context["refinements"]=refined(statement["condition"])
                 then_falls = statements(statement["body"], loop_depth + (kind == "while"))
                 then_initialized = context["initialized"].copy()
+                then_refs=set(context.get("refinements",set()))
                 context["initialized"] = before.copy()
                 context["refinements"]=old
                 if kind == "while":
+                    context["refinements"]=set(old)&then_refs
                     continue
                 context["refinements"]=refined(statement["condition"],False)
                 else_falls = statements(statement["alternative"], loop_depth)
-                context["refinements"]=old
+                else_refs=set(context.get("refinements",set()))
+                context["refinements"]=then_refs&else_refs if then_falls and else_falls else then_refs if then_falls else else_refs
                 if then_falls and else_falls:
                     context["initialized"] &= then_initialized
                 elif then_falls:
@@ -1567,6 +1750,7 @@ def check(tree):
                 else:
                     compatible(symbol["type"], source_type, constant, statement)
                 context["initialized"].add(name)
+                context.get("refinements",set()).discard(name)
                 statement["type"] = symbol["type"]
                 bind(statement, symbol)
                 continue
@@ -1603,6 +1787,7 @@ def check(tree):
                 compatible(symbol["type"], source_type, constant, statement)
             statement["type"] = symbol["type"]
             bind(statement, symbol)
+            context.get("refinements",set()).discard(name)
         return reachable
 
     statements(checked["body"], top_level=True)
@@ -1623,6 +1808,17 @@ def check(tree):
                         comprehension_slots(value)
             comprehension_slots(statement)
             kind = statement["kind"]
+            if kind=="pattern_assign":
+                def names(pattern):
+                    if pattern["kind"]=="target_name":yield pattern["name"]
+                    elif pattern["kind"]=="target_star":yield from names(pattern["value"])
+                    else:
+                        for child in pattern["values"]:yield from names(child)
+                for name in names(statement["target"]):
+                    if name not in local_symbols:
+                        size+=2;local_symbols[name]={"type":"auto","size":2,"storage":"frame","offset":-size,"label":f"__local_{len(local_symbols)}"}
+                if size>4096:raise CompileError("Function frame exceeds 4096 bytes",statement)
+                continue
             if kind=="unpack_assign":
                 for name in statement["names"]:
                     if name not in local_symbols:
@@ -1699,6 +1895,10 @@ def check(tree):
         context = {"locals": local_symbols, "initialized": {p["name"] for p in function["params"]},
                    "function": function}
         falls_through = statements(function["body"])
+        for inner in functions.values():
+            if inner.get("capture_bindings"):
+                inner["capture_types"].update({name:slot["type"] for name,slot in inner["capture_bindings"].items()})
+                inner["params"][0]["type"]="tuple["+",".join("cell["+inner["capture_types"][name]+"]" for name in inner["captures"])+"]"
         if function["return_type"] != "void" and falls_through:
             raise CompileError(f"Function {function['name']!r} must return a value on every path", function)
 
@@ -1719,4 +1919,7 @@ def check(tree):
     for function in functions.values():
         function["requires_globals"] = sorted(function["requires_globals"])
         function["calls"] = sorted(function["calls"])
-    return checked, {name: value for name, value in globals_.items() if not name.startswith("$comp_")}
+        function.pop("capture_bindings",None)
+    for name,value in globals_.items():
+        if name.startswith("$"):checked["temporaries"][value["label"]]=value
+    return checked, {name: value for name, value in globals_.items() if not name.startswith("$")}

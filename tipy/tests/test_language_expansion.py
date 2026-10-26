@@ -16,6 +16,9 @@ class LanguageExpansionTests(unittest.TestCase):
         self.assertEqual({n:s["type"] for n,s in r["symbols"].items()},dict(a="i16",b="i32",c="float",d="float",e="float"))
         with self.assertRaisesRegex(CompileError,"i16 literal range"):self.compile('x=100000')
         with self.assertRaisesRegex(CompileError,"outside i32"):self.compile('i32 x=2147483648')
+        for mode in ("reference","balanced","aggressive"):
+            r=compile_source('def increment(int type,int kind,int generator):\n    return type+kind+generator\nanswer=increment(1,2,3)',optimization=mode)
+            self.assertNotIn('__heap_start:',r['assembly'])
 
     def test_class_fields_are_shared_only_through_instance_aliases(self):
         r=self.compile('class Box:\n    def __init__(self,str text):\n        self.text=text\n    def read(self):\n        return self.text\na=Box("one")\nb=a\ntext=b.read()')
@@ -36,6 +39,10 @@ class LanguageExpansionTests(unittest.TestCase):
         r=self.compile('def unused(str text):\n    return text.split(",")\nint x=1\nx+=2')
         for label in ("__str_split:","__obj_gen_resume:","__obj_gc_collect:","__dict_new:","__heap_start:"):
             self.assertNotIn(label,r["assembly"])
+        for mode in ("reference","balanced","aggressive"):
+            r=compile_source('def unused():\n    try:\n        yield 1\n    except ValueError:\n        pass\nint x=1',optimization=mode)
+            for label in ("__obj_gen_resume:","__obj_gc_collect:","__heap_start:","__exception_handler:"):
+                self.assertNotIn(label,r["assembly"])
 
     def test_invalid_features_report_source_errors(self):
         cases=[('a=[1]\na.sort(reverse=1)',"reverse"),('a={1,"x"}',"Cannot assign"),('a=(1,"x")\ni=1\nx=a[i]',"matching"),('def f(int a=1,int b):\n    return a+b',"required parameter"),('def f(int a):\n    return a\nx=f(a=1,a=2)',"Repeated"),('nonlocal x',"nonlocal"),('yield 1',"yield requires"),('raise',"active exception"),('x=next([1])',"iterator")]
@@ -46,3 +53,17 @@ class LanguageExpansionTests(unittest.TestCase):
         r=self.compile('x=None\nx=0\nbool absent=x is None\nvalue=0\nif x is not None:\n    value=x+1')
         self.assertEqual(r["symbols"]["x"]["type"],"optional[i16]")
         self.assertEqual(r["symbols"]["value"]["type"],"i16")
+
+    def test_nested_starred_unpacking_keeps_static_element_types(self):
+        r=self.compile('a,(b,c),*rest=(1,("B","C"),4,5)\nhead,*tail="abc"')
+        self.assertEqual({n:s["type"] for n,s in r["symbols"].items()},dict(a="i16",b="str",c="str",rest="i16[]",head="str",tail="str[]"))
+        with self.assertRaises(CompileError):self.compile('a,*tail=(1,2,"mixed")')
+
+    def test_starred_calls_bind_static_tuples_and_dynamic_keyword_maps(self):
+        r=self.compile('def show(int number,str text):\n    return text+str(number)\npair=(2,"A")\ntext=show(*pair)\ndef add(int a,int b=3,*rest):\n    return a+b+sum(rest)\nvalues=[1]\noptions={"b":4}\nanswer=add(*values,**options)')
+        self.assertEqual(r["symbols"]["text"]["type"],"str")
+        self.assertEqual(r["symbols"]["answer"]["type"],"i16")
+
+    def test_len_requires_a_sized_type_and_optional_arithmetic_requires_a_guard(self):
+        for source in ('value=len(i32(3))','value=len(float(3))','value=len(iter([1]))','value=None\nvalue=2\nanswer=value+1'):
+            with self.subTest(source=source),self.assertRaises(CompileError):self.compile(source)

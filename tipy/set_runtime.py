@@ -8,6 +8,8 @@ def st(name,*args):return ("call","__set_"+name,*args)
 
 def routines():
     out=[]
+    r=Routine("keys_equal",("left","right"),prefix="__set_")
+    r.if_(("ne",word(add("left",2)),word(add("right",2))),lambda:r.ret(0));r.ret(st("issubset","left","right",0));out.append(r.finish())
     r=Routine("from_sequence",("object","strings"),("result","index"),prefix="__set_")
     r.set("result",dc("new","strings",0,0));r.set("index",0)
     def add_element():

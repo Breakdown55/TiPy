@@ -161,12 +161,15 @@ class Parser:
             return node("dict_delete", start, target=target)
         if start["kind"] == "FOR":
             self.take("FOR")
-            names = self.targets()
+            pattern=self.pattern_list("in");names=self.flat_pattern(pattern)
+            hidden=None
+            if names is None:hidden=f"$for_{start['line']}_{start['column']}";names=[hidden]
             self.take("IN")
             iterable = self.expression()
             body=self.suite();alternative=[]
             if self.current["kind"]=="ELSE":self.take("ELSE");alternative=self.suite()
-            return node("for", start, name=names[0], names=names, iterable=iterable, body=body,alternative=alternative)
+            if hidden:body.insert(0,node("pattern_assign",start,target=pattern,value=node("name",start,name=hidden)))
+            return node("for", start, name=names[0], names=names, iterable=iterable, body=body,alternative=alternative,unpack_hidden=hidden)
         if start["kind"] == "WHILE":
             self.take("WHILE")
             condition = self.expression()
@@ -184,6 +187,11 @@ class Parser:
             self.take("PASS")
             self.take("NEWLINE")
             return node("pass", start)
+        if start["value"] in {"(","[","*"} or start["kind"]=="NAME" and self.tokens[self.index+1]["value"]==",":
+            target=self.pattern_list("=");self.take("OP","=");value=self.expression_list();self.take("NEWLINE")
+            names=self.flat_pattern(target)
+            if target["kind"]=="target_name":return node("assign",start,name=target["name"],value=value,inferred=True)
+            return node("unpack_assign",start,names=names,value=value) if names is not None else node("pattern_assign",start,target=target,value=value)
         if start["kind"] == "TYPE" or start["kind"]=="NAME" and self.tokens[self.index+1]["kind"]=="NAME":
             type_name = self.type_name()
             name = self.take("NAME")["value"]
@@ -218,12 +226,17 @@ class Parser:
         operator = self.take("OP")
         if operator["value"] not in {"=", "+=", "-=", "*=", "//=", "%=", "&=", "|=", "^=", "<<=", ">>=", "**="}:
             raise CompileError("Expected =, += or -=", operator)
+        chain=[name]
+        if operator["value"]=="=":
+            while self.current["kind"]=="NAME" and self.tokens[self.index+1]["value"]=="=":
+                chain.append(self.take("NAME")["value"]);self.take("OP","=")
         value = self.expression_list()
         # Lower compound assignment into the same tree used by ordinary assignment.
         if operator["value"] != "=":
             kind = {"+=": "add", "-=": "subtract", "*=": "multiply", "//=": "floor_divide", "%=": "modulo", "&=":"bit_and", "|=":"bit_or", "^=":"bit_xor", "<<=":"shift_left", ">>=":"shift_right", "**=":"power"}[operator["value"]]
             value = node(kind, operator, left=node("name", start, name=name), right=value)
         self.take("NEWLINE")
+        if len(chain)>1:return node("chain_assign",start,names=chain,value=value)
         return node("assign", start, name=name, value=value, inferred=operator["value"] == "=")
 
     def expression(self,conditional=True):
@@ -371,7 +384,7 @@ class Parser:
         if token["kind"] == "DECIMAL":
             self.take("DECIMAL")
             return node("decimal", token, value=token["value"])
-        if token["kind"] == "TYPE" and token["value"] in {"int", "i32", "float", "dict", "str", "tuple", "set"}:
+        if token["kind"] == "TYPE" and token["value"] in {"int", "i32", "float", "bool", "dict", "str", "tuple", "set"}:
             self.take("TYPE")
             return self.postfix(self.call(token))
         if token["value"] == "{":
@@ -483,12 +496,39 @@ class Parser:
     def comprehension_clauses(self):
         clauses=[]
         while self.current["kind"]=="FOR":
-            start=self.take("FOR");names=self.targets();self.take("IN")
+            start=self.take("FOR");pattern=self.pattern_list("in");names=self.flat_pattern(pattern);hidden=None
+            if names is None:hidden=f"$for_{start['line']}_{start['column']}";names=[hidden]
+            self.take("IN")
             iterable=self.expression(False);filters=[]
             while self.current["kind"]=="IF":
                 self.take("IF");filters.append(self.expression(False))
-            clauses.append(node("for",start,name=names[0],names=names,iterable=iterable,filters=filters,body=[]))
+            clauses.append(node("for",start,name=names[0],names=names,iterable=iterable,filters=filters,body=[],unpack_pattern=pattern if hidden else None))
         return clauses
+
+    def pattern(self):
+        start=self.current
+        if start["value"]=="*":
+            self.take("OP","*");return node("target_star",start,value=self.pattern())
+        if start["value"] in {"(","["}:
+            opener=self.take("OP")["value"];end=")" if opener=="(" else "]"
+            if self.current["value"]==end:result=node("target_tuple",start,values=[])
+            else:result=self.pattern_list(end)
+            if opener=="[" and result["kind"]!="target_tuple":result=node("target_tuple",start,values=[result])
+            self.take("OP",end);return result
+        token=self.take("NAME");return node("target_name",token,name=token["value"])
+
+    def pattern_list(self,stop):
+        start=self.current;values=[self.pattern()];comma=False
+        while self.current["value"]==",":
+            self.take("OP",",");comma=True
+            if self.current["value"]==stop:break
+            values.append(self.pattern())
+        return node("target_tuple",start,values=values) if comma else values[0]
+
+    def flat_pattern(self,pattern):
+        if pattern["kind"]=="target_name":return [pattern["name"]]
+        if pattern["kind"]=="target_tuple" and pattern["values"] and all(v["kind"]=="target_name" for v in pattern["values"]):return [v["name"] for v in pattern["values"]]
+        return None
 
     def targets(self):
         names = [self.take("NAME")["value"]]
@@ -502,7 +542,9 @@ class Parser:
         arguments = []
         if self.current["value"] != ")":
             while True:
-                if self.current["kind"]=="NAME" and self.tokens[self.index+1]["value"]=="=":
+                if self.current["value"] in {"*","**"}:
+                    token=self.take("OP");arguments.append(node("star_argument" if token["value"]=="*" else "keyword_unpack",token,value=self.expression()))
+                elif self.current["kind"]=="NAME" and self.tokens[self.index+1]["value"]=="=":
                     key=self.take("NAME");self.take("OP","=")
                     arguments.append(node("keyword",key,name=key["value"],value=self.expression()))
                 else:arguments.append(self.expression())

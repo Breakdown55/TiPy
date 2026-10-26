@@ -3,7 +3,7 @@ from .errors import CompileError
 
 
 def prepare(tree):
-    serial=0;lifted=[]
+    serial=0;lifted=[];closure_bindings=set()
     def loc(n):return {k:n[k] for k in ("line","column","filename") if k in n}
     def defaults(items,nested=False):
         nonlocal serial
@@ -32,12 +32,16 @@ def prepare(tree):
             elif isinstance(n,dict):
                 k=n.get("kind")
                 if k in {"function","lambda"}:
-                    if k=="function":local.add(n["name"])
+                    if k=="function":local.add(n["name"]);closure_bindings.add(n["name"])
                     child_body=n["body"] if k=="function" else [{"kind":"return","value":n["value"],**loc(n)}]
                     own,free=scope(child_body,n["params"]);free.update(p["default_capture"] for p in n["params"] if "default_capture" in p)
                     n["lexical_locals"]=sorted(own);n["lexical_free"]=sorted(free);children.append(n)
                     return
-                if k in {"declare","assign"}:local.add(n["name"])
+                if k in {"declare","assign"}:
+                    local.add(n["name"])
+                    if n.get("value",{}).get("kind")=="lambda":closure_bindings.add(n["name"])
+                if k=="chain_assign":local.update(n["names"])
+                if k=="target_name":local.add(n["name"])
                 if k in {"for","unpack_assign"}:local.update(n.get("names",[n.get("name")]))
                 if k=="nonlocal":nonlocal_.update(n["names"])
                 if k in {"name","call"}:reads.add(n["name"])
@@ -60,6 +64,7 @@ def prepare(tree):
             if k=="lambda":n={**n,"kind":"function","name":"$lambda","return_type":"auto","body":[{"kind":"return","value":n["value"],**loc(n)}]}
             local=set(n.pop("lexical_locals",[]));free=set(n.pop("lexical_free",[]))
             captures=sorted(free & set().union(*ancestors)) if ancestors else []
+            if set(captures)&closure_bindings:tree["closure_cycles"]=True;n["cycle_capture"]=True
             n["captures"]=captures;n["cell_names"]=[]
             for child in descendants(n["body"]):n["cell_names"].extend(set(child.get("lexical_free",[])) & local)
             n["cell_names"]=sorted(set(n["cell_names"]))

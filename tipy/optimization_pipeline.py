@@ -8,7 +8,7 @@ from .types import managed
 
 def walk(item):
     if isinstance(item, dict):
-        yield item
+        if isinstance(item.get("kind"),str) or isinstance(item.get("label"),str) or isinstance(item.get("symbol"),str):yield item
         for value in item.values(): yield from walk(value)
     elif isinstance(item, list):
         for value in item: yield from walk(value)
@@ -339,12 +339,14 @@ def optimize_program(checked, symbols, mode):
     tree = deepcopy(checked)
     report = [{"pass": "mode", "value": mode}]
     if mode == "reference": return tree, symbols, report
+    removed_functions = reachable(tree)
+    report.append({"pass": "function-reachability", "removed": removed_functions})
+    from .features import runtime_features
+    tree["tracing_heap"],tree["generators"]=runtime_features(tree)
     if tree.get("tracing_heap") or any(n.get("cell") or n.get("kind") in {"closure","closure_call","function_ref"} for n in walk(tree)):
         report.append({"pass":"closure-alias-safety","preserved":True})
         reachable(tree)
         return tree,symbols,report
-    removed_functions = reachable(tree)
-    report.append({"pass": "function-reachability", "removed": removed_functions})
     if mode == "aggressive":
         report.append({"pass": "observable-effect-analysis", "unrendered_draws_removed": eliminate_unobserved_drawing(tree)})
         evaluator = Evaluator(tree)

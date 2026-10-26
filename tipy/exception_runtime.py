@@ -1,5 +1,5 @@
 """Native stack-handler unwinding. Handler records hold SP and IX."""
-EXCEPTIONS={"IndexError":(1,),"ValueError":(2,4,6,7,14),"MemoryError":(3,),"ZeroDivisionError":(5,8),"KeyError":(12,),"RuntimeError":(13,),"AssertionError":(15,),"StopIteration":(16,),"TypeError":(17,)}
+EXCEPTIONS={"IndexError":(1,),"ValueError":(2,4,6,7,14),"MemoryError":(3,),"ZeroDivisionError":(5,8),"KeyError":(12,),"RuntimeError":(13,),"AssertionError":(15,),"StopIteration":(16,),"TypeError":(17,),"UnboundLocalError":(18,),"NameError":(18,)}
 
 
 def assembly():

@@ -11,6 +11,11 @@ def prepare(tree):
         result=[]
         for n in items:
             k=n["kind"];loc=location(n)
+            if k=="chain_assign":
+                serial+=1;name=f"$chain_{serial}"
+                result.append({"kind":"assign","name":name,"inferred":True,"value":n["value"],**loc})
+                result.extend({"kind":"assign","name":target,"inferred":True,"value":{"kind":"name","name":name,**loc},**loc} for target in n["names"])
+                result.append({"kind":"release_temp","name":name,**loc});continue
             if k=="function":
                 seen_default=False;seen_var=False
                 for p in n["params"]:
@@ -33,6 +38,7 @@ def prepare(tree):
                     result.append({"kind":"assign","name":flag,"inferred":True,"value":{"kind":"boolean","value":True,**loc},**loc})
                 n["body"]=body(n["body"],flag)
                 result.append(n)
+                if n.get("unpack_hidden"):result.append({"kind":"release_temp","name":n["unpack_hidden"],**loc})
                 if flag:
                     result.append({"kind":"if","condition":{"kind":"name","name":flag,**loc},"body":body(alternative,break_flag),"alternative":[],**loc})
                 continue

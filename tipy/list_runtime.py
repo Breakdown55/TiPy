@@ -139,7 +139,7 @@ class Routine:
 
 
 def runtime_assembly(required=None, dictionary_types=None, object_types=None, tracing=False, generators=False,heap_bytes=HEAP_BYTES):
-    from .types import complex_type, managed
+    from .types import complex_type, managed,is_object,is_view
     nested = object_types is None or any(complex_type(t) for t in object_types)
     routines = []
 
@@ -286,7 +286,7 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None, tr
     r.set("value",word("pointer"))
     if nested:
         r.if_(("eq",word(add("object",6)),32765),lambda:r.set("value",call("retain","value")))
-        r.if_(("eq",word(add("object",6)),32766),lambda:r.if_(("ne",byte(add(word(add("object",10)),"index")),0),lambda:r.set("value",call("retain","value"))))
+        r.if_(("uge",word(add("object",6)),32766),lambda:r.if_(("ne",byte(add(word(add("object",10)),"index")),0),lambda:r.set("value",call("retain","value"))))
     r.ret("value")
     routines.append(r.finish())
 
@@ -296,7 +296,7 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None, tr
         def replace_managed():
             r.set("value",call("retain","value"));r.expr(("call","__obj_release",word("pointer")))
         r.if_(("eq",word(add("object",6)),32765),replace_managed)
-        r.if_(("eq",word(add("object",6)),32766),lambda:r.if_(("ne",byte(add(word(add("object",10)),"index")),0),replace_managed))
+        r.if_(("uge",word(add("object",6)),32766),lambda:r.if_(("ne",byte(add(word(add("object",10)),"index")),0),replace_managed))
     r.if_(("eq", word(add("object", 6)), 1), lambda: r.write("pointer", "value", 1), lambda: r.write("pointer", "value"))
     r.ret()
     routines.append(r.finish())
@@ -417,7 +417,7 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None, tr
     routines.append(r.finish())
 
     from .object_runtime import routines as object_routines
-    routines.extend(object_routines(has_dict=dictionary_types is None or bool(dictionary_types),has_i32=object_types is None or "i32" in object_types))
+    routines.extend(object_routines(has_dict=dictionary_types is None or bool(dictionary_types),has_i32=object_types is None or "i32" in object_types,has_float=object_types is None or "float" in object_types,has_objects=object_types is None or any(is_object(t) for t in object_types),has_views=object_types is None or any(is_view(t) for t in object_types)))
     from .numeric_runtime import routines as numeric_routines
     routines.extend(numeric_routines())
     from .wide_runtime import routines as wide_routines
@@ -428,6 +428,8 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None, tr
     routines.extend(float_text_routines())
     from .decimal_runtime import routines as decimal_routines
     routines.extend(decimal_routines())
+    from .unpack_runtime import routines as unpack_routines
+    routines.extend(unpack_routines())
     from .sequence_runtime import routines as sequence_routines
     routines.extend(sequence_routines())
     from .string_runtime import routines as string_routines

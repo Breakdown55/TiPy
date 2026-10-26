@@ -91,6 +91,241 @@ function execute(source, measurements) {
     return values
 }
 
+test('Expanded language features preserve rendered output across optimization modes', () => {
+    const source=readFileSync(resolve('../../examples/closures_and_containers.tip'),'utf8')
+    const results=['reference','balanced','aggressive'].map(optimization=>{
+        const measurements={optimization,maxSlices:12000};execute(source,measurements);return measurements
+    })
+    for(const result of results.slice(1))assert.deepEqual(result.graph,results[0].graph)
+})
+
+test('Dictionary views compare by keys/items and values views preserve identity', () => {
+    const v=execute(`a={"x":[1],"y":[2]}
+b={"y":[20],"x":[10]}
+bool keys=a.keys()==b.keys()
+bool keys_set=a.keys()=={"x","y"}
+bool subset={"x"}<a.keys()
+bool items=a.items()==b.items()
+copy={"y":[2],"x":[1]}
+bool same_items=a.items()==copy.items()
+values=a.values()
+alias=values
+bool same=values==alias
+bool different=values!=a.values()
+bool nested=[a.keys()]==[b.keys()]
+bool nested_values=[a.values()]==[b.values()]
+`,{maxSlices:12000})
+    assert.deepEqual([v.keys,v.keys_set,v.subset,v.items,v.same_items,v.same,v.different,v.nested,v.nested_values],[1,1,1,0,1,1,1,1,0])
+})
+
+test('Native class identity remains distinct from tuple equality and cycles are collected', () => {
+    const v=execute(`class Node:
+    def __init__(self,int value):
+        self.value=value
+        self.next=self
+kept=Node(99)
+temporary=Node(0)
+for iteration in range(300):
+    temporary=Node(iteration)
+bool distinct=[kept]==[Node(99)]
+bool shared=[kept]==[kept]
+last=temporary.value
+alive=kept.next.value
+`,{maxSlices:20000})
+    assert.equal(v.distinct,0);assert.equal(v.shared,1);assert.equal(v.last,299);assert.equal(v.alive,99)
+})
+
+test('Managed operands and print text survive reentrant argument evaluation', () => {
+    const v=execute(`def run():
+    text="Old"
+    numbers=[1,2]
+    key="before"
+    table={"existing":0}
+    def change():
+        nonlocal text
+        text="New"
+        return "!"
+    def index():
+        nonlocal numbers
+        numbers=[3,4]
+        return 1
+    def right():
+        nonlocal key
+        key="after"
+        return 7
+    joined=text+change()
+    value=numbers[index()]
+    table[key]=right()
+    return joined,value,table
+joined,value,table=run()
+clear()
+def coordinate():
+    print(99,40,10)
+    return 0
+print(12,coordinate(),0)
+render()
+`,{maxSlices:12000})
+    assert.equal(v.joined,'Old!');assert.equal(v.value,2);assert.deepEqual(v.table,new Map([['existing',0],['before',7]]))
+    const observed={},expected={}
+    execute('clear()\ndef coordinate():\n    print(99,40,10)\n    return 0\nprint(12,coordinate(),0)\nrender()',observed)
+    execute('clear()\nprint(99,40,10)\nprint(12,0,0)\nrender()',expected)
+    assert.deepEqual(observed.graph,expected.graph)
+})
+
+test('Streaming aggregates and typed truth preserve short-circuit iterator consumption', () => {
+    const v=execute(`events=[]
+def values():
+    for n in range(5):
+        events.append(n)
+        yield n
+iterator=values()
+bool found=any(iterator)
+next_value=next(iterator)
+bool remaining=all(iterator)
+total=sum(values())
+smallest=min(["z","a","b"])
+largest=max(iter(["z","a","b"]))
+kept=list(filter(None,["","A","","B"]))
+bool empty=bool([])
+bool zero=bool(i32(0))
+bool nonzero=bool(float(-0.5))
+bool negative_zero=bool(float(-0.0))
+optional=None
+optional=0
+bool optional_zero=bool(optional)
+bool missing=optional==None
+bool integer_none=0==None
+class Empty:
+    pass
+obj=Empty()
+bool object_truth=bool(obj)
+`,{maxSlices:18000})
+    assert.deepEqual([v.found,v.next_value,v.remaining,v.total],[1,2,1,10]);assert.equal(v.smallest,'a');assert.equal(v.largest,'z');assert.deepEqual(v.kept,['A','B'])
+    assert.deepEqual([v.empty,v.zero,v.nonzero,v.negative_zero,v.optional_zero,v.missing,v.integer_none,v.object_truth],[0,0,1,0,0,0,0,1])
+    assert.deepEqual(v.events,[0,1,2,3,4,0,1,2,3,4])
+    const numbers=execute('wide=sum([i32(100000),i32(200000)])\nfloat_total=sum([float(1.25),float(2.5)])',{maxSlices:10000})
+    assert.equal(numbers.wide,300000);assert.equal(numbers.float_total,3.75)
+})
+
+test('Recursive closures reclaim captured cycles and later bindings remain shared', () => {
+    const v=execute(`def factory():
+    def factorial(int n) -> int:
+        if n<2:
+            return 1
+        return n*factorial(n-1)
+    return factorial
+factorial=factory()
+answer=factorial(6)
+for iteration in range(120):
+    factorial=factory()
+last=factorial(5)
+def forward():
+    def read():
+        return text
+    text="later"
+    return read
+reader=forward()
+text=reader()
+def invalid():
+    def read() -> int:
+        return value
+    read()
+    value=7
+    return value
+caught=False
+try:
+    invalid()
+except UnboundLocalError:
+    caught=True
+`,{maxSlices:16000})
+    assert.equal(v.answer,720);assert.equal(v.last,120);assert.equal(v.text,'later');assert.equal(v.caught,1)
+})
+
+test('Starred calls keep heterogeneous static tuples and instance receivers correctly typed', () => {
+    const v=execute(`def display(int n,str text):
+    return text+str(n)
+pair=(3,"A")
+text=display(*pair)
+def make_pair():
+    return 4,"B"
+other=display(*make_pair())
+class Adder:
+    def __init__(self,int value):
+        self.value=value
+    def add(self,int a,int b):
+        return self.value+a+b
+adder=Adder(10)
+values=[2,3]
+answer=adder.add(*values)
+def join(*str words):
+    return ":".join(words)
+words=["a","b","c"]
+last=""
+for iteration in range(150):
+    last=join(*words)
+`,{maxSlices:10000})
+    assert.equal(v.text,'A3');assert.equal(v.other,'B4');assert.equal(v.answer,15);assert.equal(v.last,'a:b:c')
+})
+
+test('Native starred calls bind defaults, varargs and keyword maps in source order', () => {
+    const v=execute(`def total(int first,int second=10,*rest):
+    answer=first+second
+    for n in rest:
+        answer+=n
+    return answer
+values=[1,2]
+options={"second":5}
+a=total(*values)
+b=total(*[3],**options)
+c=total(*list(range(4)))
+def later():
+    values.append(100)
+    return 4
+d=total(*values,later())
+duplicate=False
+try:
+    total(*values,**options)
+except TypeError:
+    duplicate=True
+def join(*str parts):
+    return "-".join(parts)
+parts=["A","B"]
+text=join(*parts)
+left=right=[1,2]
+right.append(3)
+`,{maxSlices:12000})
+    assert.deepEqual([v.a,v.b,v.c,v.d],[3,8,6,7]);assert.deepEqual(v.values,[1,2,100]);assert.equal(v.duplicate,1);assert.equal(v.text,'A-B');assert.deepEqual(v.left,[1,2,3]);assert.equal(v.left,v.right)
+})
+
+test('Nested and starred unpacking preserves values, aliases and iterator consumption', () => {
+    const v=execute(`a,(b,c),*rest=(1,("B","C"),4,5)
+head,*middle,last=[10,20,30,40]
+first,*chars="abc"
+left,right="xy"
+def unpack():
+    value,(name,*tail)=(3,("A","B","C"))
+    return name+"".join(tail)
+text=unpack()
+result=[]
+for (x,y),z in [((1,2),3),((4,5),6)]:
+    result.append(x+y+z)
+computed=[x+sum(tail) for x,*tail in [[1,2,3],[4,5,6]]]
+def values():
+    for n in range(5):
+        yield n
+iterator=values()
+caught=False
+try:
+    x,y=iterator
+except ValueError:
+    caught=True
+remaining=next(iterator)
+`,{maxSlices:16000})
+    assert.deepEqual([v.a,v.b,v.c,v.head,v.last,v.first,v.left,v.right,v.text],[1,'B','C',10,40,'a','x','y','ABC'])
+    assert.deepEqual(v.rest,[4,5]);assert.deepEqual(v.middle,[20,30]);assert.deepEqual(v.chars,['b','c']);assert.deepEqual(v.result,[6,15]);assert.deepEqual(v.computed,[6,15])
+    assert.equal(v.caught,1);assert.equal(v.remaining,3)
+})
+
 test('Native binary32 agrees with rounded arithmetic across varied exponents and IEEE edge cases', () => {
     const cases=[[1.0000001192092896,0.9999999403953552],[16777216,1],[-16777216,1],[1e-20,-1e-20],[3.4e38,1.0001],[1e-38,1e-7],[-1e20,3.14],[0.125,-0.5],[123456.75,0.00003125],[1e-30,1e30],[1.17549435e-38,0.99999994],[1.40129846e-45,2]]
     const source=cases.map(([a,b],i)=>`float a${i}=${Math.fround(a).toExponential(16)}\nfloat b${i}=${Math.fround(b).toExponential(16)}\ns${i}=a${i}+b${i}\nd${i}=a${i}-b${i}\nm${i}=a${i}*b${i}\nq${i}=a${i}/b${i}\n`).join('')
@@ -1536,6 +1771,10 @@ test('Owned temporary arrays and copies are released after indexing, len, extend
 test('Array indices containing calls are evaluated once in augmented assignment',() => {
     assert.deepEqual(execute('int a=[10,20]\nint indexes=[0,1]\na[indexes.pop(0)]+=5\nint size=len(indexes)'),{ a: [15,20], indexes: [1], size: 1 })
 })
+test('Indexed compound arithmetic evaluates indexes once and handles bitwise shifts and powers',() => {
+    assert.deepEqual(execute('a=[5,6,7,3,32,2]\na[0]&=3\na[1]|=8\na[2]^=3\na[3]<<=2\na[4]>>=3\na[5]**=5'),{a:[1,14,4,12,4,32]})
+})
+
 test('Bounds, empty pop, missing value and exhausted heap fail explicitly',() => {
     for (const [source,message] of [
         ['int a=[1]\nint x=a[1]',/index out of range/],

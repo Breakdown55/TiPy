@@ -7,14 +7,17 @@ from .types import managed, is_dict, dict_types, release, is_tuple, tuple_types,
 
 def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
     original_tree=tree
+    def string_field(item,key):
+        value=item.get(key)
+        return value if isinstance(value,str) else None
     if "static_frames" in tree:
         from .framebuffer_backend import generate_frames
         return generate_frames(tree["static_frames"])
     def called_labels(item):
         if isinstance(item, dict):
-            if item.get("unreachable"):
+            if item.get("unreachable") is True:
                 return set()
-            found = {item["symbol"]} if item.get("kind") in {"call","closure_call","closure","function_ref","iterator_map","bound_method"} and "symbol" in item else set()
+            found = {item["symbol"]} if string_field(item,"kind") in {"call","closure_call","closure","function_ref","iterator_map","bound_method"} and "symbol" in item else set()
             return found | set().union(*(called_labels(value) for value in item.values()))
         if isinstance(item, list):
             return set().union(*(called_labels(value) for value in item))
@@ -40,34 +43,45 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
 
     def has_arrays(item):
         if isinstance(item, dict):
-            if item.get("unreachable"):
+            if item.get("unreachable") is True:
                 return False
             if item.get("iteration_kind") == "range":
                 return has_arrays(item["body"]) or has_arrays(item["iterable"]["arguments"])
-            if item.get("kind") in {"text_print", "text_input"} and item["arguments"][0]["kind"] == "string":
+            if string_field(item,"kind") in {"text_print", "text_input"} and item["arguments"][0]["kind"] == "string":
                 return item.get("type") == "str" or has_arrays(item["arguments"][1:])
-            return managed(str(item.get("type", ""))) or item.get("kind") in {"list", "index", "method", "length"} or any(has_arrays(v) for v in item.values())
+            return managed(string_field(item,"type") or "") or string_field(item,"kind") in {"list", "index", "method", "length"} or any(has_arrays(v) for v in item.values())
         if isinstance(item, list):
             return any(has_arrays(v) for v in item)
         return False
 
-    tracing=tree.get("tracing_heap",False)
-    generators=tree.get("generators",False)
+    from .features import runtime_features
+    tracing,generators=runtime_features(tree)
     lists_used = has_arrays(tree) or tracing
     modulo_used = False
     math_used = set()
     pixels_used = set()
     constant_data = {}
     iterator_helpers={};iterator_code=[];iterator_lists={};iterator_new_used=False
+    argument_binders={}
+    truth_helpers={};aggregate_helpers={}
+    def ensure_truth(t):
+        if t not in truth_helpers:
+            from .truth_runtime import routine
+            label=f"__obj_truth_kind_{len(truth_helpers)}";truth_helpers[t]=label
+            iterator_code.append(routine(t,label,ensure_truth))
+        return truth_helpers[t]
     def ensure_iterator(t):
         if t not in iterator_helpers:
             name=f"__obj_iterator_{len(iterator_helpers)}";iterator_helpers[t]=name
             from .iterator_runtime import next_routine
-            iterator_code.append(next_routine(t,name,ensure_iterator,{f["name"]:f for f in functions.values()}))
+            iterator_code.append(next_routine(t,name,ensure_iterator,{f["name"]:f for f in functions.values()},ensure_truth))
         return iterator_helpers[t]
     from .optimization_pipeline import walk
+    def may_call_user(item):
+        return any(n.get("kind") in {"call","closure_call","iterator_next","iterator_list","iterator_aggregate"} or n.get("kind")=="for" and n.get("iteration_kind")=="iterator" for n in walk(item))
     native_used = {item["name"] for item in walk(tree["body"]) if item.get("kind") == "stdlib"}
     text_nodes = [item for item in walk(tree["body"]) if item.get("kind") in {"text_print", "text_input"}]
+    if any(n["arguments"][0]["type"] in {"i16","u8","bool"} and any(may_call_user(v) for v in n["arguments"][1:]) for n in text_nodes):lists_used=True
     text_used = {"draw"} if text_nodes else set()
     conversions={n["name"] for n in walk(tree) if n.get("kind")=="string_builtin"}
     if {"number","fixed"}&conversions:text_used.add("number")
@@ -88,9 +102,9 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
 
     def has_modulo(item):
         if isinstance(item, dict):
-            if item.get("unreachable"):
+            if item.get("unreachable") is True:
                 return False
-            return item.get("iteration_kind") == "range" and "fast_range" not in item or item.get("kind") in {"modulo", "floor_divide"} or item.get("operator") in {"//=", "%="} or any(has_modulo(value) for value in item.values())
+            return item.get("iteration_kind") == "range" and "fast_range" not in item or string_field(item,"kind") in {"modulo", "floor_divide"} or string_field(item,"operator") in {"//=", "%="} or any(has_modulo(value) for value in item.values())
         return isinstance(item, list) and any(has_modulo(value) for value in item)
 
     errors_used = lists_used or has_modulo(tree) or bool(native_used) or any(n.get("kind") in {"function","power","shift_left","shift_right","numeric_builtin","true_divide"} for n in walk(tree))
@@ -117,7 +131,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
 
     def load(item):
         if item.get("cell"):
-            cell_pointer(item);emit("push hl","ld hl,0","push hl","call __obj_read","pop de","pop de");return
+            cell_pointer(item);emit("push hl","call __obj_cell_get","pop de");return
         byte = item["type"] in {"u8", "bool"}
         if item.get("storage") == "frame":
             if not -128<=item["offset"]<=126:
@@ -164,16 +178,20 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
         store(target)
 
     def runtime(name, arguments, prefix="__arr_"):
-        for argument in arguments:
+        protected=[]
+        for index,argument in enumerate(arguments):
+            hold=isinstance(argument,dict) and argument.get("kind") not in {"stack_dict","unpack_source"} and managed(argument.get("type","")) and not argument.get("owned") and any(may_call_user(later) for later in arguments[index+1:] if isinstance(later,dict))
+            protected.append(hold)
             if isinstance(argument, int):
                 emit(f"ld hl,{argument & 65535}")
             else:
                 expression(argument)
+            if hold:emit("push hl","call __arr_retain","pop de")
             emit("push hl")
         emit(f"call {prefix}{name}")
-        for argument in reversed(arguments):
+        for argument,hold in reversed(list(zip(arguments,protected))):
             emit("pop de")
-            if isinstance(argument, dict) and argument.get("owned"):
+            if isinstance(argument, dict) and (argument.get("owned") or hold):
                 emit("push hl", "push de", f"call {release(argument['type'])}", "pop de", "pop hl")
 
     def read_length():
@@ -198,7 +216,36 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                     load(slot);emit("push hl",f"call {release(slot['type'])}","pop de","ld hl,0");store(slot)
             emit("pop hl");return
         kind = item["kind"]
-        if kind=="wide_round":runtime("i32_round" if item["type"]=="i32" else "i32_round_int",item["arguments"],"__obj_")
+        if kind=="truth":runtime(ensure_truth(item["arguments"][0]["type"]),item["arguments"],"")
+        elif kind=="iterator_aggregate":
+            t=item["base"]["type"];key=(t,item["name"],item["type"])
+            if key not in aggregate_helpers:
+                from .aggregate_runtime import routine
+                name=f"__obj_aggregate_{len(aggregate_helpers)}";aggregate_helpers[key]=name
+                iterator_code.append(routine(t,item["name"],item["type"],name,ensure_iterator(t),ensure_truth(iterator_types(t)[0])))
+            runtime(aggregate_helpers[key],[item["base"],item["start"]],"")
+        elif kind=="zero_value":emit("ld hl,0")
+        elif kind=="bound_argument":runtime("get",[item["base"],item["index"]])
+        elif kind=="argument_positional":
+            runtime("new",[array_width(item["type"])]);emit("push hl")
+            for segment in item["segments"]:runtime("extend" if segment["star"] else "append",[{"kind":"stack_dict","type":item["type"]},segment["value"]])
+            emit("pop hl")
+        elif kind=="argument_keywords":
+            if not item["segments"]:emit("ld hl,0")
+            else:
+                runtime("new",[1,int(managed(dict_types(item["type"])[1])),0],"__dict_");emit("push hl")
+                for segment in item["segments"]:
+                    base={"kind":"stack_dict","type":item["type"]}
+                    if segment["mapping"]:runtime("keyword_merge",[base,segment["value"]],"__dict_")
+                    else:runtime("keyword_add",[base,{"kind":"string","value":segment["name"],"type":"str","owned":True},segment["value"]],"__dict_")
+                emit("pop hl")
+        elif kind=="argument_bind":
+            key=(tuple(item["names"]),tuple(item["defaults"]),item["variadic"],item["keywords_used"],item["type"])
+            if key not in argument_binders:
+                from .argument_runtime import binder
+                name=f"__obj_bind_call_{len(argument_binders)}";argument_binders[key]=name;iterator_code.append(binder(item,name))
+            runtime(argument_binders[key],item["arguments"],"")
+        elif kind=="wide_round":runtime("i32_round" if item["type"]=="i32" else "i32_round_int",item["arguments"],"__obj_")
         elif kind=="float_parse":runtime("f32_parse",item["arguments"],"__obj_")
         elif kind=="float_round":runtime("f32_round",item["arguments"],"__obj_")
         elif kind=="float_number":runtime("f32_new",[item["raw"]&65535,item["raw"]>>16],"__obj_")
@@ -235,7 +282,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             no,end=label(),label();emit(f"jp {'z' if item['negate'] else 'nz'},{no}","ld hl,1",f"jp {end}");mark(no);emit("ld hl,0");mark(end)
         elif kind == "void_constant":
             return
-        elif kind == "stack_dict":
+        elif kind in {"stack_dict","unpack_source"}:
             emit("pop hl", "push hl")
         elif kind == "dict":
             key, value = dict_types(item["type"])
@@ -284,6 +331,15 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             else:runtime(name,[base,*args],"__set_")
         elif kind in {"set_binary","dict_merge"}:
             runtime("merge" if kind=="dict_merge" else item["name"],[item["left"],item["right"]],"__dict_" if kind=="dict_merge" else "__set_")
+        elif kind=="view_compare":
+            op=item["operator"];args=[item["left"],item["right"]]
+            if item["name"]=="keys":
+                if op in {"==","!="}:runtime("keys_equal",args,"__set_")
+                else:runtime("issubset" if op in {"<","<="} else "issuperset",[*args,int(op in {"<",">"})],"__set_")
+            else:
+                if op in {">",">="}:args.reverse()
+                runtime("items_equal" if op in {"==","!="} else "items_subset",args if op in {"==","!="} else [*args,int(op in {"<",">"})],"__dict_")
+            if op=="!=":emit("ld a,l","xor 1","ld l,a")
         elif kind=="set_compare":
             op=item["operator"]
             if op in {"==","!="}:
@@ -307,12 +363,12 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                 if managed(item["type"]) and not args[1].get("owned"):emit("push hl","call __arr_retain","pop de")
             emit(f"jp {end}");mark(good);mark(end)
         elif kind=="iterator_list":
-            t=item["base"]["type"]
-            if t not in iterator_lists:
+            t=item["base"]["type"];key=(t,item.get("limit"))
+            if key not in iterator_lists:
                 from .iterator_runtime import list_routine
-                name=f"__obj_iterator_list_{len(iterator_lists)}";iterator_lists[t]=name
-                iterator_code.append(list_routine(t,name,ensure_iterator(t)))
-            runtime(iterator_lists[t],[item["base"]],"")
+                name=f"__obj_iterator_list_{len(iterator_lists)}";iterator_lists[key]=name
+                iterator_code.append(list_routine(t,name,ensure_iterator(t),item.get("limit")))
+            runtime(iterator_lists[key],[item["base"]],"")
         elif kind=="closure_default":
             runtime("read",[item["base"],1],"__obj_");emit("push hl",f"ld hl,{item['index']}","push hl","call __obj_read","pop de","pop de","push hl","ld hl,0","push hl","call __arr_get","pop de","pop de")
         elif kind=="checked_value":expression(item["value"])
@@ -350,7 +406,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             runtime(helper,[item["left"],item["right"]],"__obj_")
             if op=="!=":emit("ld a,l","xor 1","ld l,a")
             elif op not in {"==","!="}:
-                no,end=label(),label();emit("ld de,0","or a","sbc hl,de");comparison_flags(op,no)
+                no,end=label(),label();emit("ld de,2","or a","sbc hl,de",f"jp z,{no}","add hl,de","ld de,0","or a","sbc hl,de");comparison_flags(op,no)
                 emit("ld hl,1",f"jp {end}");mark(no);emit("ld hl,0");mark(end)
         elif kind == "dict_index":
             runtime("get", [item["base"], item["index"]], "__dict_")
@@ -381,13 +437,16 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             if item["negate"]:emit("ld a,l","xor 1","ld l,a")
         elif kind in {"text_print", "text_input"}:
             value, x, y = item["arguments"]
-            temporary = value["kind"] != "string" and value.get("owned", False)
+            reentrant=may_call_user(x) or may_call_user(y)
+            if value["type"] in {"i16","u8","bool"} and reentrant:value={"kind":"string_builtin","name":"boolean" if value["type"]=="bool" else "number","arguments":[value],"type":"str","owned":True}
+            temporary = value["kind"] != "string" and (value.get("owned", False) or value["type"]=="str" and reentrant)
             if value["kind"] == "string":
                 data = tuple(ord(c) for c in value["value"])
                 if data not in constant_data: constant_data[data] = f"__constant_data_{len(constant_data)}"
                 emit(f"ld hl,{constant_data[data]}", "push hl", f"ld hl,{len(data)}", "push hl")
             else:
                 expression(value)
+                if temporary and not value.get("owned"):emit("push hl","call __arr_retain","pop de")
                 if temporary: emit("push hl")
                 if value["type"] == "str":
                     emit("ld e,(hl)", "inc hl", "ld d,(hl)", "inc hl", "ld c,(hl)", "inc hl", "ld b,(hl)", "push de", "push bc")
@@ -545,6 +604,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             fields=item["field_types"];flags=tuple(int(managed(t)) for t in fields)
             if flags not in constant_data:constant_data[flags]=f"__constant_data_{len(constant_data)}"
             runtime("tuple_new",[{"kind":"address","label":constant_data[flags]},len(fields)])
+            emit("push hl","ld de,6","add hl,de","ld (hl),0","inc hl","ld (hl),128","pop hl")
             emit("push hl","push hl","call __arr_retain","pop de","push hl")
             for arg in item["arguments"]:
                 expression(arg)
@@ -709,6 +769,16 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
     def leave_handler():
         emit("ld hl,(__exception_handler)","ld e,(hl)","inc hl","ld d,(hl)","ld (__exception_handler),de","inc hl","inc hl","inc hl","ld e,(hl)","inc hl","ld d,(hl)","ex de,hl","ld sp,hl")
 
+    def clear_abandoned(body):
+        slots={}
+        for node in walk(body):
+            for evaluation in node.get("evaluations",[]):
+                slot=evaluation["slot"]
+                if managed(slot["type"]):slots[slot["symbol"]]=slot
+            for key,slot in node.items():
+                if (key.startswith("iterator_") or key=="completion_slot") and isinstance(slot,dict) and "symbol" in slot and managed(slot.get("type","")):slots[slot["symbol"]]=slot
+        for slot in slots.values():emit("ld hl,0");store(slot)
+
     def unwind_to(depth):
         saved=unwind[:]
         for i in reversed(range(depth,len(saved))):
@@ -717,6 +787,26 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             if saved[i]:statements(saved[i])
         unwind[:]=saved
 
+    def unpack_pattern(pattern):
+        if pattern["kind"]=="target_name":
+            if managed(pattern["type"]) and not pattern.get("cell"):
+                emit("push hl");load(pattern);emit("push hl",f"call {release(pattern['type'])}","pop de","pop hl")
+            store(pattern);return
+        if pattern.get("conversion"):
+            emit("push hl");expression(pattern["conversion"])
+            emit("pop de","push hl","push de",f"call {release(pattern['source_type'])}","pop de","pop hl")
+        emit("push hl");read_length();emit(f"ld de,{pattern['minimum']}","or a","sbc hl,de")
+        valid=label();emit(f"jp {'nc' if pattern['star']>=0 else 'z'},{valid}","ld hl,14","jp __arr_fail");mark(valid)
+        for i,child in enumerate(pattern["values"]):
+            source={"kind":"stack_dict","type":pattern["type"]}
+            if i==pattern["star"]:
+                runtime("unpack_rest",[source,i,len(pattern["values"])-i-1,array_width(child["type"]),int(pattern["type"]=="str")],"__obj_")
+                unpack_pattern(child["value"])
+            else:
+                runtime("get",[source,child["unpack_index"]],"__str_" if pattern["type"]=="str" else "__arr_")
+                unpack_pattern(child)
+        emit("pop hl","push hl",f"call {release(pattern['type'])}","pop de")
+
     def statements(body):
         nonlocal modulo_used
         for statement in body:
@@ -724,17 +814,25 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             if statement.get("unreachable") or kind == "function":
                 continue
             code.append(f"; Line {statement['line']}: {kind} {statement.get('name', '')}")
+            if kind=="release_temp":
+                if managed(statement["type"]):
+                    load(statement);emit("push hl",f"call {release(statement['type'])}","pop de","ld hl,0");store(statement)
+                continue
+            if kind=="pattern_assign":
+                value=statement["value"];expression(value)
+                if managed(value["type"]) and not value.get("owned"):emit("push hl","call __arr_retain","pop de")
+                unpack_pattern(statement["target"]);continue
             if kind=="yield":
                 expression(statement["value"]);emit("call __obj_gen_yield");continue
             if kind in {"try_except","try_finally"}:
                 caught,end=label(),label();enter_handler(caught)
                 unwind.append(statement.get("final"));statements(statement["body"]);unwind.pop();leave_handler()
                 if kind=="try_finally":
-                    statements(statement["final"]);emit(f"jp {end}");mark(caught)
+                    statements(statement["final"]);emit(f"jp {end}");mark(caught);clear_abandoned(statement["body"])
                     emit("ld hl,(__exception_code)");store(statement["code_slot"])
                     statements(statement["final"]);load(statement["code_slot"]);emit("jp __obj_throw")
                 else:
-                    statements(statement["alternative"]);emit(f"jp {end}");mark(caught)
+                    statements(statement["alternative"]);emit(f"jp {end}");mark(caught);clear_abandoned(statement["body"])
                     from .exception_runtime import EXCEPTIONS
                     for handler in statement["handlers"]:
                         yes,no=label(),label()
@@ -818,6 +916,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                 if not target["base"].get("owned"):emit("push hl","call __arr_retain","pop de")
                 emit("push hl")
                 expression(target["index"])
+                if managed(target["index"]["type"]) and not target["index"].get("owned"):emit("push hl","call __arr_retain","pop de")
                 emit("push hl")
                 if statement["operator"] != "=":
                     # Preserve the original descriptor/index, and evaluate the
@@ -835,10 +934,16 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                         else:
                             math_used.add(helper)
                         emit(f"call __math_{helper}")
+                    elif operator in {"&=","|=","^="}:
+                        op={"&=":"and","|=":"or","^=":"xor"}[operator]
+                        emit("ld a,l",f"{op} e","ld l,a","ld a,h",f"{op} d","ld h,a")
+                    elif operator in {"<<=",">>=","**="}:
+                        helper={"<<=":"shift_left",">>=":"shift_right","**=":"power"}[operator]
+                        emit("push hl","push de",f"call __obj_{helper}","pop de","pop de")
                     else:
                         emit(*(["add hl,de"] if operator == "+=" else ["or a", "sbc hl,de"]))
                 emit("push hl", f"call {'__dict_set' if kind == 'dict_assign' else '__arr_set'}")
-                for argument in (statement["value"], target["index"], {**target["base"],"owned":True}):
+                for argument in (statement["value"], {**target["index"],"owned":managed(target['index']['type'])}, {**target["base"],"owned":True}):
                     emit("pop de")
                     if argument.get("owned"):
                         emit("push de", f"call {release(argument['type'])}", "pop de")
@@ -1115,12 +1220,12 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             if value["offset"]>0:load(raw)
             else:emit("ld hl,0")
             emit("push hl")
-            flags=(int(managed(value["type"])),)
+            flags=(int(managed(value["type"])),0)
             if flags not in constant_data:constant_data[flags]=f"__constant_data_{len(constant_data)}"
-            runtime("tuple_new",[{"kind":"address","label":constant_data[flags]},1]);store(raw)
+            runtime("tuple_new",[{"kind":"address","label":constant_data[flags]},2]);store(raw)
             # cell_set takes the stored cell and the original parameter value.
-            emit("pop de","push hl","push de","call __obj_cell_set","pop de")
-            emit("pop de")
+            if value["offset"]>0:emit("pop de","push hl","push de","call __obj_cell_set","pop de","pop de")
+            else:emit("pop de")
         statements(function["body"])
         if function["return_type"] == "void":
             emit("ld hl,0")
@@ -1154,7 +1259,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
         code[:]=[part.replace(fatal,"        jp __arr_fail") for part in code]
     required = set(RUNTIME_TARGET.findall("\n".join(code)))
     if required:
-        object_types={t for node in walk(tree) if "type" in node for t in all_types(node["type"])}
+        object_types={t for node in walk(tree) if isinstance(node.get("type"),str) for t in all_types(node["type"])}
         dictionary_types = {dict_types(t) if is_dict(t) else (element_type(t),"i16") for t in object_types if is_dict(t) or is_set(t)}
         code.extend(["", "; Used heap runtime routines and their dependencies", runtime_assembly(required, dictionary_types, object_types,tracing,generators,_heap_bytes)])
     if pixels_used:

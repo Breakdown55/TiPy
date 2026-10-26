@@ -16,9 +16,9 @@ def new_routine():
     return r.finish()+"\n__iterator_flags:\n        db 1,0,0,1,0,0"
 
 
-def next_routine(type_name,label,ensure,functions):
+def next_routine(type_name,label,ensure,functions,truth):
     result,mode,*parts=iterator_types(type_name)
-    source_types=parts[1:] if mode in {"map","filter"} else []
+    source_types=parts[1:] if mode in {"map","filter","filter_none"} else []
     locals_=("source","index","value","callback","predicate",*[f"arg{i}" for i in range(len(source_types))])
     r=Routine(label,("object",),locals_,prefix="")
     def field(i):return ("call","__obj_read","object",i)
@@ -48,7 +48,7 @@ def next_routine(type_name,label,ensure,functions):
         r.set("value",word(add("index",6 if mode=="values" else 4)))
         if managed(result):r.invoke("retain","value")
         success("value")
-    elif mode in {"map","filter"}:
+    elif mode in {"map","filter","filter_none"}:
         r.set("source",field(0));r.set("callback",field(3))
         loop=r.label();r.mark(loop)
         for i,t in enumerate(source_types):
@@ -58,29 +58,32 @@ def next_routine(type_name,label,ensure,functions):
                     if managed(iterator_types(source_types[j])[0]):r.expr(("call","__obj_release",f"arg{j}"))
                 exhausted()
             r.if_(("ne",word("@__iterator_exhausted"),0),stop)
-        function=functions[parts[0][8:-1]];args=[]
-        if function.get("closure_env") or function.get("bound_method"):
-            args.append(call("retain",("call","__obj_read","callback",1)))
-        for i,t in enumerate(source_types):
-            arg=f"arg{i}"
-            if mode=="filter" and managed(iterator_types(t)[0]):arg=call("retain",arg)
-            args.append(arg)
-        r.set("value",("call",function["label"],*args))
+        function=functions[parts[0][8:-1]] if mode!="filter_none" else None;args=[]
+        if function is not None:
+            if function.get("closure_env") or function.get("bound_method"):
+                args.append(call("retain",("call","__obj_read","callback",1)))
+            for i,t in enumerate(source_types):
+                arg=f"arg{i}"
+                if mode=="filter" and managed(iterator_types(t)[0]):arg=call("retain",arg)
+                args.append(arg)
+            r.set("value",("call",function["label"],*args))
         if mode=="map":success("value")
         else:
-            if managed(function["return_type"]):
-                r.set("predicate",("call","__obj_truth","value"));r.expr(("call","__obj_release","value"))
-            else:r.set("predicate","value")
+            if function is None:r.set("predicate",("call",truth(result),"arg0"))
+            else:
+                r.set("predicate",("call",truth(function["return_type"]),"value"))
+                if managed(function["return_type"]):r.expr(("call","__obj_release","value"))
             r.if_(("ne","predicate",0),lambda:success("arg0"))
             if managed(result):r.expr(("call","__obj_release","arg0"))
             r.emit(f"jp {loop}")
     return r.finish()
 
 
-def list_routine(type_name,label,next_label):
+def list_routine(type_name,label,next_label,limit=None):
     from .types import width
     t=iterator_types(type_name)[0];r=Routine(label,("object",),("result","value"),prefix="")
     r.set("result",call("new",width(t+"[]")));loop=r.label();r.mark(loop)
+    if limit is not None:r.if_(("uge",word(add("result",2)),limit),lambda:r.ret("result"))
     r.set("value",("call",next_label,"object"))
     r.if_(("ne",word("@__iterator_exhausted"),0),lambda:r.ret("result"))
     r.invoke("append","result","value")

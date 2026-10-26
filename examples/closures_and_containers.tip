@@ -1,0 +1,17 @@
+# Returned functions keep their captured values alive.
+def factory(int amount):
+    def add(int value):
+        return amount + value
+    return add
+
+callback = factory(2)
+values = list(map(callback, iter([1, 2, 3])))
+head, *tail = values
+table = {"head": head, "tail": sum(tail)}
+keys = table.keys()
+
+clear()
+print(f'{table["head"]}:{table["tail"]}', 0, 0)
+for value in values:
+    pixel_on(value, len(keys))
+render()
