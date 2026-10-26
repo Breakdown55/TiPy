@@ -5,7 +5,8 @@ from .optimizer import optimize
 from .types import managed, is_dict, dict_types, release, is_tuple, tuple_types, width as array_width, all_types, is_set, element as element_type, is_view, view_types, is_iterator, iterator_types, iterable_element as iterable_element_type
 
 
-def generate(tree, symbols, *, optimize_graphics=True):
+def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
+    original_tree=tree
     if "static_frames" in tree:
         from .framebuffer_backend import generate_frames
         return generate_frames(tree["static_frames"])
@@ -13,7 +14,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
         if isinstance(item, dict):
             if item.get("unreachable"):
                 return set()
-            found = {item["symbol"]} if item.get("kind") in {"call","closure_call","closure","function_ref","iterator_map"} and "symbol" in item else set()
+            found = {item["symbol"]} if item.get("kind") in {"call","closure_call","closure","function_ref","iterator_map","bound_method"} and "symbol" in item else set()
             return found | set().union(*(called_labels(value) for value in item.values()))
         if isinstance(item, list):
             return set().union(*(called_labels(value) for value in item))
@@ -69,7 +70,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
     text_nodes = [item for item in walk(tree["body"]) if item.get("kind") in {"text_print", "text_input"}]
     text_used = {"draw"} if text_nodes else set()
     conversions={n["name"] for n in walk(tree) if n.get("kind")=="string_builtin"}
-    if "number" in conversions:text_used.add("number")
+    if {"number","fixed"}&conversions:text_used.add("number")
     if "boolean" in conversions:text_used.add("bool")
     if any(item["kind"] == "text_input" for item in text_nodes):
         text_used.add("input"); native_used.add("time.sleep")
@@ -92,7 +93,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
             return item.get("iteration_kind") == "range" and "fast_range" not in item or item.get("kind") in {"modulo", "floor_divide"} or item.get("operator") in {"//=", "%="} or any(has_modulo(value) for value in item.values())
         return isinstance(item, list) and any(has_modulo(value) for value in item)
 
-    errors_used = lists_used or has_modulo(tree) or bool(native_used) or any(n.get("kind") in {"function","power","shift_left","shift_right"} for n in walk(tree))
+    errors_used = lists_used or has_modulo(tree) or bool(native_used) or any(n.get("kind") in {"function","power","shift_left","shift_right","numeric_builtin","true_divide"} for n in walk(tree))
 
     def label():
         nonlocal serial
@@ -197,7 +198,32 @@ def generate(tree, symbols, *, optimize_graphics=True):
                     load(slot);emit("push hl",f"call {release(slot['type'])}","pop de","ld hl,0");store(slot)
             emit("pop hl");return
         kind = item["kind"]
-        if kind=="none":emit("ld hl,0")
+        if kind=="wide_round":runtime("i32_round" if item["type"]=="i32" else "i32_round_int",item["arguments"],"__obj_")
+        elif kind=="float_parse":runtime("f32_parse",item["arguments"],"__obj_")
+        elif kind=="float_round":runtime("f32_round",item["arguments"],"__obj_")
+        elif kind=="float_number":runtime("f32_new",[item["raw"]&65535,item["raw"]>>16],"__obj_")
+        elif kind=="float_cast":runtime("f32_from_integer",[item["value"],2 if item["source_type"]=="i32" else 1 if item["source_type"]=="fixed" else 0],"__obj_")
+        elif kind in {"float_int","float_integer"}:runtime("f32_int" if kind=="float_int" else "f32_integer",item["arguments"],"__obj_")
+        elif kind=="float_unary":runtime("f32_"+item["name"] ,[item["value"]],"__obj_")
+        elif kind=="float_binary":runtime("f32_"+item["name"],[item["left"],item["right"]],"__obj_")
+        elif kind=="float_compare":
+            runtime("f32_compare",[item["left"],item["right"]],"__obj_")
+            ordered,no,end=label(),label(),label();emit("ld de,2","or a","sbc hl,de",f"jp nz,{ordered}",f"ld hl,{int(item['operator']=='!=')}",f"jp {end}");mark(ordered)
+            emit("add hl,de","ld de,0","or a","sbc hl,de");comparison_flags(item["operator"],no)
+            emit("ld hl,1",f"jp {end}");mark(no);emit("ld hl,0");mark(end)
+        elif kind=="wide_number":runtime("i32_new",[item["value"]&65535,(item["value"]>>16)&65535],"__obj_")
+        elif kind=="wide_cast":runtime("i32_from_int",[item["value"]],"__obj_")
+        elif kind=="wide_to_int":runtime("read",[item["arguments"][0],0],"__obj_")
+        elif kind=="wide_unary":runtime("i32_"+item["name"],[item["value"]],"__obj_")
+        elif kind=="wide_binary":
+            name=item["name"];args=[item["left"],item["right"]]
+            if name in {"floor_divide","modulo"}:args.append(int(name=="modulo"));name="divide"
+            runtime("i32_"+name,args,"__obj_")
+        elif kind=="wide_compare":
+            runtime("i32_compare",[item["left"],item["right"]],"__obj_")
+            no,end=label(),label();emit("ld de,0","or a","sbc hl,de");comparison_flags(item["operator"],no)
+            emit("ld hl,1",f"jp {end}");mark(no);emit("ld hl,0");mark(end)
+        elif kind=="none":emit("ld hl,0")
         elif kind=="optional_box":
             v=item["value"]
             if v["kind"]=="none":emit("ld hl,0")
@@ -289,6 +315,10 @@ def generate(tree, symbols, *, optimize_graphics=True):
             runtime(iterator_lists[t],[item["base"]],"")
         elif kind=="closure_default":
             runtime("read",[item["base"],1],"__obj_");emit("push hl",f"ld hl,{item['index']}","push hl","call __obj_read","pop de","pop de","push hl","ld hl,0","push hl","call __arr_get","pop de","pop de")
+        elif kind=="checked_value":expression(item["value"])
+        elif kind=="object_get":runtime("get",[item["base"],item["index"]])
+        elif kind=="bound_method":
+            expression({"kind":"tuple","type":"tuple[i16,"+item["base"]["type"]+"]","values":[{"kind":"address","label":item["symbol"],"type":"i16"},item["base"]],"owned":True})
         elif kind in {"closure","function_ref"}:
             captures=item.get("captures",[])
             env={"kind":"tuple","values":captures,"type":"tuple["+",".join(v["type"] for v in captures)+"]","owned":True}
@@ -511,6 +541,16 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 emit(f"call __gfx_{item['name']}")
                 emit(*(["pop de"] * len(item["arguments"])))
             pixels_used.add(item["name"])
+        elif kind=="call" and item.get("constructor"):
+            fields=item["field_types"];flags=tuple(int(managed(t)) for t in fields)
+            if flags not in constant_data:constant_data[flags]=f"__constant_data_{len(constant_data)}"
+            runtime("tuple_new",[{"kind":"address","label":constant_data[flags]},len(fields)])
+            emit("push hl","push hl","call __arr_retain","pop de","push hl")
+            for arg in item["arguments"]:
+                expression(arg)
+                if managed(arg["type"]) and not arg.get("owned"):emit("push hl","call __arr_retain","pop de")
+                emit("push hl")
+            emit(f"call {item['symbol']}",*(["pop de"]*(len(item["arguments"])+1)),"pop hl")
         elif kind in {"call","closure_call"} and item.get("generator"):
             function=functions[item["symbol"]]
             values=item["arguments"][:]
@@ -549,6 +589,13 @@ def generate(tree, symbols, *, optimize_graphics=True):
         elif kind == "not":
             expression(item["value"])
             emit("ld a,l", "xor 1", "ld l,a", "ld h,0")
+        elif kind=="numeric_builtin":
+            if item["name"]=="identity_number":expression(item["arguments"][0])
+            else:
+                if item["name"]=="pow_mod":modulo_used=True
+                runtime(item["name"],item["arguments"],"__obj_")
+        elif kind=="true_divide":
+            runtime("i32_fixed_divide",[item["left"],item["right"],item["shift"]],"__obj_")
         elif kind=="invert":
             expression(item["value"]);emit("ld a,h","cpl","ld h,a","ld a,l","cpl","ld l,a")
         elif kind in {"shift_left","shift_right","power"}:
@@ -765,9 +812,10 @@ def generate(tree, symbols, *, optimize_graphics=True):
                 emit("ex de,hl", "pop hl", f"call __gfx_{mode}")
                 mark(end); pixels_used.add(mode)
                 continue
-            if kind in {"index_assign", "dict_assign"}:
+            if kind in {"index_assign", "dict_assign", "object_assign"}:
                 target = statement["target"]
                 expression(target["base"])
+                if not target["base"].get("owned"):emit("push hl","call __arr_retain","pop de")
                 emit("push hl")
                 expression(target["index"])
                 emit("push hl")
@@ -790,7 +838,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
                     else:
                         emit(*(["add hl,de"] if operator == "+=" else ["or a", "sbc hl,de"]))
                 emit("push hl", f"call {'__dict_set' if kind == 'dict_assign' else '__arr_set'}")
-                for argument in (statement["value"], target["index"], target["base"]):
+                for argument in (statement["value"], target["index"], {**target["base"],"owned":True}):
                     emit("pop de")
                     if argument.get("owned"):
                         emit("push de", f"call {release(argument['type'])}", "pop de")
@@ -1108,7 +1156,7 @@ def generate(tree, symbols, *, optimize_graphics=True):
     if required:
         object_types={t for node in walk(tree) if "type" in node for t in all_types(node["type"])}
         dictionary_types = {dict_types(t) if is_dict(t) else (element_type(t),"i16") for t in object_types if is_dict(t) or is_set(t)}
-        code.extend(["", "; Used heap runtime routines and their dependencies", runtime_assembly(required, dictionary_types, object_types,tracing,generators)])
+        code.extend(["", "; Used heap runtime routines and their dependencies", runtime_assembly(required, dictionary_types, object_types,tracing,generators,_heap_bytes)])
     if pixels_used:
         from .graphics_runtime import graphics_assembly
         code.append(graphics_assembly(pixels_used))
@@ -1133,6 +1181,17 @@ def generate(tree, symbols, *, optimize_graphics=True):
     if generators:code.extend(["__gen_active: dw 0","__gen_value: dw 0","__gen_continuation: dw 0","__gen_finished_object: dw 0"])
     if iterator_helpers or iterator_new_used:code.append("__iterator_exhausted: dw 0")
     if lists_used:
-        code.extend(["__heap_start:", f"        defs {HEAP_BYTES},0", "__heap_end:"])
+        code.extend(["__heap_start:", f"        defs {_heap_bytes},0", "__heap_end:"])
     code.append("__program_end:")
-    return optimize("\n".join(code) + "\n")
+    assembly=optimize("\n".join(code) + "\n")
+    if lists_used:
+        from .assembly_size import estimate
+        from .errors import CompileError
+        code_bytes=estimate(assembly)-_heap_bytes
+        available=(0xFFFE-0x9D95-code_bytes-1024)//256*256
+        chosen=min(HEAP_BYTES,available)
+        if chosen<512:
+            location=next((n for n in tree["body"] if "line" in n),{"line":1,"column":1})
+            raise CompileError("Program code leaves insufficient RAM for the heap and stack",location)
+        if chosen!=_heap_bytes:return generate(original_tree,symbols,optimize_graphics=optimize_graphics,_heap_bytes=chosen)
+    return assembly

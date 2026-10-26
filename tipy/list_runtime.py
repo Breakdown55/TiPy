@@ -138,13 +138,13 @@ class Routine:
         return "\n".join(self.code)
 
 
-def runtime_assembly(required=None, dictionary_types=None, object_types=None, tracing=False, generators=False):
+def runtime_assembly(required=None, dictionary_types=None, object_types=None, tracing=False, generators=False,heap_bytes=HEAP_BYTES):
     from .types import complex_type, managed
     nested = object_types is None or any(complex_type(t) for t in object_types)
     routines = []
 
     r = Routine("init")
-    r.write("@__heap_start", HEAP_BYTES - 4)
+    r.write("@__heap_start", heap_bytes - 4)
     r.write(add("@__heap_start", 2), 1)
     r.write("@__list_error", 0)
     r.ret()
@@ -296,6 +296,7 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None, tr
         def replace_managed():
             r.set("value",call("retain","value"));r.expr(("call","__obj_release",word("pointer")))
         r.if_(("eq",word(add("object",6)),32765),replace_managed)
+        r.if_(("eq",word(add("object",6)),32766),lambda:r.if_(("ne",byte(add(word(add("object",10)),"index")),0),replace_managed))
     r.if_(("eq", word(add("object", 6)), 1), lambda: r.write("pointer", "value", 1), lambda: r.write("pointer", "value"))
     r.ret()
     routines.append(r.finish())
@@ -416,7 +417,17 @@ def runtime_assembly(required=None, dictionary_types=None, object_types=None, tr
     routines.append(r.finish())
 
     from .object_runtime import routines as object_routines
-    routines.extend(object_routines(has_dict=dictionary_types is None or bool(dictionary_types)))
+    routines.extend(object_routines(has_dict=dictionary_types is None or bool(dictionary_types),has_i32=object_types is None or "i32" in object_types))
+    from .numeric_runtime import routines as numeric_routines
+    routines.extend(numeric_routines())
+    from .wide_runtime import routines as wide_routines
+    routines.extend(wide_routines())
+    from .float_runtime import routines as float_routines
+    routines.extend(float_routines())
+    from .float_text_runtime import routines as float_text_routines
+    routines.extend(float_text_routines())
+    from .decimal_runtime import routines as decimal_routines
+    routines.extend(decimal_routines())
     from .sequence_runtime import routines as sequence_routines
     routines.extend(sequence_routines())
     from .string_runtime import routines as string_routines

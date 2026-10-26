@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from .errors import CompileError
-from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_types, dynamic_tuple, is_set, element as element_type, is_view, view_types, iterable_element, is_cell, is_closure, is_iterator, iterator_types, is_optional
+from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_types, dynamic_tuple, is_set, element as element_type, is_view, view_types, iterable_element, is_cell, is_closure, is_iterator, iterator_types, is_optional, is_object
 
 PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
 GRAPHICS_BUILTINS = PIXEL_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
@@ -11,6 +11,9 @@ PYTHON_BUILTINS = {"range", "list", "abs", "sum", "min", "max", "any", "all", "e
 
 def check(tree):
     checked = deepcopy(tree)
+    from .classes import prepare as lower_classes
+    lower_classes(checked)
+    classes=checked["classes"]
     from .closures import prepare as lower_closures
     lower_closures(checked)
     from .syntax_lowering import prepare as lower_syntax
@@ -106,6 +109,17 @@ def check(tree):
         raise CompileError(f"Variable {name!r} has not been declared", item)
 
     def compatible(target, source_type, constant, item):
+        if "float" in {target,source_type}:
+            if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}; use an explicit numeric conversion",item)
+            return
+        if "i32" in {target,source_type}:
+            if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}; use an explicit integer conversion",item)
+            return
+        if is_object(target) or is_object(source_type):
+            source=source_type[7:-1] if is_object(source_type) else None
+            while source and f"object[{source}]"!=target:source=classes[source].get("base")
+            if not source:raise CompileError(f"Cannot assign {source_type} to {target}",item)
+            return
         if is_optional(target) or is_optional(source_type) or "none" in {target,source_type}:
             if target!=source_type:raise CompileError(f"Cannot assign {source_type} to {target}",item)
             return
@@ -157,6 +171,10 @@ def check(tree):
                 if t!="none" and t!=expected[9:-1]:raise CompileError(f"Cannot assign {t} to {expected}",args[0])
                 item=args[0];value=deepcopy(item);item.clear();item.update(kind="optional_box",value=value,type=expected,owned=True,line=value["line"],column=value["column"])
                 t=expected;c=None
+            if expected=="i32" and t in {"i16","u8"}:
+                item=args[0];value=deepcopy(item);item.clear();item.update(kind="wide_cast",value=value,type="i32",owned=True,line=value["line"],column=value["column"]);t="i32";c=None
+            if expected=="float" and t in {"i16","u8","fixed","i32"}:
+                item=args[0];value=deepcopy(item);item.clear();item.update(kind="float_cast",value=value,source_type=t,type="float",owned=True,line=value["line"],column=value["column"]);t="float";c=None
             return t,c
         finally:expression_depth-=1
 
@@ -186,7 +204,7 @@ def check(tree):
                 return {key:replace(v) for key,v in value.items()}
             if isinstance(value,list):return [replace(v) for v in value]
             return value
-        for field in ("base","arguments","left","right","value","sources"):
+        for field in ("base","arguments","left","right","value","sources","values"):
             if field in item:item[field]=replace(item[field])
         item["evaluations"]=snapshots
 
@@ -269,11 +287,24 @@ def check(tree):
             return "bool",None
         if kind == "number":
             value_type, constant = "i16", item["value"]
+            if expected_element=="float":
+                import struct
+                try:raw=struct.unpack('<I',struct.pack('<f',float(constant)))[0]
+                except OverflowError:raw=0x7f800000
+                item.update(kind="float_number",raw=raw,type="float",owned=True);return "float",None
+            if expected_element=="i32":
+                if constant>(2147483648 if allow_min_magnitude else 2147483647):raise CompileError("Constant is outside i32 range",item)
+                item.update(kind="wide_number",type="i32",owned=True);return "i32",constant
             if constant > (32768 if allow_min_magnitude else 32767):
                 raise CompileError(f"{constant} is outside i16 literal range", item)
         elif kind == "decimal":
             from decimal import Decimal, ROUND_HALF_UP
             raw = int((Decimal(str(item["value"])) * 256).to_integral_value(rounding=ROUND_HALF_UP))
+            if expected_element=="float" or not -32768<=raw<=(32768 if allow_min_magnitude else 32767):
+                import struct
+                try:bits=struct.unpack('<I',struct.pack('<f',float(item['value'])))[0]
+                except OverflowError:bits=0x7f800000
+                item.update(kind="float_number",raw=bits,type="float",owned=True);return "float",None
             if not -32768 <= raw <= (32768 if allow_min_magnitude else 32767):
                 raise CompileError("Fixed-point literal must be between -128 and 127.996", item)
             item["raw"] = raw
@@ -320,7 +351,7 @@ def check(tree):
             if len(args)<2 or name=="filter" and len(args)!=2:raise CompileError(f"Invalid arguments to {name}",item)
             callback=args[0];ct,_=expression(callback)
             if not is_closure(ct):raise CompileError(f"{name} requires a function",callback)
-            function=functions[ct[8:-1]];params=function["params"][int(bool(function.get("closure_env"))):]
+            function=functions[ct[8:-1]];params=function["params"][int(bool(function.get("closure_env") or function.get("bound_method"))):]
             if len(params)!=len(args)-1:raise CompileError("Callback parameter count does not match iterables",item)
             sources=[];source_types=[]
             for arg,p in zip(args[1:],params):
@@ -334,13 +365,63 @@ def check(tree):
             if context["function"]:context["function"]["calls"].add(function["name"])
             else:global_calls.append(({**item,"name":function["name"]},context["initialized"].copy()))
             return t,None
+        elif kind=="call" and item["name"] in {"pow","divmod","round"} and item["name"] not in functions:
+            name,args=item["name"],item["arguments"]
+            count=len(args)
+            if count not in ({2,3} if name=="pow" else {2} if name=="divmod" else {1,2}):raise CompileError(f"Invalid arguments to {name}",item)
+            types=[expression(v)[0] for v in args]
+            if name=="round":
+                if types[0]=="float" or count==2 and types[0]=="fixed":
+                    if count==2 and types[1] not in {"i16","u8"}:raise CompileError("round precision must be an integer",item)
+                    if types[0]=="fixed":args[0]={"kind":"float_cast","value":args[0],"source_type":"fixed","type":"float","owned":True}
+                    p=args[1] if count==2 else 0
+                    result="i16" if count==1 else "float"
+                    item.update(kind="float_round",arguments=[args[0],p,int(count==1)],type=result,owned=result=="float");return result,None
+                if types[0]=="i32" or count==2:
+                    if types[0] not in {"i16","u8","i32"} or count==2 and types[1] not in {"i16","u8"}:raise CompileError("round requires integer precision",item)
+                    result=types[0] if types[0]=="i32" else "i16"
+                    source=args[0] if types[0]=="i32" else {"kind":"wide_cast","value":args[0],"type":"i32","owned":True}
+                    item.update(kind="wide_round",arguments=[source,args[1] if count==2 else 0],type=result,owned=result=="i32");return result,None
+                if types[0] not in {"i16","u8","fixed"}:raise CompileError("round requires a number",item)
+                item.update(kind="numeric_builtin",name="round_fixed" if types[0]=="fixed" else "identity_number",type="i16");return "i16",None
+            if name=="pow" and count==2 and types[0] in {"float","i32"} and types[1] in {"i16","u8"}:
+                item.update(kind="float_binary" if types[0]=="float" else "wide_binary",name="power",left=args[0],right=args[1],type=types[0],owned=True);return types[0],None
+            if name=="divmod" and "i32" in types:
+                if any(t not in {"i32","i16","u8"} for t in types):raise CompileError("divmod requires matching numbers",item)
+                wide=[a if t=="i32" else {"kind":"wide_cast","value":a,"type":"i32","owned":True,"line":a["line"],"column":a["column"]} for a,t in zip(args,types)]
+                values=[{"kind":"wide_binary","name":k,"left":wide[0],"right":wide[1],"type":"i32","owned":True} for k in ("floor_divide","modulo")]
+                item.update(kind="tuple",values=values,type="tuple[i32,i32]",owned=True);freeze_arguments(item,wide);return item["type"],None
+            if any(t not in {"i16","u8"} for t in types):raise CompileError(f"{name} requires integers",item)
+            if name=="pow":
+                if count==2:item.update(kind="power",left=args[0],right=args[1],type="i16")
+                else:item.update(kind="numeric_builtin",name="pow_mod",type="i16")
+                return "i16",None
+            values=[{"kind":k,"left":args[0],"right":args[1],"type":"i16"} for k in ("floor_divide","modulo")]
+            item.update(kind="tuple",values=values,type="tuple[i16,i16]",owned=True);freeze_arguments(item,args)
+            return item["type"],None
+        elif kind=="call" and item["name"]=="float":
+            args=item["arguments"]
+            if len(args)>1:raise CompileError("float expects zero or one number",item)
+            if not args:item.update(kind="float_number",raw=0,type="float",owned=True);return "float",None
+            t,_=expression(args[0],expected_element="float")
+            if t=="str":item.update(kind="float_parse",type="float",owned=True);return "float",None
+            if t!="float":raise CompileError("float expects a number",item)
+            item.update(kind="sequence_builtin",name="retain",type="float",owned=True);return "float",None
+        elif kind=="call" and item["name"]=="i32":
+            if len(item["arguments"])!=1:raise CompileError("i32 expects one integer",item)
+            value=item["arguments"][0];t,_=expression(value,expected_element="i32")
+            if t=="float":item.update(kind="float_integer",type="i32",owned=True);return "i32",None
+            if t!="i32":raise CompileError("i32 expects an integer",item)
+            item.update(kind="sequence_builtin",name="retain",type="i32",owned=True);return "i32",None
         elif kind == "call" and item["name"] == "int":
             if len(item["arguments"]) != 1:
                 raise CompileError("int expects one numeric value", item)
             source_type, constant = expression(item["arguments"][0], expected_element="i16")
-            if source_type not in {"i16", "u8", "bool", "fixed"}:
+            if source_type not in {"i16", "u8", "bool", "fixed","i32","float"}:
                 raise CompileError("int expects a scalar numeric value", item)
             item["kind"] = "cast_int"
+            if source_type=="i32":item["kind"]="wide_to_int"
+            if source_type=="float":item["kind"]="float_int"
             value_type = "i16"
         elif kind=="call" and item["name"] in {"str","chr","ord","repr"} and item["name"] not in functions:
             name,args=item["name"],item["arguments"]
@@ -357,6 +438,9 @@ def check(tree):
             elif t=="str":helper="repr" if name=="repr" else "identity"
             elif t in {"i16","u8"}:helper="number"
             elif t=="bool":helper="boolean"
+            elif t=="fixed":helper="fixed"
+            elif t=="i32":helper="i32"
+            elif t=="float":helper="float"
             elif t=="exception":helper="exception"
             else:raise CompileError("str conversion currently requires a scalar value",item)
             item.update(kind="string_builtin",name=helper,type="str",owned=True);return "str",None
@@ -425,16 +509,25 @@ def check(tree):
                     spec=item["arguments"][1]["value"]
             else:value,spec,conversion=item["value"],item["spec"],item["conversion"]
             t,_=expression(value)
-            if t not in {"i16","u8","bool","str"}:raise CompileError("Formatting currently requires a scalar value",item)
-            match=re.fullmatch(r"(?:(.)([<^>])|([<^>]))?([+ -])?(#)?(0)?(\d+)?([dsxXob])?",spec)
+            if t not in {"i16","i32","u8","bool","str","fixed","float"}:raise CompileError("Formatting currently requires a scalar value",item)
+            match=re.fullmatch(r"(?:(.)([<^>])|([<^>]))?([+ -])?(#)?(0)?(\d+)?(?:\.(\d+))?([dsxXobfF])?",spec)
             if not match:raise CompileError("Unsupported format specification",item)
-            fill,alignment,simple,sign,prefix,zero,digits,code=match.groups()
-            numeric=t in {"i16","u8","bool"} and conversion==-1
+            fill,alignment,simple,sign,prefix,zero,digits,precision,code=match.groups()
+            numeric=t in {"i16","i32","u8","bool","fixed","float"} and conversion==-1
             if code in {"d","x","X","o","b"} and not numeric:raise CompileError("Numeric format requires an integer",item)
+            if code in {"d","x","X","o","b"} and t in {"float","fixed"}:raise CompileError("Integer format requires an integer",item)
             helper="repr" if t=="str" and conversion in {114,97} else "identity" if t=="str" else "boolean" if t=="bool" and not code else "number"
+            if t in {"i32","fixed","float"}:helper=t
             converted={"kind":"string_builtin","name":helper,"arguments":[value],"type":"str","owned":True}
+            if code in {"f","F"} or precision is not None:
+                if not numeric:raise CompileError("Decimal format requires a number",item)
+                p=int(precision) if precision is not None else 6
+                if p>50:raise CompileError("Decimal precision must not exceed 50",item)
+                if t!="float":value={"kind":"float_cast","value":value,"source_type":t,"type":"float","owned":True}
+                converted.update(name="float_format",arguments=[value,p,1])
             if code in {"x","X","o","b"}:
-                converted.update(name="radix",arguments=[value,{"x":4,"X":4,"o":3,"b":1}[code],int(code=="X"),int(bool(prefix))])
+                if t=="fixed":raise CompileError("Radix formatting requires an integer",item)
+                converted.update(name="i32_radix" if t=="i32" else "radix",arguments=[value,{"x":4,"X":4,"o":3,"b":1}[code],int(code=="X"),int(bool(prefix))])
             if sign in {"+"," "} and numeric:converted={"kind":"string_builtin","name":"sign","arguments":[converted,ord(sign)],"type":"str","owned":True}
             if digits:
                 align=alignment or simple or (">" if numeric else "<")
@@ -442,8 +535,10 @@ def check(tree):
             location={key:item[key] for key in ("line","column","filename") if key in item}
             item.clear();item.update(converted,**location);return "str",None
         elif kind=="call" and item["name"] in {"bin","oct","hex"} and item["name"] not in functions:
-            if len(item["arguments"])!=1 or expression(item["arguments"][0])[0] not in {"i16","u8"}:raise CompileError("Radix conversion requires one integer",item)
-            item.update(kind="string_builtin",arguments=[item["arguments"][0],{"bin":1,"oct":3,"hex":4}[item["name"]],0,1],name="radix",type="str",owned=True)
+            if len(item["arguments"])!=1:raise CompileError("Radix conversion requires one integer",item)
+            t,_=expression(item["arguments"][0])
+            if t not in {"i16","i32","u8"}:raise CompileError("Radix conversion requires one integer",item)
+            item.update(kind="string_builtin",arguments=[item["arguments"][0],{"bin":1,"oct":3,"hex":4}[item["name"]],0,1],name="i32_radix" if t=="i32" else "radix",type="str",owned=True)
             return "str",None
         elif kind == "call" and item["name"] == "dict":
             if len(item["arguments"]) > 1:
@@ -481,6 +576,8 @@ def check(tree):
         elif kind == "tuple":
             fields=[expression(v)[0] for v in item["values"]]
             value_type="tuple["+",".join(fields)+"]";item["owned"]=True
+        elif kind=="checked_value":
+            return item["type"],None
         elif kind=="closure_default":
             item["owned"]=managed(item["type"]);return item["type"],None
         elif kind=="closure":
@@ -577,8 +674,24 @@ def check(tree):
             item.update(kind="sequence_builtin",name="sorted",arguments=[source,reverse],type=t,owned=True)
             freeze_arguments(item,[original,reverse])
             return t,None
-        elif kind in {"index", "method"}:
+        elif kind in {"index", "method", "attribute"}:
             array_type, _ = expression(item["base"], expected_element=expected_element)
+            if is_object(array_type):
+                meta=classes[array_type[7:-1]];name=item.get("name")
+                if kind=="attribute" and name in meta["fields"]:
+                    result=meta["fields"][name];item.update(kind="object_get",index=list(meta["fields"]).index(name),type=result,owned=managed(result));return result,None
+                if name not in meta["methods"]:raise CompileError(f"Unknown attribute {name!r}",item)
+                function=functions[meta["methods"][name]]
+                if kind=="method":
+                    base=item["base"];receiver={"kind":"checked_value","value":base,"type":array_type,"owned":base.get("owned",False),"line":base["line"],"column":base["column"]}
+                    value={**item,"kind":"call","name":function["name"],"arguments":[receiver,*item["arguments"]]};value.pop("base",None)
+                    item.clear();item.update(value);return _expression(item,allow_min_magnitude,allow_void,expected_element)
+                function["bound_method"]=True
+                item.update(kind="bound_method",symbol=function["label"],type=f"closure[{function['name']}]",owned=True)
+                if context["function"]:context["function"]["calls"].add(function["name"])
+                else:global_calls.append(({**item,"name":function["name"]},context["initialized"].copy()))
+                return item["type"],None
+            if kind=="attribute":raise CompileError("Attributes require an object",item)
             if is_set(array_type):
                 if kind!="method":raise CompileError("Sets do not support indexing",item)
                 key=element_type(array_type);name,args,base=item["name"],item["arguments"],item["base"]
@@ -772,6 +885,8 @@ def check(tree):
                     raise CompileError("list expects an array or range", item)
                 value_type = types[0] if count else (expected_element or "i16") + "[]"
             elif name == "abs":
+                if types[0]=="float":item.update(kind="float_unary",name="abs",value=arguments[0],type="float",owned=True);return "float",None
+                if types[0]=="i32":item.update(kind="wide_unary",name="abs",value=arguments[0],type="i32",owned=True);return "i32",None
                 if types[0] not in {"i16", "u8"}:
                     raise CompileError("abs expects an integer", item)
                 value_type = "i16"
@@ -800,7 +915,8 @@ def check(tree):
             if any(t not in {"i16", "u8"} for t in types[1:]):
                 raise CompileError("Text coordinates must be integers", item)
             if name == "print" and types[0] not in {"i16", "u8", "bool", "str"}:
-                raise CompileError("print expects text, an integer, or bool", arguments[0])
+                if types[0] in {"fixed","i32","float"}:arguments[0]={"kind":"string_builtin","name":types[0],"arguments":[arguments[0]],"type":"str","owned":True}
+                else:raise CompileError("print expects text, an integer, or bool", arguments[0])
             if name == "input" and types[0] != "str":
                 raise CompileError("input prompt must be text", arguments[0])
             item["kind"] = "text_print" if name == "print" else "text_input"
@@ -832,7 +948,8 @@ def check(tree):
             item["kind"] = "length"
             value_type = "i16"
         elif kind == "call":
-            function = functions.get(item["name"])
+            constructor=classes.get(item["name"])
+            function = functions[constructor["methods"]["__init__"]] if constructor else functions.get(item["name"])
             callback=None
             if function is None and (item["name"] in context["locals"] or item["name"] in globals_ or context["function"] and item["name"] in context["function"].get("capture_types",{})):
                 symbol=lookup(item["name"],item)
@@ -841,7 +958,8 @@ def check(tree):
                     function=functions[symbol["type"][8:-1]]
             if function is None:
                 raise CompileError(f"Function {item['name']!r} has not been defined", item)
-            params=function["params"][1:] if callback is not None and function.get("closure_env") else function["params"];args=item["arguments"]
+            has_env=bool(function.get("closure_env") or function.get("bound_method"))
+            params=function["params"][1:] if constructor or callback is not None and has_env else function["params"];args=item["arguments"]
             variadic=params[-1] if params and params[-1].get("variadic") else None
             regular=params[:-1] if variadic else params
             extras=[];ordinary=[];positional=0
@@ -869,8 +987,11 @@ def check(tree):
                 supplied=[a["value"] if a["kind"]=="keyword" else a for a in args]
                 freeze_arguments(item,([callback] if callback is not None else [])+supplied)
             item["symbol"] = function["label"]
-            if callback is not None:item.update(kind="closure_call",has_env=bool(function.get("closure_env")))
+            if callback is not None:item.update(kind="closure_call",has_env=has_env)
             value_type = function["return_type"]
+            if constructor:
+                if value_type!="void":raise CompileError("__init__ must not return a value",item)
+                value_type=f"object[{constructor['name']}]";item["constructor"]=constructor["name"];item["field_types"]=list(constructor["fields"].values())
             if function.get("generator"):
                 value_type=f"iter[{function['yield_type']},generator,{function['name']}]";item["generator"]=True
             if managed(value_type):
@@ -903,17 +1024,49 @@ def check(tree):
             value_type, constant = "bool", not operand if operand is not None else None
         elif kind=="invert":
             t,c=expression(item["value"])
+            if t=="i32":item.update(kind="wide_unary",name="invert",type="i32",owned=True);return "i32",None
             if t not in {"i16","u8"}:raise CompileError("Bitwise inversion requires an integer",item)
             value_type="i16";constant=~c if c is not None else None
         elif kind == "negate":
-            operand_type, operand = expression(item["value"], allow_min_magnitude=True)
+            operand_type, operand = expression(item["value"], allow_min_magnitude=True,expected_element=expected_element)
+            if operand_type=="i32":item.update(kind="wide_unary",name="negate",type="i32",owned=True);return "i32",None
+            if operand_type=="float":item.update(kind="float_unary",name="negate",type="float",owned=True);return "float",None
             if operand_type == "bool" or managed(operand_type):
                 raise CompileError("Cannot negate a bool or array", item)
             value_type = operand_type if operand_type == "fixed" else "i16"
             constant = -operand if operand is not None else None
         else:
-            left_type, left = expression(item["left"])
-            right_type, right = expression(item["right"])
+            floating_hint="float" if expected_element=="float" and kind in {"add","subtract","multiply","true_divide"} else None
+            left_type, left = expression(item["left"],expected_element=floating_hint)
+            right_type, right = expression(item["right"],expected_element=floating_hint)
+            if "float" in {left_type,right_type} or kind=="true_divide":
+                if kind not in {"add","subtract","multiply","true_divide","compare","power"}:raise CompileError("Unsupported float operation",item)
+                count=kind=="power"
+                if count and right_type not in {"i16","u8"}:raise CompileError("Floating-point power currently requires an integer exponent",item)
+                for field,t in (("left",left_type),("right",right_type)):
+                    if t not in {"float","fixed","i16","u8","i32"}:raise CompileError("Float arithmetic requires numbers",item)
+                    if t!="float" and not(field=="right" and count):item[field]={"kind":"float_cast","value":item[field],"source_type":t,"type":"float","owned":True}
+                result="bool" if kind=="compare" else "float"
+                item.update(kind="float_compare" if kind=="compare" else "float_binary",name="divide" if kind=="true_divide" else kind,type=result,owned=result=="float");return result,None
+            if "i32" in {left_type,right_type}:
+                if kind not in {"add","subtract","multiply","floor_divide","modulo","compare","bit_and","bit_or","bit_xor","shift_left","shift_right","power"}:raise CompileError("Unsupported i32 operation",item)
+                if left_type not in {"i32","i16","u8"} or right_type not in {"i32","i16","u8"}:raise CompileError("i32 arithmetic requires integers",item)
+                count=kind in {"shift_left","shift_right","power"}
+                if count and right_type=="i32":raise CompileError("A shift count or exponent must be i16",item)
+                for field,t in (("left",left_type),("right",right_type)):
+                    if t!="i32" and not(field=="right" and count):
+                        item[field]={"kind":"wide_cast","value":item[field],"type":"i32","owned":True}
+                result="bool" if kind=="compare" else "i32"
+                item.update(kind="wide_compare" if kind=="compare" else "wide_binary",name=kind,type=result,owned=result=="i32");return result,None
+            if kind=="true_divide":
+                if left_type not in {"i16","u8","fixed"} or right_type not in {"i16","u8","fixed"}:raise CompileError("Division requires numbers",item)
+                item.update(type="fixed",shift=16 if left_type!="fixed" and right_type=="fixed" else 0 if left_type=="fixed" and right_type!="fixed" else 8)
+                return "fixed",None
+            if kind=="compare" and (is_object(left_type) or is_object(right_type)):
+                if item["operator"] not in {"==","!="}:raise CompileError("Object ordering requires an explicit comparison method",item)
+                item.update(kind="identity",negate=item["operator"]=="!=",type="bool")
+                if item["left"].get("owned") or item["right"].get("owned"):freeze_arguments(item,[item["left"],item["right"]])
+                return "bool",None
             if is_dict(left_type) and left_type==right_type and kind=="bit_or":
                 item.update(kind="dict_merge",type=left_type,owned=True);return left_type,None
             if is_set(left_type) and left_type==right_type and kind in {"bit_or","bit_and","bit_xor","subtract"}:
@@ -1000,6 +1153,16 @@ def check(tree):
         reachable = True
         for statement in body:
             kind = statement["kind"]
+            if kind=="attribute_assign":
+                target=statement["target"];t,_=expression(target["base"])
+                if not is_object(t):raise CompileError("Attribute assignment requires an object",statement)
+                fields=classes[t[7:-1]]["fields"];name=target["name"]
+                if name not in fields:raise CompileError(f"Cannot infer field type for {name!r}",statement)
+                expected=fields[name];actual,c=expression(statement["value"],expected_element=expected)
+                compatible(expected,actual,c,statement)
+                target.update(type=expected,index={"kind":"number","value":list(fields).index(name),"type":"i16"})
+                if statement["operator"]!="=" and expected not in {"i16","u8"}:raise CompileError("Compound field assignment requires integers",statement)
+                statement.update(kind="object_assign",type=expected);continue
             if kind=="yield":
                 function=context["function"]
                 if not function or not function.get("generator"):raise CompileError("yield requires a function",statement)

@@ -51,7 +51,7 @@ class NativeStdlibTests(unittest.TestCase):
                  ("import random\nx=random.randint(True,5)", "integer arguments"),
                  ("import time\ntime.sleep(-0.1)", "sleep must"),
                  ("import time\ntime.sleep(33)", "sleep must"),
-                 ("x=128.0", "Fixed-point literal"),
+                 ("i32 x=2147483648", "outside i32"),
                  ("import math\nx=math.sin(1.0)\nx=3", "convert fixed-point"),
                  ("import time\ntime=1", "rebind")]
         for source, message in cases:

@@ -14,6 +14,10 @@ class StringRoutine(Routine):
 
 def routines():
     out=[]
+    r=StringRoutine("float",("value",));r.ret(("call","__obj_f32_text","value",7,0));out.append(r.finish())
+    r=StringRoutine("float_format",("value","precision","mode"));r.ret(("call","__obj_f32_text","value","precision","mode"));out.append(r.finish())
+    r=StringRoutine("i32",("value",));r.ret(("call","__obj_i32_string","value"));out.append(r.finish())
+    r=StringRoutine("i32_radix",("value","shift","uppercase","prefix"));r.ret(("call","__obj_i32_radix","value","shift","uppercase","prefix"));out.append(r.finish())
     r=Routine("exception",("object",),("message",),prefix="__str_")
     r.set("message",("call","__obj_read","object",1))
     r.if_(("eq","message",0),lambda:r.ret(call("new",1)))
@@ -32,6 +36,21 @@ def routines():
         r.expr("value");r.emit(f"call __text_{helper}");r.store_hl("pointer")
         r.emit("ld h,b","ld l,c");r.store_hl("length")
         r.ret(call("from_data",1,"length","pointer"));out.append(r.finish())
+    r=StringRoutine("fixed",("value",),("result","whole","fraction","negative"))
+    r.set("negative",0)
+    r.if_(("negative","value"),lambda:(r.set("negative",1),r.set("value",sub(0,"value"))))
+    r.expr("value");r.emit("ld l,h","ld h,0");r.store_hl("whole")
+    r.expr("value");r.emit("ld h,0");r.store_hl("fraction")
+    r.set("result",sc("number","whole"))
+    r.if_(("ne","negative",0),lambda:r.invoke("insert","result",0,45))
+    r.invoke("append","result",46)
+    r.if_(("eq","fraction",0),lambda:r.invoke("append","result",48))
+    def digit():
+        # fraction is below 256; multiplying by ten fits a native word.
+        r.expr("fraction");r.emit("add hl,hl","push hl","add hl,hl","add hl,hl","pop de","add hl,de")
+        r.store_hl("fraction");r.emit("ld l,h","ld h,0","ld de,48","add hl,de");r.store_hl("whole")
+        r.invoke("append","result","whole");r.expr("fraction");r.emit("ld h,0");r.store_hl("fraction")
+    r.while_(("ne","fraction",0),digit);r.ret("result");out.append(r.finish())
     r=StringRoutine("identity",("object",));r.ret(call("retain","object"));out.append(r.finish())
     r=StringRoutine("to_list",("object",),("result","index","value"))
     r.set("result",call("new",32765));r.set("index",0)

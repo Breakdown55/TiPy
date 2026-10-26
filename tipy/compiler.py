@@ -16,6 +16,7 @@ def compile_source(source, *, optimize_graphics=True, optimization="aggressive")
     checked, symbols = check(tree)
     optimized, emitted_symbols, report = optimize_program(checked, symbols, optimization)
     assembly = generate(optimized, emitted_symbols, optimize_graphics=optimize_graphics)
+    from .assembly_size import estimate
     return {"tokens": tokens, "ast": tree, "checked": checked,
             "optimized": optimized, "optimization_report": report, "source_symbols": symbols,
-            "symbols": emitted_symbols, "assembly": assembly}
+            "symbols": emitted_symbols, "assembly": assembly,"estimated_bytes":estimate(assembly)}

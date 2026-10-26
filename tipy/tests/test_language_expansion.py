@@ -11,6 +11,17 @@ class LanguageExpansionTests(unittest.TestCase):
         r=self.compile('matrix=[[1,2],[3]]\nnames=["a","b"]\npair=(1,"a")\nd={"a":matrix}\ns={1,2}\nview=d.values()\n')
         self.assertEqual({n:s["type"] for n,s in r["symbols"].items()},dict(matrix="i16[][]",names="str[]",pair="tuple[i16,str]",d="dict[str,i16[][]]",s="set[i16]",view="view[values,dict[str,i16[][]]]"))
 
+    def test_native_numeric_types_keep_int_as_i16(self):
+        r=self.compile('int a=2\ni32 b=100000\nfloat c=1.1\nd=1/3\ne=128.0')
+        self.assertEqual({n:s["type"] for n,s in r["symbols"].items()},dict(a="i16",b="i32",c="float",d="float",e="float"))
+        with self.assertRaisesRegex(CompileError,"i16 literal range"):self.compile('x=100000')
+        with self.assertRaisesRegex(CompileError,"outside i32"):self.compile('i32 x=2147483648')
+
+    def test_class_fields_are_shared_only_through_instance_aliases(self):
+        r=self.compile('class Box:\n    def __init__(self,str text):\n        self.text=text\n    def read(self):\n        return self.text\na=Box("one")\nb=a\ntext=b.read()')
+        self.assertEqual(r["symbols"]["a"]["type"],"object[Box]")
+        self.assertEqual(r["symbols"]["text"]["type"],"str")
+
     def test_closure_types_survive_function_return(self):
         r=self.compile('def outer(int x):\n    def inner(int y):\n        return x+y\n    return inner\nf=outer(3)\nanswer=f(2)')
         self.assertTrue(r["symbols"]["f"]["type"].startswith("closure["))

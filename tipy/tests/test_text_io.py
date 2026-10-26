@@ -39,7 +39,7 @@ class TextIOTests(unittest.TestCase):
     def test_invalid_calls_keep_source_locations(self):
         cases = [('print("x",0)', 'expects'), ('input(0,1,2)', 'prompt must be text'),
                  ('print("x",True,0)', 'coordinates'), ('print([1],0,0)', 'print expects'),
-                 ('print(1.5,0,0)', 'print expects'), ('str x=1', 'Cannot assign'),
+                 ('print({1:2},0,0)', 'print expects'), ('str x=1', 'Cannot assign'),
                  ('str x="a"\nx=2', 'Cannot assign'), ('x="a"+1', 'String arithmetic'),
                  ('str items=["x",1]', 'Cannot assign'), ('int x=["a" for n in range(3)]', 'Cannot assign'),
                  ('print("é",0,0)', 'ASCII')]

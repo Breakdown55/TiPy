@@ -11,7 +11,7 @@ TOKEN = re.compile(
     r"|(?P<NEWLINE>\n)"
     r'''|(?P<FSTRING>[fF](?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'))'''
     r'''|(?P<STRING>"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')'''
-    r"|(?P<DECIMAL>[0-9]+\.[0-9]+)"
+    r"|(?P<DECIMAL>(?:[0-9]+\.[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)"
     r"|(?P<NUMBER>0[xX][0-9a-fA-F]+|[0-9]+)"
     r"|(?P<NAME>[A-Za-z_][A-Za-z_0-9]*)"
     r"|(?P<OP>->|==|!=|<<=|>>=|\*\*=|<=|>=|//=|\*=|/=|%=|\+=|-=|&=|\|=|\^=|<<|>>|\*\*|//|[=+*/%&|^~\-()<>:,.\[\]{}])"
@@ -52,12 +52,13 @@ def tokenize(source, *, expand_defines=True):
                 at_line_start = False
             if kind != "NEWLINE":
                 at_line_start = False
-            if kind == "NAME" and text in {"int", "i16", "u8", "bool", "void", "str", "dict", "tuple", "set"}:
+            if kind == "NAME" and text in {"int", "i16", "i32", "float", "u8", "bool", "void", "str", "dict", "tuple", "set"}:
                 token["kind"] = "TYPE"
             elif kind == "NAME" and text in {"True", "False"}:
                 token["kind"] = "BOOL"
             elif kind=="NAME" and text in {"None","is"}:token["kind"]=text.upper()
             elif kind=="NAME" and text=="yield":token["kind"]="YIELD"
+            elif kind=="NAME" and text=="class":token["kind"]="CLASS"
             elif kind == "NAME" and text in {"if", "elif", "else", "pass", "while", "break", "continue", "def", "return", "for", "in", "and", "or", "not", "del", "lambda", "nonlocal", "try", "except", "finally", "raise", "assert", "as"}:
                 token["kind"] = text.upper()
             elif kind == "NUMBER":

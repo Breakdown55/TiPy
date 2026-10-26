@@ -3,7 +3,7 @@
 from .list_runtime import Routine, add, sub, word, byte, call
 
 
-def routines(has_dict=True):
+def routines(has_dict=True,has_i32=False):
     out=[]
     r=Routine("optional_get",("object",),prefix="__obj_")
     r.if_(("eq","object",0),lambda:r.fail(17));r.ret(call("get","object",0));out.append(r.finish())
@@ -99,6 +99,7 @@ def routines(has_dict=True):
 
     r=Routine("compare",("left","right"),("index","limit","a","b","managed","comparison"),prefix="__obj_")
     r.if_(("eq","left","right"),lambda:r.ret(0))
+    if has_i32:r.if_(("eq",word(add("left",6)),32763),lambda:r.ret(("call","__obj_i32_compare","left","right")))
     if has_dict:r.if_(("eq",word(add("left",6)),32767),lambda:r.fail(14))
     r.set("limit",word(add("left",2)))
     r.if_(("ult",word(add("right",2)),"limit"),lambda:r.set("limit",word(add("right",2))))

@@ -1,5 +1,5 @@
 """Return-shape inference before call checking; definite assignment is separate."""
-from .types import is_dict,dict_types,is_tuple,tuple_types,is_set,element,iterable_element,is_iterator
+from .types import is_dict,dict_types,is_tuple,tuple_types,is_set,element,iterable_element,is_iterator,is_object
 import re
 
 
@@ -7,6 +7,7 @@ def infer_returns(tree):
     functions={n["name"]:n for n in tree["body"] if n["kind"]=="function"}
     automatic={name for name,f in functions.items() if f["return_type"]=="auto"}
     globals_={}
+    classes=tree.get("classes",{})
     def norm(t):return re.sub(r"\bint\b","i16",t)
     def merge(a,b):
         if not a:return b
@@ -23,7 +24,10 @@ def infer_returns(tree):
         if k in {"number","hash","cast_int"}:return "i16"
         if k in {"boolean","compare","compare_chain","and","or","not","membership"}:return "bool"
         if k in {"string","fstring","format_value"}:return "str"
-        if k=="decimal":return "fixed"
+        if k=="decimal":
+            from decimal import Decimal
+            return "fixed" if Decimal('-128')<=Decimal(n['value'])<=Decimal('127.99609375') else "float"
+        if k=="true_divide":return "float"
         if k=="conditional":return merge(expr(n["body"],scope),expr(n["alternative"],scope))
         if k=="name":return scope.get(n["name"],globals_.get(n["name"]))
         if k=="closure":
@@ -31,6 +35,9 @@ def infer_returns(tree):
             return f"closure[{n['function']}]"
         if k in {"add","subtract","multiply","floor_divide","modulo","negate"}:
             t=expr(n.get("left",n.get("value")),scope)
+            other=expr(n["right"],scope) if "right" in n else None
+            if "float" in {t,other}:return "float"
+            if "i32" in {t,other}:return "i32"
             return t[9:-1] if t and t.startswith("optional[") else t
         if k=="tuple":
             ts=[expr(v,scope) for v in n["values"]]
@@ -53,12 +60,16 @@ def infer_returns(tree):
             return t+"[]" if t else None
         if k=="call":
             name=n["name"]
+            if name in classes:return f"object[{name}]"
+            if name=="i32":return "i32"
+            if name=="float":return "float"
             if name in functions:
                 f=functions[name]
                 if f.get("generator"):
                     t=f.get("yield_type","auto");return f"iter[{norm(t)},generator,{name}]" if t!="auto" else None
                 t=f["return_type"];return norm(t) if t!="auto" else None
-            if name in {"int","len","abs","sum","min","max","hash","ord"}:return "i16"
+            if name in {"int","len","abs","sum","min","max","hash","ord","round","pow"}:return "i16"
+            if name=="divmod":return "tuple[i16,i16]"
             if name in {"input","str","chr","repr"}:return "str"
             if name=="set":
                 if not n["arguments"]:return "set[i16]"
@@ -71,11 +82,19 @@ def infer_returns(tree):
                 return e+"[]" if e else None
         if k=="method":
             t=expr(n["base"],scope)
+            if t and is_object(t):
+                name=classes[t[7:-1]]["methods"].get(n["name"]);f=functions.get(name)
+                return f["return_type"] if f and f["return_type"]!="auto" else None
             if n["name"]=="copy":return t
             if t and is_set(t):return t if n["name"] in {"union","intersection","difference","symmetric_difference"} else element(t) if n["name"]=="pop" else "void"
             if t=="str":return "str[]" if n["name"]=="split" else "str"
             if t and t.endswith("[]") and n["name"]=="pop":return t[:-2]
             if t and is_dict(t) and n["name"] in {"get","pop","setdefault"}:return dict_types(t)[1]
+        if k=="attribute":
+            t=expr(n["base"],scope)
+            if t and is_object(t):
+                meta=classes[t[7:-1]]
+                return meta["fields"].get(n["name"]) or f"closure[{meta['methods'][n['name']]}]" if n["name"] in meta["fields"] or n["name"] in meta["methods"] else None
         if k=="index":
             t=expr(n["base"],scope)
             if t=="str":return "str"

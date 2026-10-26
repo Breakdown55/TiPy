@@ -30,7 +30,7 @@ class Parser:
         return {"kind": "program", "body": self.statements("EOF")}
 
     def type_name(self):
-        name = self.take("TYPE")["value"]
+        name = self.take("NAME" if self.current["kind"]=="NAME" else "TYPE")["value"]
         if name in {"dict","tuple","set"}:
             if self.current["value"] != "[": return {"dict":"dict[int,int]","tuple":"tuple[]","set":"set[int]"}[name]
             self.take("OP", "[")
@@ -78,6 +78,13 @@ class Parser:
 
     def statement(self):
         start = self.current
+        if start["kind"]=="CLASS":
+            self.take("CLASS");name=self.take("NAME")["value"];bases=[]
+            if self.current["value"]=="(":
+                self.take("OP","(")
+                if self.current["value"]!=")":bases=self.targets()
+                self.take("OP",")")
+            return node("class",start,name=name,bases=bases,body=self.suite())
         if start["kind"]=="YIELD":
             self.take("YIELD");value=node("none",start) if self.current["kind"]=="NEWLINE" else self.expression_list()
             self.take("NEWLINE");return node("yield",start,value=value)
@@ -117,7 +124,7 @@ class Parser:
                     variadic=False
                     if self.current["value"]=="*":self.take("OP","*");variadic=True
                     parameter = self.current
-                    inferred = parameter["kind"] == "NAME"
+                    inferred = parameter["kind"] == "NAME" and self.tokens[self.index+1]["kind"]!="NAME"
                     parameter_type = "int" if inferred else self.type_name()
                     if self.current["value"] == "[":
                         self.take("OP", "[")
@@ -177,7 +184,7 @@ class Parser:
             self.take("PASS")
             self.take("NEWLINE")
             return node("pass", start)
-        if start["kind"] == "TYPE":
+        if start["kind"] == "TYPE" or start["kind"]=="NAME" and self.tokens[self.index+1]["kind"]=="NAME":
             type_name = self.type_name()
             name = self.take("NAME")["value"]
             self.take("OP", "=")
@@ -196,14 +203,14 @@ class Parser:
             if target["kind"] == "method":
                 self.take("NEWLINE")
                 return node("expression_statement", start, value=target)
-            if target["kind"] != "index":
+            if target["kind"] not in {"index","attribute"}:
                 raise CompileError("Expected an array element assignment", start)
             operator = self.take("OP")
             if operator["value"] not in {"=", "+=", "-=", "*=", "//=", "%=", "&=", "|=", "^=", "<<=", ">>=", "**="}:
                 raise CompileError("Expected =, += or -=", operator)
             value = self.expression()
             self.take("NEWLINE")
-            return node("index_assign", start, target=target, operator=operator["value"], value=value)
+            return node("attribute_assign" if target["kind"]=="attribute" else "index_assign", start, target=target, operator=operator["value"], value=value)
         if self.current["value"] == "(":
             call = self.call(start)
             self.take("NEWLINE")
@@ -309,9 +316,9 @@ class Parser:
 
     def term(self):
         result = self.unary()
-        while self.current["value"] in {"%", "*", "//"}:
+        while self.current["value"] in {"%", "*", "//", "/"}:
             operator = self.take("OP")
-            result = node({"%": "modulo", "*": "multiply", "//": "floor_divide"}[operator["value"]], operator, left=result, right=self.unary())
+            result = node({"%": "modulo", "*": "multiply", "//": "floor_divide", "/":"true_divide"}[operator["value"]], operator, left=result, right=self.unary())
         return result
 
     def unary(self):
@@ -364,7 +371,7 @@ class Parser:
         if token["kind"] == "DECIMAL":
             self.take("DECIMAL")
             return node("decimal", token, value=token["value"])
-        if token["kind"] == "TYPE" and token["value"] in {"int", "dict", "str", "tuple", "set"}:
+        if token["kind"] == "TYPE" and token["value"] in {"int", "i32", "float", "dict", "str", "tuple", "set"}:
             self.take("TYPE")
             return self.postfix(self.call(token))
         if token["value"] == "{":
@@ -467,8 +474,10 @@ class Parser:
             else:
                 self.take("OP", ".")
                 method = self.take("NAME")
-                call = self.call(method)
-                result = node("method", token, base=result, name=method["value"], arguments=call["arguments"])
+                if self.current["value"]=="(":
+                    call = self.call(method)
+                    result = node("method", token, base=result, name=method["value"], arguments=call["arguments"])
+                else:result=node("attribute",token,base=result,name=method["value"])
         return result
 
     def comprehension_clauses(self):

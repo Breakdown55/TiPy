@@ -129,7 +129,7 @@ export class Ti84Runner {
         const result = assemble({ 'main.asm': source, 'ti84.inc': INCLUDE }, { entryPathname: 'main.asm' })
         if (result.hasErrors()) throw new Error(result.diagnostics.map(d => `Line ${(d.lineNumber ?? 0) + 1}: ${d.message}`).join('\n'))
         if (!result.segments().length) throw new Error('The source contains no executable code')
-        for (const segment of result.segments()) if (segment.address < 0x8000 || segment.address + segment.bytes.length > 0xfffe) throw new Error('Place code and data in RAM, between 0x8000 and 0xFFFD')
+        for (const segment of result.segments()) if (segment.address < 0x8000 || segment.address + segment.bytes.length > 0xfffe) throw new Error(`Place code and data in RAM, between 0x8000 and 0xFFFD (${segment.bytes.length.toLocaleString('en-US')} bytes at 0x${segment.address.toString(16).toUpperCase()})`)
         this.machine.loadAssembly(result)
         // RST 28 is intercepted at the CPU boundary; IM1 returns through EI / RETI.
         this.flash.set([0xfb, 0xed, 0x4d], 0x38)

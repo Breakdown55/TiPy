@@ -17,6 +17,7 @@ function execute(source, measurements) {
     assert.equal(processResult.status,0,processResult.stderr)
     const result = JSON.parse(processResult.stdout)
     const runner = new Ti84Runner(result.assembly)
+    assert.ok(result.estimated_bytes>=runner.machineBytes,'RAM sizing must never underestimate assembled image bytes')
     if (measurements?.seedGraph) runner.machine.memory.set(measurements.seedGraph,0x9340)
     const frames = []
     if (measurements) {
@@ -59,6 +60,8 @@ function execute(source, measurements) {
     const decode=(address,type)=>{
         if(type==='u8' || type==='bool')return mem[address]
         const raw=word(address)
+        if(type==='i32')return (word(word(raw)) | (word(word(raw)+2)<<16))
+        if(type==='float')return new DataView(mem.buffer,mem.byteOffset+word(raw),4).getFloat32(0,true)
         if(type==='none')return null
         if(type.startsWith('optional[') && !type.endsWith('[]'))return raw?decode(word(raw),type.slice(9,-1)):null
         if(type==='str')return String.fromCharCode(...mem.slice(word(raw),word(raw)+word(raw+2)))
@@ -87,6 +90,181 @@ function execute(source, measurements) {
     for (const [name,symbol] of Object.entries(result.symbols)) values[name]=decode(runner.assembly.asm.scopes[0].symbols.get(symbol.label).value,symbol.type)
     return values
 }
+
+test('Native binary32 agrees with rounded arithmetic across varied exponents and IEEE edge cases', () => {
+    const cases=[[1.0000001192092896,0.9999999403953552],[16777216,1],[-16777216,1],[1e-20,-1e-20],[3.4e38,1.0001],[1e-38,1e-7],[-1e20,3.14],[0.125,-0.5],[123456.75,0.00003125],[1e-30,1e30],[1.17549435e-38,0.99999994],[1.40129846e-45,2]]
+    const source=cases.map(([a,b],i)=>`float a${i}=${Math.fround(a).toExponential(16)}\nfloat b${i}=${Math.fround(b).toExponential(16)}\ns${i}=a${i}+b${i}\nd${i}=a${i}-b${i}\nm${i}=a${i}*b${i}\nq${i}=a${i}/b${i}\n`).join('')
+    const v=execute(source,{maxSlices:16000})
+    for(let i=0;i<cases.length;i++) {
+        const [a,b]=cases[i].map(Math.fround)
+        for(const [prefix,expected] of [['s',Math.fround(a+b)],['d',Math.fround(a-b)],['m',Math.fround(a*b)],['q',Math.fround(a/b)]])assert.equal(v[prefix+i],expected,`${prefix}: ${a}, ${b}`)
+    }
+    const edge=execute(`nan=float("nan")
+inf=float("inf")
+bool unordered=nan!=nan
+bool ordered=nan==nan
+bool greater=inf>float(0)
+bool less=float(-0.0)<float(0.0)
+tie=float("1.000000059604644775390625")
+above=float("1.000000059604644775390626")
+text=str(inf)
+nan_text=str(nan)
+power=float(2)**-3
+`,{maxSlices:16000})
+    assert.deepEqual([edge.unordered,edge.ordered,edge.greater,edge.less],[1,0,1,0]);assert.equal(edge.tie,1);assert.equal(edge.above,Math.fround(1+2**-23));assert.equal(edge.text,'inf');assert.equal(edge.nan_text,'nan')
+    assert.equal(edge.power,0.125)
+    const integers=execute('rounded=round(12345,-2)\nwide_rounded=round(i32(1234567890),-5)',{maxSlices:4000})
+    assert.equal(integers.rounded,12300);assert.equal(integers.wide_rounded,1234600000)
+})
+
+test('Native decimal parsing and float rounding are independent of the host', () => {
+    const v=execute(`a=float("1.1")
+b=float(" -2.675e+0 ")
+c=float("1e-45")
+d=float("3.4028235e38")
+e=round(float(2.5))
+f=round(float(3.5))
+g=round(float(-2.5))
+h=round(float(2.675),2)
+i=round(float(12345.0),-2)
+text=str(h)
+`,{maxSlices:20000})
+    assert.deepEqual([v.a,v.b,v.c,v.d],[Math.fround(1.1),Math.fround(-2.675),Math.fround(1e-45),Math.fround(3.4028235e38)])
+    assert.deepEqual([v.e,v.f,v.g,v.h,v.i],[2,4,-2,Math.fround(2.67),12300]);assert.equal(v.text,'2.67')
+})
+
+test('Native binary32 text uses exact decimal digits and fixed precision rounding', () => {
+    const v=execute(`a=str(float(1.1))
+b=str(float(-0.0))
+c=str(float(1e20))
+d=str(float(1e-8))
+e=f"{float(2.675):.2f}"
+f=f"{float(12.5):08.2f}"
+g=f"{float(9.999):.2f}"
+h=f"{float(-0.001):.2f}"
+`,{maxSlices:16000})
+    assert.deepEqual([v.a,v.b,v.c,v.d,v.e,v.f,v.g,v.h],['1.1','-0.0','1e+20','1e-08','2.67','00012.50','10.00','-0.00'])
+})
+
+test('Native binary32 arithmetic handles signs, rounding, large values and subnormals', () => {
+    const v=execute(`float a=1.1
+float b=-3.25
+sum=a+b
+diff=a-b
+product=a*b
+quotient=a/b
+large=float(1e20)*float(1e10)
+small=float(1e-30)*float(1e-10)
+cancel=float(1.0)-float(1.0)
+converted=float(i32(2147483647))
+from_fixed=float(1.5)
+integer=int(float(-12.75))
+wide=i32(float(100000.75))
+bool less=a<b
+bool greater=a>b
+bool equal=float(0.0)==float(-0.0)
+`,{maxSlices:12000})
+    const a=Math.fround(1.1),b=Math.fround(-3.25)
+    assert.deepEqual([v.sum,v.diff,v.product,v.quotient],[Math.fround(a+b),Math.fround(a-b),Math.fround(a*b),Math.fround(a/b)])
+    assert.equal(v.large,Math.fround(Math.fround(1e20)*Math.fround(1e10)));assert.equal(v.small,Math.fround(Math.fround(1e-30)*Math.fround(1e-10)))
+    assert.equal(v.cancel,0);assert.equal(v.converted,Math.fround(2147483647));assert.equal(v.from_fixed,1.5);assert.equal(v.integer,-12);assert.equal(v.wide,100000)
+    assert.deepEqual([v.less,v.greater,v.equal],[0,1,1])
+})
+
+test('Native i32 arithmetic keeps signed 32-bit values behind the word-sized calling convention', () => {
+    const v=execute(`i32 a=100000
+i32 b=-70000
+sum=a+b
+diff=a-b
+product=a*b
+quotient=a//b
+remainder=a%b
+left=a<<10
+right=b>>5
+inverse=~a
+negative=-a
+power=i32(3)**15
+bool less=b<a
+bool equal=a==i32(100000)
+text=str(a)
+min_text=str(i32(-2147483648))
+max_text=str(i32(2147483647))
+hex_text=hex(i32(-2147483648))
+formatted=f"{a:012d}"
+ordered=sorted([i32(65535),i32(-1),i32(65536)])
+def increment(i32 value) -> i32:
+    return value+1
+returned=increment(a)
+low=int(a)
+`,{maxSlices:12000})
+    assert.deepEqual([v.a,v.b,v.sum,v.diff,v.product,v.quotient,v.remainder],[100000,-70000,30000,170000,Math.imul(100000,-70000),-2,-40000])
+    assert.deepEqual([v.left,v.right,v.inverse,v.negative,v.power,v.less,v.equal,v.returned,v.low],[102400000,-2188,~100000,-100000,14348907,1,1,100001,-31072])
+    assert.equal(v.text,'100000');assert.equal(v.min_text,'-2147483648');assert.equal(v.max_text,'2147483647')
+    assert.equal(v.hex_text,'-0x80000000');assert.equal(v.formatted,'000000100000');assert.deepEqual(v.ordered,[-1,65535,65536])
+})
+
+test('Native scalar division, modular power, divmod and ties-to-even rounding', () => {
+    const v=execute(`calls=[]
+def number(int x):
+    calls.append(x)
+    return x
+pair=divmod(number(-17),number(5))
+q,r=pair
+positive=pow(32760,17,32749)
+negative=pow(32760,17,-32749)
+power=pow(3,5)
+a=round(2.5)
+b=round(3.5)
+c=round(-2.5)
+d=round(-3.5)
+fraction=7/2
+negative_fraction=-7/2
+mixed=200/100.0
+reverse=100.0/200
+text=str(fraction)
+negative_text=str(negative_fraction)
+`,{maxSlices:7000})
+    assert.deepEqual(v.calls,[-17,5]);assert.deepEqual([v.q,v.r,v.power,v.a,v.b,v.c,v.d],[-4,3,243,2,4,-2,-4])
+    const modulus=32749n,power=32760n**17n
+    assert.equal(v.positive,Number(power%modulus));assert.equal(v.negative,Number(power%modulus-modulus));assert.equal(v.text,'3.5');assert.equal(v.negative_text,'-3.5')
+    assert.equal(v.mixed,2);assert.equal(v.reverse,0.5)
+})
+
+test('Native classes own typed attributes and methods preserve instance state and aliases', () => {
+    const v=execute(`class Counter:
+    def __init__(self,int start,str name="counter"):
+        self.value=start
+        self.name=name
+        self.history=[start]
+    def add(self,int amount=1):
+        self.value+=amount
+        self.history.append(self.value)
+        return self.value
+    def rename(self,str text):
+        self.name=text
+    def label(self):
+        return self.name+":"+str(self.value)
+first=Counter(10,"A")
+second=Counter(100)
+alias=first
+a=first.add(2)
+b=alias.add()
+c=second.add(7)
+callback=first.add
+d=callback(3)
+first.rename("B")
+label=first.label()
+history=first.history.copy()
+bool shared=first is alias
+bool distinct=first!=second
+temporary=Counter(0)
+for repetition in range(60):
+    temporary=Counter(repetition)
+    temporary.rename("name"+str(repetition))
+last=temporary.label()
+`,{maxSlices:10000})
+    assert.deepEqual([v.a,v.b,v.c,v.d],[12,13,107,16]);assert.equal(v.label,'B:16');assert.deepEqual(v.history,[10,12,13,16]);assert.equal(v.shared,1);assert.equal(v.distinct,1);assert.equal(v.last,'name59:59')
+})
 
 test('Generator stacks and nested definition-time defaults remain independent across repeated calls', () => {
     const v=execute(`def factory(int initial):

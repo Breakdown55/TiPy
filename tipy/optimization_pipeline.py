@@ -17,7 +17,7 @@ def walk(item):
 def reachable(tree):
     functions = {item["label"]: item for item in tree["body"] if item["kind"] == "function"}
     def calls(items):
-        return {node["symbol"] for node in walk(items) if node.get("kind") in {"call","closure_call","closure","function_ref","iterator_map"} and "symbol" in node and not node.get("unreachable")}
+        return {node["symbol"] for node in walk(items) if node.get("kind") in {"call","closure_call","closure","function_ref","iterator_map","bound_method"} and "symbol" in node and not node.get("unreachable")}
     live = calls([item for item in tree["body"] if item["kind"] != "function"])
     pending = list(live)
     while pending:

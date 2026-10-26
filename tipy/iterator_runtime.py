@@ -59,7 +59,7 @@ def next_routine(type_name,label,ensure,functions):
                 exhausted()
             r.if_(("ne",word("@__iterator_exhausted"),0),stop)
         function=functions[parts[0][8:-1]];args=[]
-        if function.get("closure_env"):
+        if function.get("closure_env") or function.get("bound_method"):
             args.append(call("retain",("call","__obj_read","callback",1)))
         for i,t in enumerate(source_types):
             arg=f"arg{i}"
