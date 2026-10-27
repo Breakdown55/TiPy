@@ -239,8 +239,10 @@ test('Camera example keeps its rendered output with a smaller code and data budg
     const m={project:true,optimization:'aggressive',maxSlices:20000}
     execute(readFileSync(resolve('../../examples/camera.tip'),'utf8'),m)
     const heap=Number(m.assembly.match(/__heap_start:\s*defs (\d+)/)[1])
-    assert.ok(m.bytes-heap<=19400,'Camera demo code/data must fit its reduced budget')
-    assert.ok(heap>=4608,'Code savings must remain available for allocations')
+    // Exact fast arithmetic and the bounded projection cache trade some of
+    // the previous minimum-size budget for much cheaper animated frames.
+    assert.ok(m.bytes-heap<=21400,'Camera demo must fit its speed-optimized code/data budget')
+    assert.ok(heap>=2560,'The faster camera must retain useful allocation space')
     assert.equal(m.screen.reduce((sum,pixel)=>sum+pixel,0),180)
 })
 
@@ -270,6 +272,45 @@ test('Held arrows turn and pitch the room; releasing stops movement and Clear ex
     assert.notDeepEqual(m.frames[2],m.frames[3])
     assert.deepEqual(m.frames[3],m.frames[4])
     assert.deepEqual(m.frames[4],m.frames[5])
+    assert.ok(m.tStates<24_000_000,'Six room frames must stay within the optimized native cycle budget')
+})
+
+test('Fast camera multiplication and division remain exact across word boundaries',()=>{
+    const p=spawnSync(process.env.TIPY_PYTHON || 'python',['-c',"from tipy.camera_math import routines,link; print(link(routines(),{'__gfx_u_mul32','__gfx_u_div32','__gfx_u_div64'}))"],{cwd:resolve('../..'),encoding:'utf8'})
+    assert.equal(p.status,0,p.stderr)
+    const values=[0,1,255,256,32767,32768,65535,65536,65537,0x7fffffff,0x80000000,0xffffffff]
+    let seed=123456789
+    const random=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed}
+    const pairs=values.map((a,i)=>[a,values[values.length-1-i]])
+    pairs.push([65535,65535],[0xffffffff,65535],[65535,0xffffffff],[0xffffffff,0xffffffff])
+    for(let i=0;i<48;i++)pairs.push([random(),i%3===0?random()&65535:random()])
+    const instructions=[],data=[],checks=[]
+    const words=(n,count)=>Array.from({length:count},(_,i)=>Number((BigInt(n)>>BigInt(i*16))&65535n)).join(',')
+    for(const [i,[a,b]] of pairs.entries()) {
+        const d=b || 1,n=(BigInt(a)<<32n)|BigInt(b)
+        // Choose a denominator above the numerator's high word to keep the
+        // exact 64/32 quotient within the documented unsigned 32-bit range.
+        const divisor=a===0xffffffff?0xffffffff:Math.max(d,a+1)
+        for(const [helper,args] of [
+            ['u_mul32',[a&65535,a>>>16,b&65535,b>>>16,'p'+i]],
+            ['u_div32',['n'+i,'d'+i,'q'+i,'r'+i]],
+            ...(a===0xffffffff?[]:[['u_div64',['w'+i,'v'+i,'s'+i,'t'+i]]])]) {
+            for(const arg of args)instructions.push('ld hl,'+arg,'push hl')
+            instructions.push('call __gfx_'+helper,...args.map(()=>'pop bc'))
+        }
+        data.push('p'+i+': defs 8,0','n'+i+': dw '+words(a,2),'d'+i+': dw '+words(d,2),
+            'q'+i+': defs 4,0','r'+i+': defs 4,0','w'+i+': dw '+words(n,4),'v'+i+': dw '+words(divisor,2),'s'+i+': defs 4,0','t'+i+': defs 4,0')
+        checks.push(['p'+i,4,BigInt(a)*BigInt(b)],['q'+i,2,BigInt(a)/BigInt(d)],['r'+i,2,BigInt(a)%BigInt(d)])
+        if(a!==0xffffffff)checks.push(['s'+i,2,n/BigInt(divisor)],['t'+i,2,n%BigInt(divisor)])
+    }
+    const runner=new Ti84Runner(['        org 0x9d95',...instructions.map(line=>'        '+line),'        ret',p.stdout,'__arr_fail:\n        halt',...data].join('\n'))
+    for(let i=0;i<2000&&!runner.done;i++)runner.runSlice()
+    assert.equal(runner.done,true);assert.equal(runner.machine.z80.regs.sp,0)
+    for(const [label,count,expected] of checks){
+        const address=runner.assembly.asm.scopes[0].symbols.get(label).value
+        let value=0n;for(let j=0;j<count*2;j++)value|=BigInt(runner.machine.memory[address+j])<<BigInt(j*8)
+        assert.equal(value,expected,label)
+    }
 })
 
 function expectedCurve(cx,cy,rx,ry,filled) {

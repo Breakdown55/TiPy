@@ -21,12 +21,16 @@ def invoke(name,*args):return ("call","__gfx_"+{'line':'styled_line','h_line':'s
 def words(prefix,count):return tuple(prefix+str(i) for i in reversed(range(count)))
 
 
-def _multiply(wide):
+def _multiply(wide,early_exit=False):
     size,steps=(4,32) if wide else (2,16)
     r=ShapeRoutine("mul32" if wide else "mul16",("a0","a1","b0","b1","out") if wide else ("a0","b0","out"),words("m",size)+words("q",2 if wide else 1)+words("v",size))
     for i in range(size):r.set("m"+str(i),"a"+str(i) if i<(2 if wide else 1) else 0);r.set("v"+str(i),0)
     for i in range(2 if wide else 1):r.set("q"+str(i),"b"+str(i))
-    loop,skip=r.label(),r.label();r.emit(f"ld b,{steps}");r.mark(loop)
+    loop,skip=r.label(),r.label();done=r.label();r.emit(f"ld b,{steps}");r.mark(loop)
+    if early_exit:
+        offset=r.slots['q0'];r.emit(f'ld a,(ix{offset:+d})')
+        for i in range(1,4 if wide else 2):r.emit(f'or (ix{offset+i:+d})')
+        r.emit(f'jp z,{done}')
     r.emit(f"bit 0,(ix{r.slots['q0']:+d})",f"jp z,{skip}")
     for i in range(size):
         a,b=r.slots['v'+str(i)],r.slots['m'+str(i)]
@@ -36,7 +40,7 @@ def _multiply(wide):
         offset=r.slots['q0']+i;r.emit(f"{'srl' if i==(3 if wide else 1) else 'rr'} (ix{offset:+d})")
     for i in range(size*2):
         offset=r.slots['m0']+i;r.emit(f"{'sla' if i==0 else 'rl'} (ix{offset:+d})")
-    r.emit('dec b',f"jp nz,{loop}");r.expr('out')
+    r.emit('dec b',f"jp nz,{loop}");r.mark(done);r.expr('out')
     for i in range(size):
         o=r.slots['v'+str(i)];r.emit(f"ld e,(ix{o:+d})",f"ld d,(ix{o+1:+d})","ld (hl),e","inc hl","ld (hl),d","inc hl")
     r.ret();return r.finish()

@@ -107,12 +107,19 @@ def routines():
     def row():
         r.zero('sum',4)
         for i,axis in enumerate('xyz'):
-            r.extend('c',word(add('base',2*i)));r.expr(invoke('s_mul32',slot('d'+axis+'0'),slot('c0'),slot('p0')));r.binary('sum','sum','p',count=4,checked=True)
+            skip=r.label();r.extend('c',word(add('base',2*i)))
+            r.expr('c0');r.emit('ld a,h','or l',f'jp z,{skip}')
+            r.expr('d'+axis+'0');r.emit('ld a,h','or l');r.expr('d'+axis+'1');r.emit('or h','or l',f'jp z,{skip}')
+            r.expr(invoke('s_mul32',slot('d'+axis+'0'),slot('c0'),slot('p0')));r.binary('sum','sum','p',count=4,checked=True);r.mark(skip)
         r.save('sum','out');r.set('out',add('out',4));r.set('base',add('base',6));r.set('row',add('row',1))
     r.while_(('ult','row',3),row);r.ret();out.append(r.finish())
 
     # A 64/64 divider with a 32-bit quotient, for subpixel focal lengths.
     r=NativeRoutine('project_div',('n','d','out'),words('q',2)+words('rem',4)+words('den',4))
+    def narrow_divide():r.expr(invoke('u_div32','n','d','out',0));r.ret()
+    def narrow_numerator():
+        r.if_(('eq',word(add('n',4)),0),lambda:r.if_(('eq',word(add('n',6)),0),narrow_divide))
+    r.if_(('eq',word(add('d',4)),0),lambda:r.if_(('eq',word(add('d',6)),0),narrow_numerator))
     r.load('q','n');r.zero('rem',4);r.load('rem',add('n',4));r.load('den','d',4)
     good,bad=r.label(),r.label();r.compare('rem','den',good,bad,bad,False,4);r.mark(bad);r.fail(14);r.mark(good)
     loop,subtract,keep,again=r.label(),r.label(),r.label(),r.label();r.emit('ld b,32');r.mark(loop);r.shift('q',False)
@@ -121,7 +128,36 @@ def routines():
     r.mark(subtract);r.binary('rem','rem','den',True,4);r.emit(f'set 0,(ix{r.slots["q0"]:+d})');r.mark(keep);r.mark(again);r.emit('dec b',f'jp nz,{loop}')
     r.save('q','out');r.ret();out.append(r.finish())
 
-    r=NativeRoutine('cam_project',('point',),words('v',2)+words('focal',2)+words('n',4)+words('den',4)+words('half',4)+words('q',2)+words('center',2)+('negative',))
+    out.append('''__gfx_projection_cache_count: dw 0
+__gfx_projection_cache_mode: dw 0
+__gfx_projection_cache_focal: dw 0
+__gfx_projection_cache_next: dw __gfx_projection_cache_records
+__gfx_projection_cache_records: defs 320,0
+__gfx_projection_cache_end:''')
+    r=NativeRoutine('cam_project',('point',),('record','i'))
+    def reset_projection_cache():
+        r.write('@__gfx_projection_cache_count',0);r.write('@__gfx_projection_cache_next','@__gfx_projection_cache_records')
+        r.write('@__gfx_projection_cache_mode',word('@__gfx_cam_enabled'));r.write('@__gfx_projection_cache_focal',word('@__gfx_cam_focal'))
+    r.if_(('ne',word('@__gfx_projection_cache_mode'),word('@__gfx_cam_enabled')),reset_projection_cache)
+    r.if_(('ne',word('@__gfx_projection_cache_focal'),word('@__gfx_cam_focal')),reset_projection_cache)
+    r.set('record','@__gfx_projection_cache_records');r.set('i',0)
+    def probe():
+        mismatch,compare=r.label(),r.label()
+        r.expr('point');r.emit('push hl');r.expr('record');r.emit('ex de,hl','pop hl','ld b,12');r.mark(compare)
+        r.emit('ld a,(de)','cp (hl)',f'jp nz,{mismatch}','inc hl','inc de',f'djnz {compare}')
+        r.expr('point');r.emit('ex de,hl','ld bc,8','ldir');r.ret()
+        r.mark(mismatch);r.set('record',add('record',20));r.set('i',add('i',1))
+    r.while_(('ult','i',word('@__gfx_projection_cache_count')),probe)
+    r.set('record',word('@__gfx_projection_cache_next'))
+    r.expr('point');r.emit('push hl');r.expr('record');r.emit('ex de,hl','pop hl','ld bc,12','ldir')
+    r.expr(invoke('cam_project_compute','point'))
+    r.expr('point');r.emit('push hl');r.expr(add('record',12));r.emit('ex de,hl','pop hl','ld bc,8','ldir')
+    r.set('record',add('record',20));r.if_(('eq','record','@__gfx_projection_cache_end'),lambda:r.set('record','@__gfx_projection_cache_records'))
+    r.write('@__gfx_projection_cache_next','record')
+    r.if_(('ult',word('@__gfx_projection_cache_count'),16),lambda:r.write('@__gfx_projection_cache_count',add(word('@__gfx_projection_cache_count'),1)))
+    r.ret();out.append(r.finish())
+
+    r=NativeRoutine('cam_project_compute',('point',),words('v',2)+words('focal',2)+words('n',4)+words('den',4)+words('half',4)+words('q',2)+words('center',2)+('negative',))
     def ortho():
         for axis in (0,1):
             r.load('v',field('point',axis))
@@ -154,7 +190,7 @@ def routines():
         lt,gt,end=r.label(),r.label(),r.label();r.compare('v',other,lt,lt,gt);r.mark(lt);r.binary(target,other,'v',True);r.emit(f'jp {end}');r.mark(gt);r.binary(target,'v',other,True);r.mark(end)
     r.set('index',0)
     def coordinate():
-        r.expr(invoke('lerp32',add('outside','index'),add('inside','index'),slot('n0'),slot('d0'),add('outside','index')));r.set('index',add('index',4))
+        r.if_(('ne','index','offset'),lambda:r.expr(invoke('lerp32',add('outside','index'),add('inside','index'),slot('n0'),slot('d0'),add('outside','index'))));r.set('index',add('index',4))
     r.while_(('ult','index',12),coordinate);r.save('plane',add('outside','offset'));r.ret(1);out.append(r.finish())
 
     r=NativeRoutine('cam_prepare_line',('a','b','width'),('half',)+words('bound',2))

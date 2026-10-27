@@ -55,7 +55,94 @@ class NativeRoutine(ShapeRoutine):
 
 
 def routines():
-    out=[_multiply(True).replace('__gfx_mul32','__gfx_u_mul32')]
+    wide=_multiply(True,early_exit=True).replace('__gfx_mul32','__gfx_u_mul32_wide')
+    # Most camera products are 16x16 (coordinates and Q1.14 basis rows).
+    # Keep the exact 64-bit fallback for large clipping/projection operands.
+    out=[wide,'''__gfx_u_mul32:
+        ld hl,4
+        add hl,sp
+        ld a,(hl)
+        inc hl
+        or (hl)
+        inc hl
+        inc hl
+        inc hl
+        or (hl)
+        inc hl
+        or (hl)
+        jp nz,__gfx_u_mul32_mixed
+        inc hl
+        ld e,(hl)
+        inc hl
+        ld d,(hl)
+        ld hl,6
+        add hl,sp
+        ld c,(hl)
+        inc hl
+        ld b,(hl)
+        ld a,d
+        or e
+        jr z,__gfx_u_mul16_zero
+        ld a,b
+        or c
+        jr z,__gfx_u_mul16_zero
+        ld hl,0
+        ld a,16
+__gfx_u_mul16_loop:
+        add hl,hl
+        rl e
+        rl d
+        jr nc,__gfx_u_mul16_skip
+        add hl,bc
+        jr nc,__gfx_u_mul16_skip
+        inc de
+__gfx_u_mul16_skip:
+        dec a
+        jr nz,__gfx_u_mul16_loop
+        jr __gfx_u_mul16_store
+__gfx_u_mul16_zero:
+        ld hl,0
+        ld de,0
+__gfx_u_mul16_store:
+        push hl
+        ld hl,4
+        add hl,sp
+        ld c,(hl)
+        inc hl
+        ld b,(hl)
+        pop hl
+        ld a,l
+        ld (bc),a
+        inc bc
+        ld a,h
+        ld (bc),a
+        inc bc
+        ld a,e
+        ld (bc),a
+        inc bc
+        ld a,d
+        ld (bc),a
+        inc bc
+        xor a
+        ld (bc),a
+        inc bc
+        ld (bc),a
+        inc bc
+        ld (bc),a
+        inc bc
+        ld (bc),a
+        ret''']
+    r=NativeRoutine('u_mul32_mixed',('a0','a1','b0','b1','out'),words('p',4)+words('q',4)+('temp',))
+    r.if_(('ne','a1',0),lambda:r.if_(('ne','b1',0),lambda:(r.expr(invoke('u_mul32_wide','a0','a1','b0','b1','out')),r.ret())))
+    def swap():
+        r.set('temp','a0');r.set('a0','b0');r.set('a1','b1');r.set('b0','temp')
+    r.if_(('ne','b1',0),swap)
+    r.expr(invoke('u_mul32','a0',0,'b0',0,slot('p0')))
+    r.expr(invoke('u_mul32','a1',0,'b0',0,slot('q0')))
+    for i in range(2):
+        r.expr('p'+str(i+1));r.emit('push hl');r.expr('q'+str(i));r.emit('ex de,hl','pop hl','add hl,de' if i==0 else 'adc hl,de');r._store('p'+str(i+1))
+    r.save('p','out',4);r.ret();out.append(r.finish())
+
     # Register ABI: HL=left, DE=right, BC=result. Pair increments preserve
     # carry, so the same kernels work in-place without temporary buffers.
     for subtract in (False,True):
@@ -91,9 +178,23 @@ __gfx_neg_loop:
     r.expr(invoke('u_mul32','x0','x1','y0','y1',slot('p0')))
     r.if_(('ne','negative',0),lambda:r.negate('p',4));r.save('p','out',4);r.ret();out.append(r.finish())
 
+    r=NativeRoutine('u_div32',('n','d','q','remainder'),words('num',2)+words('den',2)+words('quot',2)+words('bit',2))
+    r.load('num','n');r.load('den','d');r.zero('quot');r.zero('bit');r.set('bit0',1)
+    r.if_(('eq','den0',0),lambda:r.if_(('eq','den1',0),lambda:r.fail(14)))
+    align,divide,subtract,shift,done=[r.label() for _ in range(5)]
+    r.mark(align);r.compare('num','den',divide,divide,shift,False)
+    r.mark(shift);r.if_(('negative','den1'),lambda:r.emit(f'jp {divide}'))
+    r.shift('den',False);r.shift('bit',False);r.emit(f'jp {align}')
+    r.mark(divide);r.compare('num','den',done,subtract,subtract,False)
+    r.mark(subtract);r.binary('num','num','den',True);r.binary('quot','quot','bit')
+    r.mark(done);r.shift('den');r.shift('bit')
+    r.expr('bit0');r.emit('ld a,h','or l');r.expr('bit1');r.emit('or h','or l',f'jp nz,{divide}')
+    r.save('quot','q');r.if_(('ne','remainder',0),lambda:r.save('num','remainder'));r.ret();out.append(r.finish())
+
     r=NativeRoutine('u_div64',('n','d','q','remainder'),words('quot',2)+words('rem',2)+words('den',2))
     r.load('quot','n');r.load('rem',add('n',4));r.load('den','d')
     ok,bad=r.label(),r.label();r.compare('rem','den',ok,bad,bad,False);r.mark(bad);r.fail(14);r.mark(ok)
+    r.if_(('eq','rem0',0),lambda:r.if_(('eq','rem1',0),lambda:(r.expr(invoke('u_div32','n','d','q','remainder')),r.ret())))
     loop,subtract,store,keep,again=r.label(),r.label(),r.label(),r.label(),r.label();r.emit('ld b,32');r.mark(loop)
     r.shift('quot',False)
     for i in range(4):r.emit(f'rl (ix{r.slots["rem0"]+i:+d})')
