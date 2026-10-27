@@ -191,7 +191,15 @@ $('execute').onclick = () => {
         updateControls()
     } catch (error) { stop(); status(error.message,true) }
 }
-$('pause').onclick = () => { if (!runner) return; running = !running; if (!running) releaseAll(); lastTime = 0; status(running ? 'Running' : 'Paused'); updateControls() }
+$('pause').onclick = () => {
+    if (!runner) return
+    running = !running
+    if (running) $('calculator').focus({preventScroll:true})
+    else releaseAll()
+    lastTime = 0
+    status(running ? 'Running' : 'Paused')
+    updateControls()
+}
 $('source').oninput = save
 $('source').onkeydown = event => {
     if (event.key === 'Tab' && !$('source').readOnly) { event.preventDefault(); $('source').setRangeText('    ',$('source').selectionStart,$('source').selectionEnd,'end'); save() }
@@ -245,7 +253,13 @@ for (const [label,code] of KEYS) {
     buttons.set(code,button)
     $('keypad').append(button)
 }
-$('calculator').addEventListener('keydown',event => {
+$('lcd').addEventListener('pointerdown',()=>$('calculator').focus({preventScroll:true}))
+document.addEventListener('keydown',event => {
+    const inCalculator=$('calculator').contains(event.target)
+    const editing=event.target.matches('input,textarea,select') || event.target.isContentEditable
+    // Arrow controls also work after clicking non-editable UI outside the
+    // calculator. Keep editor navigation and browser shortcuts intact.
+    if (!inCalculator && (!running || editing || !event.key.startsWith('Arrow') || event.ctrlKey || event.altKey || event.metaKey)) return
     if (event.target.tagName === 'BUTTON' && (event.key === ' ' || event.key === 'Enter')) return
     const code = HOST_KEYS[event.key]
     if (code === undefined) return
