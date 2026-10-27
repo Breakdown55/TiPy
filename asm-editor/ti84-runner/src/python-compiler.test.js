@@ -388,18 +388,19 @@ test('Compact room projection remains within one LCD pixel of the reference rend
     }
 })
 
-test('ION DASH starts, moves, dashes, collects a cell, and restores the CPU clock',()=>{
+for(const gameFile of ['ion_dash','ion_dash_3d']) {
+test(`${gameFile} starts, moves, dashes, collects a cell, and restores the CPU clock`,()=>{
     const m={project:true,optimization:'aggressive',maxSlices:20000,
         keyTimeline:[{at:1_000_000,keys:[9]},{at:2_000_000,keys:[3,54]},{at:6_000_000,keys:[15]}]}
-    const values=execute(readFileSync(resolve('../../examples/ion_dash.tip'),'utf8'),m)
+    const values=execute(readFileSync(resolve(`../../examples/${gameFile}.tip`),'utf8'),m)
     assert.equal(values.mode,1);assert.ok(values.player_x>768)
     assert.ok(values.score>=1);assert.ok(values.dash_cooldown>0)
     assert.ok(m.frames.length>3);assert.ok(m.bytes<24_000)
     assert.equal(m.clockHz,6_000_000)
 })
 
-test('ION DASH reaches its victory and defeat screens without invalid cell indexing',()=>{
-    const source=readFileSync(resolve('../../examples/ion_dash.tip'),'utf8')
+test(`${gameFile} reaches its victory and defeat screens without invalid cell indexing`,()=>{
+    const source=readFileSync(resolve(`../../examples/${gameFile}.tip`),'utf8')
     for(const win of [true,false]) {
         let game=source.replace('int mode=0','int mode=1')
         game=win?game.replace('int score=0','int score=11'):
@@ -413,13 +414,25 @@ test('ION DASH reaches its victory and defeat screens without invalid cell index
     }
 })
 
-test('ION DASH pauses physics while continuing to poll the exit key',()=>{
-    const source=readFileSync(resolve('../../examples/ion_dash.tip'),'utf8').replace('int mode=0','int mode=1')
+test(`${gameFile} pauses physics while continuing to poll the exit key`,()=>{
+    const source=readFileSync(resolve(`../../examples/${gameFile}.tip`),'utf8').replace('int mode=0','int mode=1')
     const m={project:true,optimization:'aggressive',maxSlices:20000,
         keyTimeline:[{at:1_000_000,keys:[9]},{at:2_000_000,keys:[3]},{at:5_000_000,keys:[15]}]}
     const values=execute(source,m)
     assert.equal(values.mode,3);assert.equal(values.player_x,768)
     assert.ok(m.frameTimes.at(-1)<3_000_000)
+})
+
+}
+
+test('ION DASH 3D projects depth, height, and shared actor vertices on the calculator',()=>{
+    const source=readFileSync(resolve('../../examples/ion_dash_3d.tip'),'utf8')
+    const functions=source.slice(source.indexOf('def project_x('),source.indexOf('def arena('))
+    const m={project:true,optimization:'reference'}
+    const values=execute(functions+'\nint center=project_x(0,0,0)\nint near_x=project_x(30,0,30)\nint far_x=project_x(30,0,-30)\nint floor_y=project_y(0,0)\nint raised_y=project_y(10,0)\nint near_y=project_y(0,30)\nint far_y=project_y(0,-30)\nclear()\nactor(768,496,10,True)\nrender()',m)
+    assert.equal(values.center,48);assert.ok(values.near_x>values.far_x)
+    assert.ok(values.raised_y<values.floor_y);assert.ok(values.near_y>values.far_y)
+    assert.ok(m.screen.reduce((sum,pixel)=>sum+pixel,0)>10)
 })
 
 test('MONO/96 cycles through three animated native 2D effects and exits cleanly',()=>{
