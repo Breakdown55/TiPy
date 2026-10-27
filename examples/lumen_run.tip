@@ -4,6 +4,7 @@
 # The convex room and uniformly colored pickup use ordered drawing without
 # a depth buffer. Arbitrary overlapping scenes should keep depth_test=True.
 # A carried point light illuminates the room; faces use native 1-bit shading.
+import time
 int room=mesh([
     (-18,-8,-18),(18,-8,-18),(18,10,-18),(-18,10,-18),
     (-18,-8,18),(18,-8,18),(18,10,18),(-18,10,18)
@@ -31,12 +32,20 @@ int stage=0
 int tx=-10
 int tz=-10
 bool dirty=True
+int previous_tick=time.frame_ticks()
+int last_turn=0
+int turn_remainder=0
 while not key_down("clear"):
+    int now=time.frame_ticks()
+    int elapsed=min((now-previous_tick)&255,64)
+    previous_tick=now
     if stage==4:
         if key_down("enter"):
             px=-160
             pz=160
             yaw=0
+            last_turn=0
+            turn_remainder=0
             stage=0
             tx=-10
             tz=-10
@@ -48,8 +57,18 @@ while not key_down("clear"):
         if key_down("2nd"):
             strafe=turn
             turn=0
+        if turn!=0:
+            if turn!=last_turn:
+                turn_remainder=9
+            else:
+                turn_remainder+=elapsed
+            # 128 phases / turn, 128 timer ticks / second: 120 degrees / second.
+            yaw=(yaw+turn*(turn_remainder//3))&127
+            turn_remainder=turn_remainder%3
+        else:
+            turn_remainder=0
+        last_turn=turn
         if turn!=0 or walk!=0 or strafe!=0:
-            yaw=(yaw+turn*3)&127
             int dx=heading(yaw)
             int dz=-heading(yaw+32)
             px=max(-224,min(224,px+(dx*walk-dz*strafe)//8))
@@ -98,4 +117,5 @@ while not key_down("clear"):
                 print("^",84,1)
         render()
         dirty=False
+time.stop_frame_timer()
 set_cpu_speed(6)

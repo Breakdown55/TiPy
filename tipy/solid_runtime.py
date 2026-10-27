@@ -116,7 +116,9 @@ __gfx_solid_pattern: db 0''']
             r.expr(invoke('solid_span',word('left'),word(add('left',2)),word('right'),word(add('right',2)),'y','shade'))
         r.if_(('eq','n',2),span);r.set('y',add('y',1))
     r.while_(('ult','y','end'),row);r.ret();out.append(r.finish())
-    out.append(_draw(extended,culling))
+    if not depth_enabled or dynamic_depth:
+        out.extend(['__gfx_solid_bounds: defs 256,0',_flat_polygon()])
+    out.append(_draw(extended,culling,depth_enabled,dynamic_depth))
     if not depth_enabled:
         out[0]=''
         out=[('__gfx_solid_clear:\n        ret' if s.startswith('__gfx_solid_clear:') else s) for s in out]
@@ -138,7 +140,13 @@ def _flat_span():
     shift,ready,loop,black,store,step=(r.label() for _ in range(6))
     r.emit(f'jr {ready}');r.mark(shift);r.emit('rrca');r.mark(ready);r.emit(f'djnz {shift}','ld c,a')
     r.expr(sub('end','start'));r.emit('ld b,l');r.expr('pattern');r.emit('ld d,l','pop hl')
-    r.mark(loop);r.emit('ld a,d','and c',f'jr nz,{black}','ld a,c','cpl','and (hl)',f'jr {store}');r.mark(black);r.emit('ld a,(hl)','or c');r.mark(store);r.emit('ld (hl),a','rrc c',f'jr nc,{step}','inc hl');r.mark(step);r.emit(f'djnz {loop}',f'jp {r.name}_return')
+    aligned,whole=(r.label() for _ in range(2))
+    r.emit('ld a,c','cp 128',f'jr z,{aligned}')
+    r.mark(loop);r.emit('ld a,d','and c',f'jr nz,{black}','ld a,c','cpl','and (hl)',f'jr {store}');r.mark(black);r.emit('ld a,(hl)','or c');r.mark(store);r.emit('ld (hl),a','rrc c',f'jr nc,{step}','inc hl','dec b',f'jp z,{r.name}_return',f'jr {aligned}');r.mark(step);r.emit(f'djnz {loop}',f'jp {r.name}_return')
+    # Whole covered bytes have the same screen-anchored Bayer pattern. Write
+    # them directly, reserving read/modify/write for the two boundary bytes.
+    r.mark(aligned);r.emit('ld a,b','cp 8',f'jr c,{loop}')
+    r.mark(whole);r.emit('ld (hl),d','inc hl','sub 8','ld b,a',f'jp z,{r.name}_return','cp 8',f'jr nc,{whole}',f'jr {loop}')
     return r.finish()
 
 
@@ -205,7 +213,49 @@ def _span_setup(r):
     return t.code
 
 
-def _draw(extended,culling):
+def _flat_polygon():
+    """Scan each convex clipped boundary once, without fan diagonals or depth."""
+    r=NativeRoutine('solid_flat_polygon',('poly','count','shade'),('i','a','b','v','ya','yb','y','end','x','step','negative','left','right'))
+    r.set('i',0)
+    def initialize():
+        r.write(add('@__gfx_solid_bounds','i'),32767)
+        r.write(add('@__gfx_solid_bounds+128','i'),0)
+        r.set('i',add('i',2))
+    r.while_(('ult','i',128),initialize)
+    r.set('a',add('poly',invoke('mesh_imul',sub('count',1),12)))
+    r.set('b','poly');r.set('i',0)
+    def edge():
+        r.set('left','a');r.set('right','b')
+        r.set('ya',word(add('left',8)));r.set('yb',word(add('right',8)))
+        r.if_(('slt','yb','ya'),lambda:(r.set('v','left'),r.set('left','right'),r.set('right','v'),r.set('v','ya'),r.set('ya','yb'),r.set('yb','v')))
+        def active():
+            r.set('end',sub('yb','ya'))
+            for n,p in (('x','left'),('step','right')):
+                r.expr(word(add(p,6)));r.emit('ld h,l','ld l,0');r._store(n)
+            r.set('v',invoke('wf_lerp','x','step',1,add('end','end')))
+            r.set('negative',0)
+            r.if_(('ult','step','x'),lambda:(r.set('negative',1),r.set('step',sub('x','step'))),lambda:r.set('step',sub('step','x')))
+            r.expr('end');r.emit('ld b,h','ld c,l');r.expr('step');r.emit('ld de,0','call __gfx_wf_udiv');r._store('step')
+            r.if_(('ne','negative',0),lambda:r.set('step',sub(0,'step')))
+            r.set('x','v');r.set('y','ya')
+            r.set('left',add('@__gfx_solid_bounds',add('y','y')))
+            r.set('right',add('left',128))
+            def scan():
+                r.if_(('ult','x',word('left')),lambda:r.write('left','x'))
+                r.if_(('ult',word('right'),'x'),lambda:r.write('right','x'))
+                r.set('x',add('x','step'));r.set('left',add('left',2));r.set('right',add('right',2));r.set('y',add('y',1))
+            r.while_(('ult','y','yb'),scan)
+        r.if_(('ne','ya','yb'),active)
+        r.set('a','b');r.set('b',add('b',12));r.set('i',add('i',1))
+    r.while_(('ult','i','count'),edge)
+    r.set('y',0);r.set('left','@__gfx_solid_bounds');r.set('right','@__gfx_solid_bounds+128')
+    def fill():
+        r.if_(('ult',word('left'),word('right')),lambda:r.expr(invoke('solid_span',word('left'),0,word('right'),0,'y','shade')))
+        r.set('left',add('left',2));r.set('right',add('right',2));r.set('y',add('y',1))
+    r.while_(('ult','y',64),fill);r.ret();return r.finish()
+
+
+def _draw(extended,culling,depth_enabled=True,dynamic_depth=False):
     r=NativeRoutine('solid_draw',('faces','count','cull','shaded'),('i','face','j','p','n','flags','common','v','shade','poly','other'))
     r.if_(('uge','count',129),lambda:r.fail(14))
     for i in range(3):r.write(add('@__gfx_solid_local_light',i*2),invoke('mesh_dot','@__gfx_solid_light_vector',add('@__gfx_mesh_rotation',i*2),6))
@@ -253,6 +303,10 @@ def _draw(extended,culling):
         r.set('j',1);r.set('p',add('poly',12))
         def triangle():
             r.expr(invoke('solid_triangle','poly','p',add('p',12),'shade'));r.set('p',add('p',12));r.set('j',add('j',1))
-        r.while_(('ult','j',sub('n',1)),triangle)
+        def fan():r.while_(('ult','j',sub('n',1)),triangle)
+        def flat():r.expr(invoke('solid_flat_polygon','poly','n','shade'))
+        if not depth_enabled:flat()
+        elif dynamic_depth:r.if_(('eq',word('@__gfx_solid_depth_enabled'),0),flat,fan)
+        else:fan()
         r.mark(skip);r.set('face',add('face',10));r.set('i',add('i',1))
     r.while_(('ult','i','count'),face);r.ret();return r.finish()

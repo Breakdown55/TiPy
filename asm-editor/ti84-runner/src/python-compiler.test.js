@@ -446,7 +446,12 @@ test('LUMEN RUN walks through all beacons, returns to the exit, wins and restart
             r.releaseKeys()
             if(stage===4){won=true;m.winFrame=r.lcd.pixels.slice();r.setKey(9,true)}
             else if(won){restarted=true;assert.equal(stage,0);assert.equal(value('px'),-160);assert.equal(value('pz'),160);r.setKey(15,true)}
-            else {const delta=((stage*32-yaw+64)&127)-64;r.setKey(Math.abs(delta)<=2?4:delta>0?3:2,true)}
+            else {
+                const [gx,gz]=[[-160,-160],[160,-160],[160,160],[-160,160]][stage]
+                const aim=Math.round(Math.atan2(gx-value('px'),value('pz')-gz)*128/(2*Math.PI))&127
+                const delta=((aim-yaw+64)&127)-64
+                r.setKey(Math.abs(delta)<=4?4:delta>0?3:2,true)
+            }
         }}
     execute(readFileSync(resolve('../../examples/lumen_run.tip'),'utf8'),m)
     assert.ok(won&&restarted);assert.ok(m.frames.length>30);assert.ok(m.bytes<24170)
@@ -457,6 +462,36 @@ test('LUMEN RUN clamps wall collisions and allows held-key strafing',()=>{
     const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000,afterFrameKeys:Array.from({length:10},(_,i)=>i===9?[15]:[54,2])}
     const values=execute(readFileSync(resolve('../../examples/lumen_run.tip'),'utf8'),m)
     assert.equal(values.px,-224);assert.equal(values.pz,160);assert.equal(values.yaw,0)
+})
+
+test('LUMEN RUN held turning follows elapsed calculator time',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000,
+        afterFrameKeys:Array.from({length:6},(_,i)=>i===5?[15]:[3])}
+    const values=execute(readFileSync(resolve('../../examples/lumen_run.tip'),'utf8'),m)
+    // First press immediately advances three phases; subsequent motion uses
+    // the 128 Hz timer at one phase per three ticks, regardless of draw cost.
+    const seconds=(m.frameTimes[4]-m.frameTimes[0])/15_000_000
+    assert.ok(Math.abs(values.yaw-(3+seconds*128/3))<=2)
+    assert.ok(values.yaw>30,'Turning must not remain limited to three phases/frame')
+})
+
+test('Convex depth-free scan conversion preserves clipped polygon coverage',()=>{
+    const models=[
+        [[-12,-10,0],[12,-10,0],[0,12,0]],
+        [[-30,-25,0],[30,-25,0],[0,50,0]],
+        [[-30,-5,8],[6,-25,-5],[12,35,5]],
+    ]
+    for(const vertices of models){
+        const model=`int m=mesh([${vertices.map(v=>`(${v.join(',')})`).join(',')}],faces=[(0,1,2,7)])\n`
+        const images=[]
+        for(const depth of ['True','False']){
+            const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000}
+            execute(model+`init_camera(75,2,120)\ncamera(0,0,20,0,0,0)\nclear()\ndraw_mesh(m,cull=False,shaded=False,depth_test=${depth})\nrender()`,m)
+            images.push(m.frames[0])
+        }
+        const difference=images[0].reduce((n,p,i)=>n+(p!==images[1][i]),0)
+        assert.ok(difference<=61,`Coverage differs by ${difference}/6144 pixels`)
+    }
 })
 
 test('Mixed depth-tested meshes and explicitly ordered overlays honor the per-draw switch',()=>{
