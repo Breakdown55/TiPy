@@ -44,10 +44,9 @@ __native_key_select_first:
         out (1),a
         ex (sp),hl
         ex (sp),hl
-        nop
-        nop
-        nop
-        nop
+        ld b,12
+__native_key_settle:
+        djnz __native_key_settle
         in a,(1)
         ld c,a
         ld a,255

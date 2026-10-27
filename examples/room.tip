@@ -1,52 +1,65 @@
 # Hold LEFT/RIGHT to turn, UP/DOWN to look up/down. CLEAR (Escape) exits.
 # Click the calculator screen before using your keyboard.
+# 64 heading steps; redraw only when the view changes.
 # Built entirely with existing XYZ lines; XY pixels form the crosshair.
+import time
+
+set_cpu_speed(15)
 no_fill()
 init_camera(fov=75, near=2, far=300)
 int yaw=0
 int pitch=0
-int dx=[0,38,71,92,100,92,71,38,0,-38,-71,-92,-100,-92,-71,-38]
-int dz=[-100,-92,-71,-38,0,38,71,92,100,92,71,38,0,-38,-71,-92]
+int dx=[0,100,200,297,392,483,569,650,724,792,851,903,946,980,1004,1019,1024,1019,1004,980,946,903,851,792,724,650,569,483,392,297,200,100,0,-100,-200,-297,-392,-483,-569,-650,-724,-792,-851,-903,-946,-980,-1004,-1019,-1024,-1019,-1004,-980,-946,-903,-851,-792,-724,-650,-569,-483,-392,-297,-200,-100]
+int dz=[-1024,-1019,-1004,-980,-946,-903,-851,-792,-724,-650,-569,-483,-392,-297,-200,-100,0,100,200,297,392,483,569,650,724,792,851,903,946,980,1004,1019,1024,1019,1004,980,946,903,851,792,724,650,569,483,392,297,200,100,0,-100,-200,-297,-392,-483,-569,-650,-724,-792,-851,-903,-946,-980,-1004,-1019]
+int last_yaw=-1
+int last_pitch=-1000
 
 while not key_down("clear"):
     if key_down("left"):
-        yaw=(yaw-1)%16
+        yaw=(yaw-1)%64
     if key_down("right"):
-        yaw=(yaw+1)%16
+        yaw=(yaw+1)%64
     if key_down("up"):
-        pitch=min(pitch+10,70)
+        pitch=min(pitch+40,700)
     if key_down("down"):
-        pitch=max(pitch-10,-70)
+        pitch=max(pitch-40,-700)
 
-    camera(0,0,0,dx[yaw],pitch,dz[yaw])
-    clear()
+    if yaw!=last_yaw or pitch!=last_pitch:
+        camera(0,0,0,dx[yaw],pitch,dz[yaw])
+        clear()
 
-    # Floor and ceiling edges of a 120 x 60 x 160 room.
-    line(-60,-30,-80,60,-30,-80)
-    line(60,-30,-80,60,-30,80)
-    line(60,-30,80,-60,-30,80)
-    line(-60,-30,80,-60,-30,-80)
-    line(-60,30,-80,60,30,-80)
-    line(60,30,-80,60,30,80)
-    line(60,30,80,-60,30,80)
-    line(-60,30,80,-60,30,-80)
-    line(-60,-30,-80,-60,30,-80)
-    line(60,-30,-80,60,30,-80)
-    line(60,-30,80,60,30,80)
-    line(-60,-30,80,-60,30,80)
+        # Floor and ceiling edges of a 120 x 60 x 160 room.
+        line(-60,-30,-80,60,-30,-80)
+        line(60,-30,-80,60,-30,80)
+        line(60,-30,80,-60,-30,80)
+        line(-60,-30,80,-60,-30,-80)
+        line(-60,30,-80,60,30,-80)
+        line(60,30,-80,60,30,80)
+        line(60,30,80,-60,30,80)
+        line(-60,30,80,-60,30,-80)
+        line(-60,-30,-80,-60,30,-80)
+        line(60,-30,-80,60,30,-80)
+        line(60,-30,80,60,30,80)
+        line(-60,-30,80,-60,30,80)
 
-    # Door outline on the front wall, window on the right wall.
-    line(-12,-30,-80,-12,12,-80)
-    line(-12,12,-80,12,12,-80)
-    line(12,12,-80,12,-30,-80)
-    line(60,-5,-25,60,15,-25)
-    line(60,15,-25,60,15,15)
-    line(60,15,15,60,-5,15)
-    line(60,-5,15,60,-5,-25)
+        # Door outline on the front wall, window on the right wall.
+        line(-12,-30,-80,-12,12,-80)
+        line(-12,12,-80,12,12,-80)
+        line(12,12,-80,12,-30,-80)
+        line(60,-5,-25,60,15,-25)
+        line(60,15,-25,60,15,15)
+        line(60,15,15,60,-5,15)
+        line(60,-5,15,60,-5,-25)
 
-    pixel_on(47,32)
-    pixel_on(48,32)
-    pixel_on(49,32)
-    pixel_on(48,31)
-    pixel_on(48,33)
-    render()
+        pixel_on(47,32)
+        pixel_on(48,32)
+        pixel_on(49,32)
+        pixel_on(48,31)
+        pixel_on(48,33)
+        render()
+        last_yaw=yaw
+        last_pitch=pitch
+    else:
+        time.sleep(0.005)
+
+set_cpu_speed(6)

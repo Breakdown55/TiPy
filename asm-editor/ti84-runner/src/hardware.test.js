@@ -10,6 +10,18 @@ function finish(runner) {
     assert.equal(runner.done,true,'Program should return or halt')
 }
 
+test('CPU speed port selects 6/15 MHz and preserves real-time interrupt timing',()=>{
+    const runner=new Ti84Runner('        org 0x9d95\n        ret')
+    assert.equal(runner.clockHz,6_000_000);assert.equal(runner.readPort(0x20),0)
+    const initial=runner.nextInterrupt
+    runner.writePort(0x20,1)
+    assert.equal(runner.clockHz,15_000_000);assert.equal(runner.readPort(0x20),1)
+    assert.equal(runner.nextInterrupt,initial*2.5)
+    runner.writePort(0x20,0)
+    assert.equal(runner.clockHz,6_000_000)
+    assert.ok(Math.abs(runner.nextInterrupt-initial)<0.0001)
+})
+
 test('Machine byte count includes instructions, data and reserved storage', () => {
     const runner = new Ti84Runner('    org 0x9d95\n    ld hl,7\n    ret\n    dw 0\n    defs 8192,0')
     assert.equal(runner.machineBytes, 3 + 1 + 2 + 8192)

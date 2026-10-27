@@ -111,6 +111,7 @@ export class Ti84Runner {
         this.lcd = new TiLcd()
         this.keys = new Set()
         this.keyMask = 255
+        this.cpuMode = 0
         this.nextInterrupt = 6_000_000 / 118
         this.interruptMask = 0x0b
         this.interruptPending = 0
@@ -155,6 +156,7 @@ export class Ti84Runner {
         else this.keys.delete(code)
     }
     releaseKeys() { this.keys.clear(); this.lastScan = 0 }
+    get clockHz() { return this.cpuMode ? 15_000_000 : 6_000_000 }
     readPort(port) {
         if (port === 1) {
             let result = 255
@@ -167,13 +169,19 @@ export class Ti84Runner {
         if (port === 3) return this.interruptMask
         if (port === 4) return this.interruptPending
         if (port === 6) return this.bank
-        if (port === 0x20) return 0 // Standard 6 MHz CPU mode.
+        if (port === 0x20) return this.cpuMode
         if (port === 0x10) return this.lcd.status()
         if (port === 0x11) return this.lcd.read()
         throw new Error(`Unsupported TI port read ${hex(port, 2)}`)
     }
     writePort(port,value) {
-        if (port === 1) this.keyMask = value
+        if (port === 0x20) {
+            const oldClock=this.clockHz,now=this.machine.tStateCount
+            this.cpuMode=value & 3
+            this.nextInterrupt=now+Math.max(0,this.nextInterrupt-now)*this.clockHz/oldClock
+            this.scanTime=now+Math.max(0,this.scanTime-now)*this.clockHz/oldClock
+        }
+        else if (port === 1) this.keyMask = value
         else if (port === 3) { this.interruptMask = value; this.interruptPending &= value }
         else if (port === 6) this.bank = value & 0x7f
         else if (port === 0x10) this.lcd.command(value)
@@ -187,7 +195,7 @@ export class Ti84Runner {
         const time = this.machine.tStateCount
         const repeat = [1,2,3,4,56].includes(code)
         if (code === this.lastScan && (!repeat || time < this.scanTime)) return 0
-        this.scanTime = time + (code === this.lastScan ? 480_000 : 2_400_000)
+        this.scanTime = time + this.clockHz * (code === this.lastScan ? 0.08 : 0.4)
         this.lastScan = code
         return code
     }
@@ -255,7 +263,7 @@ export class Ti84Runner {
             }
             if (this.machine.tStateCount >= this.nextInterrupt) {
                 this.interruptPending |= 2
-                this.nextInterrupt = this.machine.tStateCount + 6_000_000 / 118
+                this.nextInterrupt = this.machine.tStateCount + this.clockHz / 118
             }
             if (this.interruptPending & this.interruptMask & 3 && r.iff1) {
                 this.machine.raiseInterrupt()

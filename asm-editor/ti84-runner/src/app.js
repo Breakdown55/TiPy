@@ -285,7 +285,7 @@ function frame(time) {
         try {
             const elapsed = lastTime ? Math.min(time - lastTime,40) : 16
             lastTime = time
-            runner.runSlice(Math.floor(elapsed * 6000))
+            runner.runSlice(Math.floor(elapsed * runner.clockHz / 1000))
             if (runner.done) {
                 stop()
                 sizeStatus('Finished')

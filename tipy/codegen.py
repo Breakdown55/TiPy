@@ -492,6 +492,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                 end = label()
                 emit(f"jp z,{end}", "dec h")
                 mark(end)
+        elif kind=='cpu_speed':emit(f"ld a,{item['mode']}",'out (32),a')
         elif kind=='key_down':
             expression(item['arguments'][0]);emit('call __native_key_down')
         elif kind == "stdlib":

@@ -22,7 +22,7 @@ function execute(source, measurements) {
     for(const code of measurements?.heldKeys ?? [])runner.setKey(code,true)
     assert.ok(result.estimated_bytes>=runner.machineBytes,'RAM sizing must never underestimate assembled image bytes')
     if (measurements?.seedGraph) runner.machine.memory.set(measurements.seedGraph,0x9340)
-    const frames = []
+    const frames = [],frameTimes=[]
     if (measurements) {
         const service = runner.serviceBcall.bind(runner)
         let keyIndex=0
@@ -39,19 +39,26 @@ function execute(source, measurements) {
             service()
             if (runner.lcd.dirty) {
                 frames.push(runner.lcd.pixels.slice()); runner.lcd.dirty = false
+                frameTimes.push(runner.machine.tStateCount)
                 const nextKeys=measurements.afterFrameKeys?.[frames.length-1]
                 if(nextKeys){runner.releaseKeys();for(const code of nextKeys)runner.setKey(code,true)}
             }
         }
     }
-    for (let i = 0; i < (measurements?.maxSlices ?? 400) && !runner.done; i++) runner.runSlice()
+    let keyEvent=0
+    for (let i = 0; i < (measurements?.maxSlices ?? 400) && !runner.done; i++) {
+        while(measurements?.keyTimeline?.[keyEvent]?.at<=runner.machine.tStateCount) {
+            runner.releaseKeys();for(const code of measurements.keyTimeline[keyEvent++].keys)runner.setKey(code,true)
+        }
+        runner.runSlice()
+    }
     assert.equal(runner.done,true,'Generated program must return')
     assert.equal(runner.machine.z80.regs.sp,0,'RET should pop the sentinel after a balanced expression stack')
     assert.equal(runner.machine.z80.regs.ix,0,'Functions must restore the caller frame pointer')
     assert.equal(runner.machine.z80.regs.iy,0x89f0,'Functions must preserve the calculator flags pointer')
     if (measurements) Object.assign(measurements, { bytes: runner.machineBytes, tStates: runner.machine.tStateCount,
         screen: runner.lcd.pixels.slice(), graph: runner.machine.memory.slice(0x9340,0x9640),
-        report: result.optimization_report, assembly: result.assembly, frames })
+        report: result.optimization_report, assembly: result.assembly, frames,frameTimes,clockHz:runner.clockHz })
     const values = {},mem=runner.machine.memory,memo=new Map()
     const word=a=>mem[a] | (mem[a+1]<<8)
     const fields=text=>{
@@ -264,15 +271,32 @@ bool invalid=key_down(0) or key_down(-1) or key_down(57) or key_down(256)`,m)
 
 test('Held arrows turn and pitch the room; releasing stops movement and Clear exits',()=>{
     const m={project:true,optimization:'aggressive',maxSlices:20000,heldKeys:[],
-        afterFrameKeys:[[3],[3],[3,4],[],[],[15]]}
+        afterFrameKeys:[[3],[3],[3,4],[15]]}
     execute(readFileSync(resolve('../../examples/room.tip'),'utf8'),m)
-    assert.equal(m.frames.length,6)
+    assert.equal(m.frames.length,4)
     assert.notDeepEqual(m.frames[0],m.frames[1])
     assert.notDeepEqual(m.frames[1],m.frames[2])
     assert.notDeepEqual(m.frames[2],m.frames[3])
-    assert.deepEqual(m.frames[3],m.frames[4])
-    assert.deepEqual(m.frames[4],m.frames[5])
-    assert.ok(m.tStates<24_000_000,'Six room frames must stay within the optimized native cycle budget')
+    assert.equal(m.clockHz,6_000_000,'Room restores the normal clock on exit')
+    assert.ok(m.tStates<17_000_000,'Four room frames must stay within the optimized native cycle budget')
+})
+
+test('Idle room polls promptly without continuously redrawing unchanged frames',()=>{
+    const m={project:true,optimization:'aggressive',maxSlices:20000,
+        keyTimeline:[{at:5_000_000,keys:[3]},{at:5_200_000,keys:[]},{at:15_000_000,keys:[15]}]}
+    execute(readFileSync(resolve('../../examples/room.tip'),'utf8'),m)
+    assert.equal(m.frames.length,2,'One initial frame and one response; idle frames are not redrawn')
+    assert.notDeepEqual(m.frames[0],m.frames[1])
+    assert.ok(m.frameTimes[1]-5_000_000<5_000_000,'First visible response must finish within 1/3 second at 15 MHz')
+})
+
+test('Native sleep retains real-time duration at the selected CPU speed',()=>{
+    const slow={},fast={}
+    execute('import time\nset_cpu_speed(6)\ntime.sleep(0.01)',slow)
+    execute('import time\nset_cpu_speed(15)\ntime.sleep(0.01)\nset_cpu_speed(6)',fast)
+    assert.ok(slow.tStates>55_000 && slow.tStates<65_000)
+    assert.ok(fast.tStates>140_000 && fast.tStates<160_000)
+    assert.equal(fast.clockHz,6_000_000)
 })
 
 test('Fast camera multiplication and division remain exact across word boundaries',()=>{
