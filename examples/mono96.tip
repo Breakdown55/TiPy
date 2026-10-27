@@ -1,0 +1,195 @@
+# MONO / 96 -- a procedural 2D demo for the 96 x 64 screen.
+# LEFT / RIGHT: change effect. ENTER: freeze. CLEAR / Escape: exit.
+# Effects also change automatically every eight seconds.
+# All imagery is drawn by native Z80; no bitmaps, sprites, or 3D camera.
+import time
+
+set_cpu_speed(15)
+
+# One small sine table drives every effect. Values are scaled by 64.
+int wave=[0,6,12,19,24,30,36,41,45,49,53,56,59,61,63,64,64,64,63,61,59,56,53,49,45,41,36,30,24,19,12,6,0,-6,-12,-19,-24,-30,-36,-41,-45,-49,-53,-56,-59,-61,-63,-64,-64,-64,-63,-61,-59,-56,-53,-49,-45,-41,-36,-30,-24,-19,-12,-6]
+int heights=[12,18,10,23,15,20,9,17]
+int sun=[10,10,10,10,9,9,8,7,6,4,0]
+
+def skyline(int t):
+    # Dust, a striped sun, and two speeds of parallax.
+    for i in range(18):
+        int sx=((i*37-(t>>3))&127)-16
+        int sy=9+((i*11)&15)
+        if sx>1 and sx<94:
+            pixel_on(sx,sy)
+            if i&3==0:
+                pixel_on(sx+1,sy)
+
+    for dy in range(-10,11,2):
+        int extent=sun[abs(dy)]
+        h_line(75-extent,20+dy,75+extent,20+dy)
+
+    for i in range(8):
+        int x=((i*16-(t>>2))&127)-16
+        int top=35-heights[i]
+        for column in range(x,x+10):
+            v_line(column,top,column,35)
+        for y in range(top+3,34,4):
+            pixel_off(x+2,y)
+            if (i+(t>>4))&1==0:
+                pixel_off(x+6,y)
+
+    h_line(1,36,94,36)
+    for end in range(-48,145,24):
+        int edge_x=end
+        int edge_y=53
+        if end<1:
+            edge_x=1
+            edge_y=36+799//(48-end)
+        elif end>94:
+            edge_x=94
+            edge_y=36+782//(end-48)
+        line(48,36,edge_x,edge_y)
+    for i in range(3,19,3):
+        int row=36+((i*i+((t>>1)&31))>>4)
+        if row<54:
+            h_line(1,row,94,row)
+
+def weave(int t):
+    # Sparse dither behind three moving, hollow raster ribbons.
+    for y in range(11,53,8):
+        for x in range(3,95,8):
+            pixel_on(x,y)
+
+    for band in range(3):
+        int offset=band*21
+        int center=25+band*6
+        for x in range(2,94,3):
+            int phase=((x>>1)+(t>>2)+offset)&63
+            int value=wave[phase]
+            int amplitude=value>>4
+            if band==1:
+                amplitude=value>>3
+            elif band==2:
+                amplitude=(value+(value<<1))>>4
+            int band_y=center+amplitude
+            v_line(x,band_y,x,band_y+3)
+            pixel_on(x+2,band_y)
+            pixel_on(x+2,band_y+3)
+
+    # Lissajous points leave staggered trails across the ribbons.
+    for i in range(8):
+        int orbit_x=i<<3
+        int orbit_y=(i<<3)+(i<<2)+i
+        for tail in range(3):
+            int trail_phase=((t>>1)-tail-(tail<<1))&63
+            int trail_x=48+(wave[(orbit_x+trail_phase)&63]>>1)
+            int trail_y=31+(wave[(orbit_y-(trail_phase<<1))&63]>>2)
+            if tail==0:
+                h_line(trail_x-1,trail_y,trail_x+1,trail_y)
+                pixel_on(trail_x,trail_y-1)
+                pixel_on(trail_x,trail_y+1)
+            else:
+                flip_pixel(trail_x,trail_y)
+
+def vortex(int t):
+    # A rotating vector tunnel, constructed entirely in screen coordinates.
+    for i in range(24):
+        int x=((i*37)&127)-16
+        int y=10+((i*19)&31)
+        if (i+(t>>3))&3!=0:
+            pixel_on(x,y)
+
+    int cx=48+(wave[(t>>1)&63]>>4)
+    int cy=31+(wave[((t>>1)+16)&63]>>6)
+    int spin=(t>>2)&63
+    for ring in range(4):
+        int radius=2+((ring*8+(t>>2))&31)
+        int rx=min(42,(radius*3)>>1)
+        int ry=(radius*2)//3
+        int first_x=cx+((wave[(spin+16)&63]*rx)>>6)
+        int first_y=cy+((wave[spin]*ry)>>6)
+        int px=first_x
+        int py=first_y
+        for i in range(1,9):
+            int angle=(spin+i*8)&63
+            int vertex_x=cx+((wave[(angle+16)&63]*rx)>>6)
+            int vertex_y=cy+((wave[angle]*ry)>>6)
+            line(px,py,vertex_x,vertex_y)
+            px=vertex_x
+            py=vertex_y
+
+        # Short spokes make successive rings read as one moving lattice.
+        if radius>9:
+            for i in range(0,8,2):
+                int spoke_angle=(spin+i*8)&63
+                int x1=cx+((wave[(spoke_angle+16)&63]*rx)>>6)
+                int y1=cy+((wave[spoke_angle]*ry)>>6)
+                int x2=cx+((wave[(spoke_angle+16)&63]*(rx-10))>>6)
+                int y2=cy+((wave[spoke_angle]*(ry-5))>>6)
+                line(x1,y1,x2,y2)
+
+int scene=0
+int scene_ticks=0
+int t=0
+int previous=time.frame_ticks()
+bool paused=False
+bool left_was=False
+bool right_was=False
+bool enter_was=False
+bool dirty=True
+
+while not key_down("clear"):
+    int now=time.frame_ticks()
+    int elapsed=(now-previous)&255
+    previous=now
+    bool left=key_down("left")
+    bool right=key_down("right")
+    bool enter=key_down("enter")
+    if left and not left_was:
+        scene=(scene+2)%3
+        scene_ticks=0
+        dirty=True
+    if right and not right_was:
+        scene=(scene+1)%3
+        scene_ticks=0
+        dirty=True
+    if enter and not enter_was:
+        paused=not paused
+        dirty=True
+    left_was=left
+    right_was=right
+    enter_was=enter
+
+    if not paused and elapsed>0:
+        t=(t+elapsed)&1023
+        scene_ticks+=elapsed
+        dirty=True
+        if scene_ticks>=1024:
+            scene=(scene+1)%3
+            scene_ticks=0
+    if not dirty:
+        time.sleep(0.004)
+        continue
+
+    clear()
+    if scene==0:
+        skyline(t)
+        print("01/CITY",2,56)
+    elif scene==1:
+        weave(t)
+        print("02/WAVE",2,56)
+    else:
+        vortex(t)
+        print("03/WARP",2,56)
+
+    h_line(0,0,95,0)
+    h_line(0,63,95,63)
+    v_line(0,0,0,63)
+    v_line(95,0,95,63)
+    h_line(0,54,95,54)
+    if paused:
+        print("II",80,56)
+    else:
+        h_line(79,59,79+(scene_ticks>>6),59)
+    render()
+    dirty=False
+
+time.stop_frame_timer()
+set_cpu_speed(6)

@@ -388,6 +388,39 @@ test('Compact room projection remains within one LCD pixel of the reference rend
     }
 })
 
+test('MONO/96 cycles through three animated native 2D effects and exits cleanly',()=>{
+    const m={project:true,optimization:'aggressive',maxSlices:20000,afterFrameKeys:[[3],[],[3],[],[2],[],[15]]}
+    execute(readFileSync(resolve('../../examples/mono96.tip'),'utf8'),m)
+    assert.equal(m.frames.length,7);assert.equal(m.clockHz,6_000_000)
+    assert.notDeepEqual(m.frames[0],m.frames[1]);assert.notDeepEqual(m.frames[1],m.frames[3])
+    assert.ok(m.bytes<24_000);assert.ok(m.tStates<10_000_000)
+    for(const frame of m.frames){
+        assert.ok(frame.reduce((sum,pixel)=>sum+pixel,0)>700)
+        for(let x=0;x<96;x++){assert.equal(frame[x],1);assert.equal(frame[63*96+x],1)}
+        for(let y=0;y<64;y++){assert.equal(frame[y*96],1);assert.equal(frame[y*96+95],1)}
+    }
+})
+
+test('MONO/96 freezes without repeatedly redrawing and still polls Clear',()=>{
+    const source=readFileSync(resolve('../../examples/mono96.tip'),'utf8').replace('int scene=0','int scene=1')
+    const m={project:true,optimization:'aggressive',maxSlices:20000,
+        keyTimeline:[{at:2_000_000,keys:[9]},{at:3_000_000,keys:[]},{at:7_000_000,keys:[15]}]}
+    execute(source,m)
+    assert.equal(m.frames.length,3)
+    assert.ok(m.frameTimes[2]<5_000_000);assert.ok(m.tStates>=7_000_000)
+})
+
+test('Byte spans preserve masked neighbors, white fills, clipping, and raw black axis lines',()=>{
+    const m={}
+    execute('background(BLACK)\nno_stroke()\nfill(WHITE)\nrect(-3,2,14,8)\nrect(13,12,70,4)\nrect(90,50,10,20)\nh_line(0,4,95,4)\nv_line(8,0,8,63)\nrender()',m)
+    const expected=new Uint8Array(768);expected.fill(255)
+    for(const [x1,x2,y1,y2] of [[0,10,2,9],[13,82,12,15],[90,95,50,63]])
+        for(let y=y1;y<=y2;y++)for(let x=x1;x<=x2;x++)expected[y*12+(x>>3)]&=255^(128>>(x&7))
+    for(let x=0;x<96;x++)expected[4*12+(x>>3)]|=128>>(x&7)
+    for(let y=0;y<64;y++)expected[y*12+1]|=128
+    assert.deepEqual(m.graph,expected)
+})
+
 function expectedCurve(cx,cy,rx,ry,filled) {
     const inside=(x,y)=>{
         if(rx<0||ry<0)return false

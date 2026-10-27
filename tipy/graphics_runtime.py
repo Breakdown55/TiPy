@@ -47,22 +47,42 @@ class GraphicsRoutine(Routine):
         self.if_(("sge", high, limit), lambda: self.set(high, limit - 1))
 
 
-def _axis_line(vertical):
-    r = GraphicsRoutine("v_line" if vertical else "h_line", ("x1", "y1", "x2", "y2"))
-    fixed, other, low, high, limit = ("x1", "x2", "y1", "y2", 64) if vertical else ("y1", "y2", "x1", "x2", 96)
-    r.if_(("ne", fixed, other), lambda: r.ret())
-    r.if_(("uge", fixed, 96 if vertical else 64), lambda: r.ret())
-    r.clip_interval(low, high, limit)
-    start = r.label()
-    r.mark(start)
-    r.pixel("x1", "y1")
-    r.if_(("eq", low, high), lambda: r.ret())
-    r.set(low, add(low, 1))
-    r.emit(f"jp {start}")
+def _axis_line(vertical,styled=False):
+    r=GraphicsRoutine('v_line' if vertical else 'h_line',('x1','y1','x2','y2'),('mask','first'))
+    fixed,other,low,high,limit=('x1','x2','y1','y2',64) if vertical else ('y1','y2','x1','x2',96)
+    r.if_(('ne',fixed,other),lambda:r.ret());r.if_(('uge',fixed,96 if vertical else 64),lambda:r.ret());r.clip_interval(low,high,limit)
+    def blend():
+        if styled:
+            set_,done=r.label(),r.label();r.emit('ld e,a','ld a,(__gfx_ink)','or a','ld a,e',f'jr nz,{set_}','cpl','and (hl)',f'jr {done}');r.mark(set_);r.emit('or (hl)');r.mark(done)
+        else:r.emit('or (hl)')
+        r.emit('ld (hl),a')
+    def shift_mask(value,left=False):
+        r.expr(value);r.emit('ld a,l')
+        if left:r.emit('cpl')
+        r.emit('and 7','ld b,a','ld a,255' if not vertical else 'ld a,128','inc b')
+        loop,ready=r.label(),r.label();r.emit(f'jr {ready}');r.mark(loop);r.emit('sla a' if left else 'srl a');r.mark(ready);r.emit(f'djnz {loop}')
+    if vertical:
+        shift_mask(fixed);r.emit('ld c,a')
+    else:
+        shift_mask(low);r.emit('ld l,a','ld h,0');r._store('mask');shift_mask(high,True);r.emit('ld c,a')
+    r.expr(low if vertical else fixed);r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','ld de,0x9340','add hl,de','push hl')
+    r.expr(fixed if vertical else low);r.emit('srl l','srl l','srl l');r._store('first');r.emit('pop de','add hl,de','push hl')
+    if vertical:
+        r.expr(add(sub(high,low),1));r.emit('ld b,l','ld d,c','pop hl')
+        loop,advance=r.label(),r.label();r.mark(loop);r.emit('ld a,d');blend()
+        r.emit('ld a,l','add a,12','ld l,a',f'jr nc,{advance}','inc h');r.mark(advance);r.emit(f'djnz {loop}');r.ret()
+    else:
+        r.expr(high);r.emit('srl l','srl l','srl l','push hl');r.expr('first');r.emit('ex de,hl','pop hl','or a','sbc hl,de','ld b,l');r.expr('mask');r.emit('ld d,l','pop hl')
+        multiple,middle,last=r.label(),r.label(),r.label();r.emit('ld a,b','or a',f'jr nz,{multiple}','ld a,d','and c');blend();r.ret()
+        r.mark(multiple);r.emit('ld a,d');blend();r.emit('inc hl','dec b',f'jr z,{last}')
+        if styled:
+            r.emit('ld a,(__gfx_ink)','neg')
+        else:r.emit('ld a,255')
+        r.mark(middle);r.emit('ld (hl),a','inc hl',f'djnz {middle}');r.mark(last);r.emit('ld a,c');blend();r.ret()
     return r.finish()
 
 
-def _line():
+def _line(styled=False):
     # Unsigned magnitudes cover the full distance between any i16 endpoints.
     # The fractional error never exceeds the major delta; carry is handled
     # explicitly when adding the minor delta, avoiding signed overflow.
@@ -70,6 +90,14 @@ def _line():
     for first, second, limit in [("x1", "x2", 96), ("y1", "y2", 64)]:
         r.if_(("slt", first, 0), lambda: r.if_(("slt", second, 0), lambda: r.ret()))
         r.if_(("sge", first, limit), lambda: r.if_(("sge", second, limit), lambda: r.ret()))
+    if not styled:
+        general=r.label()
+        for value,limit in (('x1',96),('x2',96),('y1',64),('y2',64)):
+            r.if_(('uge',value,limit),lambda:r.emit(f'jp {general}'))
+        if not styled:r.emit('ld a,(__gfx_ink)','push af','ld a,1','ld (__gfx_ink),a')
+        r.expr(('call','__gfx_wf_raster','x1','y1','x2','y2'))
+        if not styled:r.emit('pop af','ld (__gfx_ink),a')
+        r.ret();r.mark(general)
     for axis in ["x", "y"]:
         r.set("s" + axis, 1)
         r.set("d" + axis, sub(axis + "2", axis + "1"))
@@ -113,6 +141,11 @@ def _rectangle():
     for low, high, first, second, limit in [("left", "right", "x1", "x2", 96), ("top", "bottom", "y1", "y2", 64)]:
         r.set(low, first); r.set(high, second); r.clip_interval(low, high, limit)
     r.set("y", "top")
+    def filled_rows():
+        def span():
+            r.expr(('call','__gfx_h_line','left','y','right','y'));r.set('y',add('y',1))
+        r.while_(('slt','y',add('bottom',1)),span);r.ret()
+    r.if_(('ne','filled',0),filled_rows)
     row, column, draw, next_pixel = r.label(), r.label(), r.label(), r.label()
     r.mark(row)
     r.set("x", "left")
@@ -289,25 +322,28 @@ def graphics_assembly(used):
     used=set(used)
     routines = []
     camera_entries={name for name in used if name.startswith(('cam_','mat_','model_'))}
+    if 'line' in used:camera_entries.add('wf_raster');used.add('ink')
     if camera_entries:
         from .camera_math import routines as math_routines,link
         from .matrix_runtime import routines as matrix_routines
         from .camera_runtime import routines as camera_routines
         from .wireframe_runtime import routines as wireframe_routines
         capacity=max((int(n.split(':')[1]) for n in used if n.startswith('batch_capacity:')),default=64)
-        native=link(math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity),{'__gfx_'+name for name in camera_entries})
+        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity)
+        roots={'__gfx_'+name for name in camera_entries}
+        native=link(groups,roots)
         routines.append(native)
         if '__gfx_sin_raw' in native:used.add('sin_raw')
         if '__gfx_sat_add' in native:used.add('sat_add')
         if '__gfx_polygon' in native:used.add('polygon')
         if '__gfx_styled_line' in native:used.add('styled_line')
     styled=bool(used & {'ink','stroke','circle','ellipse','polygon','polyline','styled_rectangle','styled_line'})
-    if used & {'background','sin_raw','sat_add','stroke','circle','ellipse','polygon','polyline','styled_line'}:
+    if used & {'background','sin_raw','sat_add','stroke','circle','ellipse','polygon','polyline','styled_line','styled_rectangle'}:
         from .shape_runtime import assembly
         routines.append(assembly(used))
-        if used & {'circle','ellipse','polygon'}:routines.append(_axis_line(False).replace('__gfx_h_line','__gfx_styled_h_line').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
-        if used & {'polygon','polyline','stroke','styled_line'}:routines.append(_line().replace('__gfx_line','__gfx_styled_line').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
-    if 'styled_rectangle' in used:routines.append(_rectangle().replace('__gfx_rectangle','__gfx_styled_rectangle').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
+        if used & {'circle','ellipse','polygon','styled_rectangle'}:routines.append(_axis_line(False,True).replace('__gfx_h_line','__gfx_styled_h_line'))
+        if used & {'polygon','polyline','stroke','styled_line'}:routines.append(_line(True).replace('__gfx_line','__gfx_styled_line').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
+    if 'styled_rectangle' in used:routines.append(_rectangle().replace('__gfx_rectangle','__gfx_styled_rectangle').replace('call __gfx_pixel_on','call __gfx_ink_pixel').replace('call __gfx_h_line','call __gfx_styled_h_line'))
     if styled:routines.append('__gfx_ink_pixel:\n        ld a,(__gfx_ink)\n        jp __gfx_pixel\n__gfx_ink: db 1');used.add('pixel_on')
     if "build_row_mask" in used:
         routines.append(_build_row_mask())
@@ -320,7 +356,7 @@ def graphics_assembly(used):
         routines.append(RENDER)
     if "line" in used:
         routines.append(_line())
-    if "h_line" in used:
+    if "h_line" in used or 'rectangle' in used:
         routines.append(_axis_line(False))
     if "v_line" in used:
         routines.append(_axis_line(True))
