@@ -15,6 +15,11 @@ class ListTests(unittest.TestCase):
         self.assertNotIn("__arr_pop:", assembly)
         self.assertNotIn("__arr_get:", assembly)
 
+    def test_large_literal_lists_use_one_bulk_copy(self):
+        assembly=compile_source('int values=['+','.join(map(str,range(32)))+']')['assembly']
+        self.assertIn('__arr_from_data:',assembly)
+        self.assertNotIn('__arr_append:',assembly)
+
     def test_initializer_infers_array_without_brackets_on_type(self):
         result = compile_source("int scores=[10,20,30]\nint x=scores[1]\nscores[2]=40\nscores.append(50)\nint size=len(scores)")
         self.assertEqual(result["symbols"]["scores"]["type"], "i16[]")

@@ -293,7 +293,9 @@ def graphics_assembly(used):
         from .camera_math import routines as math_routines,link
         from .matrix_runtime import routines as matrix_routines
         from .camera_runtime import routines as camera_routines
-        native=link(math_routines()+matrix_routines()+camera_routines(),{'__gfx_'+name for name in camera_entries})
+        from .wireframe_runtime import routines as wireframe_routines
+        capacity=max((int(n.split(':')[1]) for n in used if n.startswith('batch_capacity:')),default=64)
+        native=link(math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity),{'__gfx_'+name for name in camera_entries})
         routines.append(native)
         if '__gfx_sin_raw' in native:used.add('sin_raw')
         if '__gfx_sat_add' in native:used.add('sat_add')

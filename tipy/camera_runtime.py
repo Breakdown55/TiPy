@@ -10,7 +10,7 @@ from .list_runtime import add,sub,word,call
 
 def field(base,index):return add(base,index*4)
 
-def routines():
+def routines(batch_capacity=64):
     out=[]
     focal=[round(32/math.tan(math.radians(fov)/2)*16) for fov in range(1,180)]
     out.append('__gfx_cam_state:\n__gfx_cam_enabled: dw 0\n__gfx_cam_path_mode: dw 0\n__gfx_cam_eye: dw 0,0,80\n__gfx_cam_basis: dw 16384,0,0,0,16384,0,0,0,49152\n__gfx_cam_near: dw 16384,0\n__gfx_cam_far: dw '+str((1000<<14)&65535)+','+str((1000<<14)>>16)+'\n__gfx_cam_focal: dw '+str(focal[59])+'\n__gfx_cam_zero: dw 0,0\n__gfx_cam_right: dw 95,0\n__gfx_cam_bottom: dw 63,0')
@@ -218,6 +218,21 @@ __gfx_projection_cache_end:''')
     r=NativeRoutine('cam_line',('x1','y1','z1','x2','y2','z2','width'),words('a',6)+words('b',6))
     r.expr(invoke('cam_view','x1','y1','z1',slot('a0')));r.expr(invoke('cam_view','x2','y2','z2',slot('b0')))
     r.expr(invoke('cam_screen_line',slot('a0'),slot('b0'),'width'));r.ret();out.append(r.finish())
+
+    out.append('__gfx_batch_records: defs '+str(batch_capacity*12)+',0')
+    r=NativeRoutine('cam_batch',('data','width'),('vertices','edges','count','i','record','edge','index')+words('a',6)+words('b',6))
+    r.set('count',word('data'));r.set('vertices',add('data',4));r.set('record','@__gfx_batch_records');r.set('i',0)
+    def transform():
+        r.expr(invoke('cam_view',word('vertices'),word(add('vertices',2)),word(add('vertices',4)),'record'))
+        r.set('vertices',add('vertices',6));r.set('record',add('record',12));r.set('i',add('i',1))
+    r.while_(('ult','i','count'),transform)
+    r.set('edges','vertices');r.set('count',word(add('data',2)));r.set('i',0)
+    def draw_edge():
+        for target in ('a','b'):
+            r.set('index',('byte','edges'));r.expr('index');r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','ld de,__gfx_batch_records','add hl,de');r._store('record')
+            r.load(target,'record',6);r.set('edges',add('edges',1))
+        r.expr(invoke('cam_screen_line',slot('a0'),slot('b0'),'width'));r.set('i',add('i',1))
+    r.while_(('ult','i','count'),draw_edge);r.ret();out.append(r.finish())
 
     r=NativeRoutine('cam_vertex',('x','y','z'),words('a',6))
     r.expr(invoke('cam_view','x','y','z',slot('a0')));r.ret(call('from_data',2,6,slot('a0')));out.append(r.finish())

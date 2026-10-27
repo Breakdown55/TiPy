@@ -22,6 +22,20 @@ test('CPU speed port selects 6/15 MHz and preserves real-time interrupt timing',
     assert.ok(Math.abs(runner.nextInterrupt-initial)<0.0001)
 })
 
+test('Free-running 128 Hz crystal frame timer wraps and is independent of CPU speed',()=>{
+    const r=new Ti84Runner('        org 0x9d95\n        ret')
+    r.writePort(0x30,0x46);r.writePort(0x31,0);r.writePort(0x32,0)
+    r.machine.tStateCount=3_000_000
+    assert.equal(r.readPort(0x32),192)
+    r.writePort(0x20,1);r.machine.tStateCount+=7_500_000
+    assert.equal(r.readPort(0x32),128)
+    r.machine.tStateCount+=15_000_000
+    assert.equal(r.readPort(0x32),0)
+    r.writePort(0x30,0)
+    const stopped=r.readPort(0x32);r.machine.tStateCount+=15_000_000
+    assert.equal(r.readPort(0x32),stopped)
+})
+
 test('Machine byte count includes instructions, data and reserved storage', () => {
     const runner = new Ti84Runner('    org 0x9d95\n    ld hl,7\n    ret\n    dw 0\n    defs 8192,0')
     assert.equal(runner.machineBytes, 3 + 1 + 2 + 8192)

@@ -331,6 +331,7 @@ def check(tree):
     def _expression(item, allow_min_magnitude=False, allow_void=False, expected_element=None):
         kind = item["kind"]
         constant = None
+        if kind=='geometry_data':item['type']='i16';return 'i16',None
         if kind=="zero_value" or kind=="bound_argument":return item["type"],None
         if kind=="call":
             expanded=[]
@@ -374,6 +375,9 @@ def check(tree):
             value_type = "fixed"
         elif kind == "stdlib":
             name, args = item["name"], item["arguments"]
+            if name in {'time.frame_ticks','time.stop_frame_timer'}:
+                if args:raise CompileError(name+' expects no arguments',item)
+                result='i16' if name=='time.frame_ticks' else 'void';item['type']=result;return result,None
             count = 2 if name == "random.randint" else 1
             if len(args) != count:
                 raise CompileError(f"{name} expects {count} arguments", item)

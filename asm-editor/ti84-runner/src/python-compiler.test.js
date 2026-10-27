@@ -278,7 +278,8 @@ test('Held arrows turn and pitch the room; releasing stops movement and Clear ex
     assert.notDeepEqual(m.frames[1],m.frames[2])
     assert.notDeepEqual(m.frames[2],m.frames[3])
     assert.equal(m.clockHz,6_000_000,'Room restores the normal clock on exit')
-    assert.ok(m.tStates<17_000_000,'Four room frames must stay within the optimized native cycle budget')
+    assert.ok(m.tStates<2_100_000,'Four room frames must stay within the shared-vertex pipeline budget')
+    for(let i=1;i<m.frameTimes.length;i++)assert.ok(m.frameTimes[i]-m.frameTimes[i-1]<500_000,'Moving room frames must stay below 500,000 cycles')
 })
 
 test('Idle room polls promptly without continuously redrawing unchanged frames',()=>{
@@ -297,6 +298,13 @@ test('Native sleep retains real-time duration at the selected CPU speed',()=>{
     assert.ok(slow.tStates>55_000 && slow.tStates<65_000)
     assert.ok(fast.tStates>140_000 && fast.tStates<160_000)
     assert.equal(fast.clockHz,6_000_000)
+})
+
+test('Frame tick deltas track elapsed crystal time at either CPU speed',()=>{
+    for(const speed of [6,15]){
+        const result=execute(`import time\nset_cpu_speed(${speed})\nint previous=time.frame_ticks()\ntime.sleep(0.125)\nint elapsed=(time.frame_ticks()-previous)%256\ntime.stop_frame_timer()\nset_cpu_speed(6)`)
+        assert.ok(result.elapsed>=15 && result.elapsed<=17,'128 Hz time must advance about 16 ticks in 125 ms')
+    }
 })
 
 test('Fast camera multiplication and division remain exact across word boundaries',()=>{
@@ -334,6 +342,49 @@ test('Fast camera multiplication and division remain exact across word boundarie
         const address=runner.assembly.asm.scopes[0].symbols.get(label).value
         let value=0n;for(let j=0;j<count*2;j++)value|=BigInt(runner.machine.memory[address+j])<<BigInt(j*8)
         assert.equal(value,expected,label)
+    }
+})
+
+test('Compact wireframe rasterizer matches the reference pixel walk in all octants',()=>{
+    const p=spawnSync(process.env.TIPY_PYTHON || 'python',['-c',"from tipy.camera_math import link;from tipy.wireframe_runtime import _raster;print(link(_raster(),{'__gfx_wf_raster'}))"],{cwd:resolve('../..'),encoding:'utf8'})
+    assert.equal(p.status,0,p.stderr)
+    const cases=[]
+    for(const x of [0,12,47,80,95])for(const y of [0,15,32,63])cases.push([48,32,x,y],[x,y,48,32])
+    cases.push([0,0,95,63],[95,63,0,0],[0,63,95,0],[1,1,1,1])
+    for(const ink of [0,1])for(const values of cases){
+        const instructions=values.flatMap(n=>['        ld hl,'+n,'        push hl'])
+        const r=new Ti84Runner(['        org 0x9d95',...instructions,'        call __gfx_wf_raster',...values.map(()=>'        pop bc'),'        ret',p.stdout,'__gfx_ink: db '+ink].join('\n'))
+        if(!ink)r.machine.memory.fill(255,0x9340,0x9640)
+        for(let i=0;i<50&&!r.done;i++)r.runSlice()
+        assert.equal(r.done,true);assert.equal(r.machine.z80.regs.sp,0);assert.equal(r.machine.z80.regs.ix,0);assert.equal(r.machine.z80.regs.iy,0x89f0)
+        const expected=new Uint8Array(768);if(!ink)expected.fill(255)
+        let [x,y,x2,y2]=values,dx=Math.abs(x2-x),dy=Math.abs(y2-y),sx=x<x2?1:-1,sy=y<y2?1:-1
+        const steep=dy>dx;if(steep){[x,y]=[y,x];[x2,y2]=[y2,x2];[dx,dy]=[dy,dx];[sx,sy]=[sy,sx]}
+        let error=dx>>1
+        for(;;){const px=steep?y:x,py=steep?x:y,index=py*12+(px>>3),mask=128>>(px&7);if(ink)expected[index]|=mask;else expected[index]&=255^mask;if(x===x2)break;x+=sx;error+=dy;if(error>=dx){error-=dx;y+=sy}}
+        assert.deepEqual(r.machine.memory.slice(0x9340,0x9640),expected,values.join(',')+': '+ink)
+    }
+})
+
+test('Compact room projection remains within one LCD pixel of the reference renderer',()=>{
+    const source=readFileSync(resolve('../../examples/room.tip'),'utf8')
+    const lines=source.split('\n').filter(line=>line.trim().startsWith('line(')).map(line=>line.trim()).join('\n')
+    function close(a,b){
+        for(let y=0;y<64;y++)for(let x=0;x<96;x++)if(a[y*96+x]){
+            let found=false
+            for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)if(x+dx>=0&&x+dx<96&&y+dy>=0&&y+dy<64&&b[(y+dy)*96+x+dx])found=true
+            if(!found)return [x,y]
+        }
+        return null
+    }
+    for(const angle of [0,11.25,45,90,180,270])for(const pitch of [-700,-300,0,300,700]){
+        const x=Math.round(Math.sin(angle*Math.PI/180)*1024),z=Math.round(-Math.cos(angle*Math.PI/180)*1024)
+        const program=`no_fill()\ninit_camera(75,2,300)\ncamera(0,0,0,${x},${pitch},${z})\nclear()\n${lines}\nrender()`
+        const fast={optimization:'aggressive'},reference={optimization:'reference'}
+        execute(program,fast);execute(program,reference)
+        assert.match(fast.assembly,/__gfx_cam_fast_batch:/)
+        assert.equal(close(fast.screen,reference.screen),null,`fast -> ref ${angle}/${pitch}`)
+        assert.equal(close(reference.screen,fast.screen),null,`ref -> fast ${angle}/${pitch}`)
     }
 })
 

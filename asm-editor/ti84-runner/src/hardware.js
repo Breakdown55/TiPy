@@ -112,6 +112,9 @@ export class Ti84Runner {
         this.keys = new Set()
         this.keyMask = 255
         this.cpuMode = 0
+        this.clockBaseSeconds=0
+        this.clockBaseStates=0
+        this.frameTimer={clock:0,control:0,start:0,value:0}
         this.nextInterrupt = 6_000_000 / 118
         this.interruptMask = 0x0b
         this.interruptPending = 0
@@ -157,6 +160,7 @@ export class Ti84Runner {
     }
     releaseKeys() { this.keys.clear(); this.lastScan = 0 }
     get clockHz() { return this.cpuMode ? 15_000_000 : 6_000_000 }
+    get elapsedSeconds() { return this.clockBaseSeconds+(this.machine.tStateCount-this.clockBaseStates)/this.clockHz }
     readPort(port) {
         if (port === 1) {
             let result = 255
@@ -170,6 +174,9 @@ export class Ti84Runner {
         if (port === 4) return this.interruptPending
         if (port === 6) return this.bank
         if (port === 0x20) return this.cpuMode
+        if (port === 0x30) return this.frameTimer.clock
+        if (port === 0x31) return this.frameTimer.control
+        if (port === 0x32) return (this.frameTimer.value-(this.frameTimer.clock?Math.floor((this.elapsedSeconds-this.frameTimer.start)*128):0))&255
         if (port === 0x10) return this.lcd.status()
         if (port === 0x11) return this.lcd.read()
         throw new Error(`Unsupported TI port read ${hex(port, 2)}`)
@@ -177,9 +184,22 @@ export class Ti84Runner {
     writePort(port,value) {
         if (port === 0x20) {
             const oldClock=this.clockHz,now=this.machine.tStateCount
+            this.clockBaseSeconds=this.elapsedSeconds;this.clockBaseStates=now
             this.cpuMode=value & 3
             this.nextInterrupt=now+Math.max(0,this.nextInterrupt-now)*this.clockHz/oldClock
             this.scanTime=now+Math.max(0,this.scanTime-now)*this.clockHz/oldClock
+        }
+        else if (port === 0x30) {
+            if(value!==0 && value!==0x46)throw new Error('Unsupported crystal timer clock; use 128 Hz')
+            this.frameTimer.value=this.readPort(0x32);this.frameTimer.start=this.elapsedSeconds;this.frameTimer.clock=value
+        }
+        else if (port === 0x31) {
+            if(value!==0)throw new Error('Only the free-running frame timer without interrupts is supported')
+            this.frameTimer.control=value
+        }
+        else if (port === 0x32) {
+            if(value!==0)throw new Error('Frame timer must use the free-running zero reload')
+            this.frameTimer.value=0;this.frameTimer.start=this.elapsedSeconds
         }
         else if (port === 1) this.keyMask = value
         else if (port === 3) { this.interruptMask = value; this.interruptPending &= value }

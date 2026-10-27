@@ -3,7 +3,7 @@
 import re
 from .errors import CompileError
 
-MEMBERS = {"time": {"sleep"}, "random": {"randint", "seed"},
+MEMBERS = {"time": {"sleep","frame_ticks","stop_frame_timer"}, "random": {"randint", "seed"},
            "math": {"radians", "sin", "cos"}}
 from .graphics_library import PUBLIC
 MEMBERS['py5']=PUBLIC|{'line','BLACK','WHITE','CLOSE','OPEN'}

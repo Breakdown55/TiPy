@@ -9,6 +9,9 @@ INTRINSICS={
     'cam_mark':(['mode'],['i16'],'void',None),
     'cam_point':(['x','y','z','width'],['i16']*4,'void',None),
     'cam_line':(['x1','y1','z1','x2','y2','z2','width'],['i16']*7,'void',None),
+    'cam_batch':(['data','width'],['i16']*2,'void',None),
+    'cam_fast_batch':(['data'],['i16'],'void',None),
+    'cam_fast_look':(['ex','ey','ez','tx','ty','tz','ux','uy','uz'],['i16']*9,'void',[0,0,0,0,0,-1,0,1,0]),
     'cam_vertex':(['x','y','z'],['i16']*3,'i16[]',None),
     'cam_fill':(['points'],['i16[][]'],'void',None),
     'cam_edges':(['points','closed','width'],['i16[][]','bool','i16'],'void',None),
@@ -103,3 +106,14 @@ __tipy_native_cam_begin()'''
             f['body']=parse(tokenize(source))['body'][0]['body']
             if f['name']=='__tipy_gfx_project':f['return_type']='tuple[int,int]'
     helpers['body'].insert(0,parse(tokenize('int[][] __tipy_gfx_camera_vertices=[]\n'))['body'][0])
+    batch=parse(tokenize('''def __tipy_gfx_batch(int data):
+    if __tipy_gfx_style[2]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[3])
+        __tipy_native_cam_batch(data,__tipy_gfx_style[4])
+'''))['body'][0]
+    helpers['body'].append(batch)
+    helpers['body'].append(parse(tokenize('''def __tipy_gfx_fast_batch(int data):
+    if __tipy_gfx_style[2]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[3])
+        __tipy_native_cam_fast_batch(data)
+'''))['body'][0])

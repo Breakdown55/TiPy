@@ -9,6 +9,31 @@ import math
 
 def assembly(used):
     code = []
+    if used & {'time.frame_ticks','time.stop_frame_timer'}:
+        code.append('''__native_frame_timer_ready: db 0
+__native_frame_ticks:
+        ld a,(__native_frame_timer_ready)
+        or a
+        jr nz,__native_frame_read
+        ld a,0x46
+        out (0x30),a
+        xor a
+        out (0x31),a
+        out (0x32),a
+        inc a
+        ld (__native_frame_timer_ready),a
+__native_frame_read:
+        in a,(0x32)
+        neg
+        ld l,a
+        ld h,0
+        ret
+__native_stop_frame_timer:
+        xor a
+        out (0x30),a
+        out (0x31),a
+        ld (__native_frame_timer_ready),a
+        ret''')
     if "sleep_integer" in used:
         code.append("""__native_sleep_integer:
         bit 7,h

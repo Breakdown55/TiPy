@@ -24,6 +24,10 @@ def install(tree):
         visited.add(name);active.append(user_functions[name]);pending.update(n['name'] for n in walk(user_functions[name]) if n.get('kind') in {'call','name'})
     matrix=any(n.get('kind')=='call' and n['name'] in MATRIX_NAMES for n in walk(active))
     camera=any(n.get('kind')=='call' and n['name'] in CAMERA_PUBLIC for n in walk(active))
+    if camera:
+        from .wireframe import batch_lines
+        batch_lines(tree)
+        nodes=list(walk(tree))
     dimensions={len(n['arguments']) for n in walk(active) if n.get('kind')=='call' and n.get('name')=='vertex'}
     outline_only=False
     if 'fill' not in called:

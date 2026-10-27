@@ -75,6 +75,8 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
     math_used = set()
     pixels_used = set()
     constant_data = {}
+    geometry_packets = {}
+    vertex_programs = {}
     iterator_helpers={};iterator_code=[];iterator_lists={};iterator_new_used=False
     argument_binders={}
     truth_helpers={};aggregate_helpers={}
@@ -497,7 +499,8 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             expression(item['arguments'][0]);emit('call __native_key_down')
         elif kind == "stdlib":
             name, args = item["name"], item["arguments"]
-            if name == "random.randint":
+            if name in {'time.frame_ticks','time.stop_frame_timer'}:emit('call __native_'+name.split('.')[-1])
+            elif name == "random.randint":
                 for arg in args:
                     expression(arg); emit("push hl")
                 emit("call __native_randint", "pop de", "pop de")
@@ -518,6 +521,26 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                 emit(f"call __native_{name.split('.')[-1]}")
         elif kind=="global_value":
             emit(f"ld hl,({item['label']})")
+        elif kind=='geometry_data':
+            data=tuple(item['data'])
+            if item.get('compact'):
+                if data not in geometry_packets:
+                    from .wireframe import vertex_program
+                    count=item['vertex_count'];vertices=[]
+                    for i in range(count):
+                        row=[]
+                        for j in range(3):
+                            k=8+i*6+j*2;value=data[k]|data[k+1]<<8;row.append(value-65536 if value&32768 else value)
+                        vertices.append(tuple(row))
+                    key=tuple(vertices)
+                    if key not in vertex_programs:
+                        name=f'__gfx_wf_vertices_{len(vertex_programs)}';vertex_programs[key]=(name,vertex_program(vertices,name))
+                    geometry_packets[data]=(f'__geometry_{len(geometry_packets)}',vertex_programs[key][0],data[:8]+data[8+count*6:])
+                emit(f'ld hl,{geometry_packets[data][0]}')
+            else:
+                if data not in constant_data:constant_data[data]=f'__constant_data_{len(constant_data)}'
+                emit(f'ld hl,{constant_data[data]}')
+            pixels_used.add('batch_capacity:'+str(item['vertex_count']))
         elif kind == "address":
             emit(f"ld hl,{item['label']}")
         elif kind == "constant_list":
@@ -536,6 +559,13 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
         elif kind == "name":
             load(item)
         elif kind == "list":
+            def literal(value):
+                if value['kind'] in {'number','boolean'}:return int(value['value'])
+                if value['kind']=='negate' and value['value']['kind']=='number':return -value['value']['value']
+                return None
+            scalars=[literal(value) for value in item['values']]
+            if len(scalars)>=16 and item['type'] in {'i16[]','u8[]','bool[]'} and all(value is not None for value in scalars):
+                expression({'kind':'constant_list','type':item['type'],'values':scalars});return
             width = array_width(item["type"])
             runtime("new", [width])
             emit("push hl")
@@ -1329,6 +1359,10 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
         if any(n.get('kind')=='graphics' and n.get('name')=='triangle' for n in walk(tree)):object_types.update({'tuple[i16,i16][]','tuple[i16,i16]'})
         dictionary_types = {dict_types(t) if is_dict(t) else (element_type(t),"i16") for t in object_types if is_dict(t) or is_set(t)}
         code.extend(["", "; Used heap runtime routines and their dependencies", runtime_assembly(required, dictionary_types, object_types,tracing,generators,_heap_bytes)])
+    for name,program in vertex_programs.values():code.append(program)
+    for label_name,program,values in geometry_packets.values():
+        code.append(label_name+':\n        dw '+program)
+        for start in range(0,len(values),24):code.append('        db '+','.join(map(str,values[start:start+24])))
     for values, label_name in constant_data.items():
         code.append(label_name + ":")
         for start in range(0, len(values), 24):

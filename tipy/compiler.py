@@ -12,6 +12,7 @@ def compile_source(source, *, optimize_graphics=True, optimization="aggressive")
     source, bindings = imports(source)
     tokens = tokenize(source)
     tree = parse(tokens)
+    tree['fast_wireframes']=optimization=='aggressive'
     resolve(tree, {None: bindings})
     checked, symbols = check(tree)
     optimized, emitted_symbols, report = optimize_program(checked, symbols, optimization)
