@@ -492,6 +492,8 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                 end = label()
                 emit(f"jp z,{end}", "dec h")
                 mark(end)
+        elif kind=='key_down':
+            expression(item['arguments'][0]);emit('call __native_key_down')
         elif kind == "stdlib":
             name, args = item["name"], item["arguments"]
             if name == "random.randint":
@@ -1297,6 +1299,9 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
     if text_used:
         from .text_runtime import assembly as text_assembly
         code.append(text_assembly(text_used))
+    if any(n.get('kind')=='key_down' for n in walk(tree)):
+        from .keyboard import assembly as keyboard_assembly
+        code.append(keyboard_assembly())
     if native_used:
         from .native_runtime import assembly as native_assembly
         code.append(native_assembly(native_used))

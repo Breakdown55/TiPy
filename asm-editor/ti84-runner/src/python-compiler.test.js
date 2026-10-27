@@ -19,6 +19,7 @@ function execute(source, measurements) {
     assert.equal(processResult.status,0,processResult.stderr)
     const result = JSON.parse(processResult.stdout)
     const runner = new Ti84Runner(result.assembly)
+    for(const code of measurements?.heldKeys ?? [])runner.setKey(code,true)
     assert.ok(result.estimated_bytes>=runner.machineBytes,'RAM sizing must never underestimate assembled image bytes')
     if (measurements?.seedGraph) runner.machine.memory.set(measurements.seedGraph,0x9340)
     const frames = []
@@ -36,7 +37,11 @@ function execute(source, measurements) {
                 if(key) runner.setKey(key,true)
             }
             service()
-            if (runner.lcd.dirty) { frames.push(runner.lcd.pixels.slice()); runner.lcd.dirty = false }
+            if (runner.lcd.dirty) {
+                frames.push(runner.lcd.pixels.slice()); runner.lcd.dirty = false
+                const nextKeys=measurements.afterFrameKeys?.[frames.length-1]
+                if(nextKeys){runner.releaseKeys();for(const code of nextKeys)runner.setKey(code,true)}
+            }
         }
     }
     for (let i = 0; i < (measurements?.maxSlices ?? 400) && !runner.done; i++) runner.runSlice()
@@ -237,6 +242,34 @@ test('Camera example keeps its rendered output with a smaller code and data budg
     assert.ok(m.bytes-heap<=19400,'Camera demo code/data must fit its reduced budget')
     assert.ok(heap>=4608,'Code savings must remain available for allocations')
     assert.equal(m.screen.reduce((sum,pixel)=>sum+pixel,0),180)
+})
+
+test('Native key_down polls held keys repeatedly and across simultaneous keypad groups',()=>{
+    const m={heldKeys:[1,3,15,54],optimization:'reference'}
+    const values=execute(`int hits=0
+for i in range(20):
+    if key_down("down") and key_down("right") and key_down("clear") and key_down("2nd"):
+        hits+=1
+bool left=key_down("left")
+bool up=key_down("up")
+int code=3
+bool dynamic=key_down(code)
+bool invalid=key_down(0) or key_down(-1) or key_down(57) or key_down(256)`,m)
+    assert.equal(values.hits,20);assert.equal(values.left,0);assert.equal(values.up,0)
+    assert.equal(values.dynamic,1);assert.equal(values.invalid,0)
+    assert.doesNotMatch(m.assembly,/__heap_start:/)
+})
+
+test('Held arrows turn and pitch the room; releasing stops movement and Clear exits',()=>{
+    const m={project:true,optimization:'aggressive',maxSlices:20000,heldKeys:[],
+        afterFrameKeys:[[3],[3],[3,4],[],[],[15]]}
+    execute(readFileSync(resolve('../../examples/room.tip'),'utf8'),m)
+    assert.equal(m.frames.length,6)
+    assert.notDeepEqual(m.frames[0],m.frames[1])
+    assert.notDeepEqual(m.frames[1],m.frames[2])
+    assert.notDeepEqual(m.frames[2],m.frames[3])
+    assert.deepEqual(m.frames[3],m.frames[4])
+    assert.deepEqual(m.frames[4],m.frames[5])
 })
 
 function expectedCurve(cx,cy,rx,ry,filled) {

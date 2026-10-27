@@ -1,0 +1,43 @@
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright')
+const assert=require('node:assert/strict')
+const {resolve}=require('node:path')
+;(async()=>{
+    const browser=await chromium.launch({headless:true,channel:'msedge'})
+    try {
+        const page=await browser.newPage({viewport:{width:1400,height:810}})
+        const errors=[];page.on('pageerror',error=>errors.push(error.message))
+        await page.goto('http://127.0.0.1:8084')
+        await page.locator('#open').setInputFiles(resolve('../../examples/room.tip'))
+        await page.waitForFunction(()=>document.querySelector('#status').textContent==='Opened room.tip')
+        await page.getByRole('button',{name:'Set room.tip as entry file',exact:true}).click()
+        await page.locator('#run').click()
+        await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Compiled · '))
+        await page.locator('#execute').click()
+        await page.waitForFunction(()=>{
+            const c=document.querySelector('#lcd'),p=c.getContext('2d').getImageData(0,0,96,64).data
+            return Array.from(p).some((v,i)=>i%4!==3 && v===0)
+        })
+        const image=()=>page.locator('#lcd').evaluate(c=>c.toDataURL())
+        const initial=await image()
+        await page.keyboard.down('ArrowRight')
+        for(let i=0;i<2;i++) {
+            const previous=await image()
+            await page.waitForFunction(previous=>document.querySelector('#lcd').toDataURL()!==previous,previous)
+        }
+        await page.keyboard.down('ArrowUp')
+        const turning=await image()
+        await page.waitForFunction(previous=>document.querySelector('#lcd').toDataURL()!==previous,turning)
+        await page.keyboard.up('ArrowRight');await page.keyboard.up('ArrowUp')
+        await page.waitForTimeout(1500)
+        const stopped=await image()
+        await page.waitForTimeout(1000)
+        assert.equal(await image(),stopped,'Released keys must stop camera movement')
+        assert.notEqual(stopped,initial)
+        await page.screenshot({path:'dist/room-preview.png',fullPage:true})
+        await page.keyboard.down('Escape')
+        await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Finished · '))
+        await page.keyboard.up('Escape')
+        assert.deepEqual(errors,[])
+        console.log('PASS: room compiles, held arrows turn/pitch, release stops, Escape exits')
+    } finally {await browser.close()}
+})().catch(error=>{console.error(error);process.exitCode=1})

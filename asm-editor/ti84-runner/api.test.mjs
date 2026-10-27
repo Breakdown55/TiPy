@@ -47,7 +47,7 @@ test('HTTP compile resolves callbacks throughout the complete feature demo',asyn
 })
 test('HTTP compile supports py5-style 2D, orthographic and perspective demos',async()=>{
     await withServer(process.env.TIPY_PYTHON || 'python',async url=>{
-        for(const name of ['graphics_2d.tip','graphics_3d_ready.tip','camera.tip']) {
+        for(const name of ['graphics_2d.tip','graphics_3d_ready.tip','camera.tip','room.tip']) {
             const source=await readFile(new URL('../../examples/'+name,import.meta.url),'utf8')
             const response=await post(url,{files:{'main.tip':source},entry:'main.tip'})
             const result=await response.json()

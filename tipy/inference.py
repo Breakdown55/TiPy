@@ -60,7 +60,7 @@ def infer_returns(tree):
             return t+"[]" if t else None
         if k=="call":
             name=n["name"]
-            if name in {"bool","any","all"}:return "bool"
+            if name in {"bool","any","all","key_down"}:return "bool"
             if name in {"min","max","sum"} and n["arguments"]:
                 source=expr(n["arguments"][0],scope);e=iterable_element(source) if source else None
                 if e:

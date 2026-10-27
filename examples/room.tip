@@ -1,0 +1,52 @@
+# Hold LEFT/RIGHT to turn, UP/DOWN to look up/down. CLEAR (Escape) exits.
+# Click the calculator screen before using your keyboard.
+# Built entirely with existing XYZ lines; XY pixels form the crosshair.
+no_fill()
+init_camera(fov=75, near=2, far=300)
+int yaw=0
+int pitch=0
+int dx=[0,38,71,92,100,92,71,38,0,-38,-71,-92,-100,-92,-71,-38]
+int dz=[-100,-92,-71,-38,0,38,71,92,100,92,71,38,0,-38,-71,-92]
+
+while not key_down("clear"):
+    if key_down("left"):
+        yaw=(yaw-1)%16
+    if key_down("right"):
+        yaw=(yaw+1)%16
+    if key_down("up"):
+        pitch=min(pitch+10,70)
+    if key_down("down"):
+        pitch=max(pitch-10,-70)
+
+    camera(0,0,0,dx[yaw],pitch,dz[yaw])
+    clear()
+
+    # Floor and ceiling edges of a 120 x 60 x 160 room.
+    line(-60,-30,-80,60,-30,-80)
+    line(60,-30,-80,60,-30,80)
+    line(60,-30,80,-60,-30,80)
+    line(-60,-30,80,-60,-30,-80)
+    line(-60,30,-80,60,30,-80)
+    line(60,30,-80,60,30,80)
+    line(60,30,80,-60,30,80)
+    line(-60,30,80,-60,30,-80)
+    line(-60,-30,-80,-60,30,-80)
+    line(60,-30,-80,60,30,-80)
+    line(60,-30,80,60,30,80)
+    line(-60,-30,80,-60,30,80)
+
+    # Door outline on the front wall, window on the right wall.
+    line(-12,-30,-80,-12,12,-80)
+    line(-12,12,-80,12,12,-80)
+    line(12,12,-80,12,-30,-80)
+    line(60,-5,-25,60,15,-25)
+    line(60,15,-25,60,15,15)
+    line(60,15,15,60,-5,15)
+    line(60,-5,15,60,-5,-25)
+
+    pixel_on(47,32)
+    pixel_on(48,32)
+    pixel_on(49,32)
+    pixel_on(48,31)
+    pixel_on(48,33)
+    render()

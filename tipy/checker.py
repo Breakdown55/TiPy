@@ -8,7 +8,7 @@ PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
 SHAPE_BUILTINS = {"circle","ellipse","triangle","polygon","polyline"}
 from .graphics_library import PUBLIC as PY5_BUILTINS
 from .camera_api import INTRINSICS as CAMERA_INTRINSICS
-GRAPHICS_BUILTINS = PIXEL_BUILTINS | SHAPE_BUILTINS | PY5_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
+GRAPHICS_BUILTINS = PIXEL_BUILTINS | SHAPE_BUILTINS | PY5_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input", "key_down"}
 PYTHON_BUILTINS = {"range", "list", "abs", "sum", "min", "max", "any", "all", "enumerate", "zip"}
 
 
@@ -998,6 +998,17 @@ def check(tree):
             item["kind"] = "builtin"
             if managed(value_type):
                 item["owned"] = True
+        elif kind=='call' and item['name']=='key_down':
+            args=item['arguments']
+            if len(args)!=1 or args[0]['kind']=='keyword':raise CompileError('key_down expects one key name or integer key code',item)
+            arg=args[0]
+            if arg['kind']=='string':
+                from .keyboard import KEYS
+                name=arg['value'].lower()
+                if name not in KEYS:raise CompileError('Unknown key name: '+arg['value'],arg)
+                args[0]={'kind':'number','value':KEYS[name],'line':arg['line'],'column':arg['column']}
+            if expression(args[0])[0] not in {'i16','u8'}:raise CompileError('key_down requires a literal key name or integer key code',arg)
+            item.update(kind='key_down',type='bool');return 'bool',None
         elif kind == "call" and item["name"] in {"print", "input"}:
             name, arguments = item["name"], item["arguments"]
             count = 3
