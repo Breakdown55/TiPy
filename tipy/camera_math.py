@@ -6,21 +6,34 @@ def invoke(name,*args):return ('call','__gfx_'+name,*args)
 
 class NativeRoutine(ShapeRoutine):
     def load(self,name,pointer,count=2):
-        for i in range(count):self.set(name+str(i),word(add(pointer,2*i)))
+        # Multiword locals use contiguous little-endian slots. Copy the block
+        # once instead of rebuilding both addresses for every word.
+        self.expr(pointer);self.emit('push hl');self.expr(slot(name+'0'))
+        self.emit('ex de,hl','pop hl','push bc',f'ld bc,{count*2}','ldir','pop bc')
     def save(self,name,pointer,count=2):
-        for i in range(count):self.write(add(pointer,2*i),name+str(i))
+        self.expr(pointer);self.emit('push hl');self.expr(slot(name+'0'))
+        self.emit('pop de','push bc',f'ld bc,{count*2}','ldir','pop bc')
     def zero(self,name,count=2):
-        for i in range(count):self.set(name+str(i),0)
+        self.emit('ld hl,0')
+        for i in range(count):self._store(name+str(i))
     def binary(self,target,a,b,subtract=False,count=2,checked=False):
         if checked:
             self.expr(a+str(count-1));self.emit('ld b,h');self.expr(b+str(count-1));self.emit('ld c,h')
-        for i in range(count):
-            self.expr(a+str(i));self.emit('push hl');self.expr(b+str(i));self.emit('ex de,hl','pop hl')
-            if i==0:self.emit('or a' if subtract else 'nop')
-            self.emit(('sbc hl,de' if subtract else 'add hl,de') if i==0 else ('sbc hl,de' if subtract else 'adc hl,de'));self._store(target+str(i))
+        if count==4:
+            self.emit('push bc');self.expr(slot(a+'0'));self.emit('push hl')
+            self.expr(slot(b+'0'));self.emit('push hl');self.expr(slot(target+'0'))
+            self.emit('ld b,h','ld c,l','pop de','pop hl',f'call __gfx_{"sub" if subtract else "add"}64','pop bc')
+            if checked:self.expr(target+str(count-1))
+        else:
+            for i in range(count):
+                self.expr(a+str(i));self.emit('push hl');self.expr(b+str(i));self.emit('ex de,hl','pop hl')
+                if i==0:self.emit('or a' if subtract else 'nop')
+                self.emit(('sbc hl,de' if subtract else 'add hl,de') if i==0 else ('sbc hl,de' if subtract else 'adc hl,de'));self._store(target+str(i))
         if checked:
             end=self.label();self.emit('ld a,b','xor c','bit 7,a',f'jp nz,{end}','ld a,b','xor h','bit 7,a',f'jp z,{end}');self.fail(14);self.mark(end)
     def negate(self,name,count=2):
+        if count in {2,4}:
+            self.expr(slot(name+'0'));self.emit(f'call __gfx_neg{count*16}');return
         for i in range(count):
             self.expr(name+str(i));self.emit('ld a,l','cpl','ld l,a','ld a,h','cpl','ld h,a');self._store(name+str(i))
         self.emit('or a')
@@ -43,6 +56,34 @@ class NativeRoutine(ShapeRoutine):
 
 def routines():
     out=[_multiply(True).replace('__gfx_mul32','__gfx_u_mul32')]
+    # Register ABI: HL=left, DE=right, BC=result. Pair increments preserve
+    # carry, so the same kernels work in-place without temporary buffers.
+    for subtract in (False,True):
+        code=['__gfx_'+('sub' if subtract else 'add')+'64:']
+        if subtract:code.extend(['        ex de,hl','        or a'])
+        for i in range(8):
+            code.extend(['        ld a,(de)'])
+            if subtract:code.append('        sbc a,(hl)')
+            else:code.append('        '+('add' if i==0 else 'adc')+' a,(hl)')
+            code.extend(['        ld (bc),a','        inc hl','        inc de','        inc bc'])
+        out.append('\n'.join(code+['        ret']))
+    out.append('''__gfx_neg32:
+        push bc
+        ld b,4
+        jr __gfx_neg_bytes
+__gfx_neg64:
+        push bc
+        ld b,8
+__gfx_neg_bytes:
+        xor a
+__gfx_neg_loop:
+        ld a,0
+        sbc a,(hl)
+        ld (hl),a
+        inc hl
+        djnz __gfx_neg_loop
+        pop bc
+        ret''')
     r=NativeRoutine('s_mul32',('a','b','out'),words('x',2)+words('y',2)+words('p',4)+('negative',))
     r.load('x','a');r.load('y','b');r.set('negative',0)
     for name in ('x','y'):

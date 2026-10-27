@@ -4,6 +4,13 @@ from tipy.errors import CompileError
 
 
 class CameraTests(unittest.TestCase):
+    def test_constant_rotation_omits_trig_and_unused_2d_stroke_helpers(self):
+        assembly=compile_source('init_camera()\nrotate_y(-0.5)\npoint(10,0,0)')['assembly']
+        self.assertIn('__gfx_mat_rotate_coeff:',assembly)
+        for label in ['__gfx_mat_rotate:', '__gfx_sin_raw:', '__gfx_sin_quarter:',
+                      '__gfx_stroke:', '__gfx_offset_polyline:']:
+            self.assertNotIn(label,assembly)
+
     def test_short_directions_keep_normalization_precision(self):
         from tipy.camera_api import camera_basis
         basis = camera_basis([0,0,0,1,1,0,0,0,1])

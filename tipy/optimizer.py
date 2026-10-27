@@ -3,6 +3,32 @@
 import re
 
 
+def relax_graphics_branches(assembly):
+    """Use short branches within a graphics routine when the range is proven.
+
+    Conservative instruction sizes make the distance an upper bound. Repeating
+    allows a newly shortened branch to bring another branch into range.
+    """
+    from .assembly_size import estimate
+    lines=assembly.splitlines();sizes={}
+    while True:
+        labels={};positions=[];offset=0
+        for line in lines:
+            positions.append(offset)
+            label=re.match(r'^(__gfx_\w+):',line)
+            if label:labels[label[1]]=offset
+            if line not in sizes:sizes[line]=estimate(line)
+            offset+=sizes[line]
+        changed=False
+        for i,line in enumerate(lines):
+            jump=re.fullmatch(r'\s*jp (?:(nz|z|nc|c),)?(__gfx_\w+)\s*',line)
+            if not jump or jump[2] not in labels:continue
+            target=labels[jump[2]];distance=target-positions[i]-(3 if target>positions[i] else 2)
+            if -128<=distance<=127:
+                lines[i]='        jr '+((jump[1]+',') if jump[1] else '')+jump[2];changed=True
+        if not changed:return '\n'.join(lines)
+
+
 def optimize(assembly):
     previous = None
     while assembly != previous:

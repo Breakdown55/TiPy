@@ -81,6 +81,10 @@ def routines():
     for value,prefix in (('sin','s'),('cos','c')):
         r.extend(prefix,value)
         for _ in range(8):r.shift(prefix,False)
+    r.expr(invoke('mat_rotate_coeff','s0','s1','c0','c1','axis'));r.ret();out.append(r.finish())
+
+    r=NativeRoutine('mat_rotate_coeff',('slo','shi','clo','chi','axis'),words('s',2)+words('c',2))
+    for target,source in (('s0','slo'),('s1','shi'),('c0','clo'),('c1','chi')):r.set(target,source)
     r.expr(invoke('mat_identity','@__gfx_rhs'))
     def set_cell(index,prefix,negative=False):
         if negative:r.negate(prefix)

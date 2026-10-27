@@ -17,6 +17,28 @@ INTRINSICS={
 }
 
 
+def constant_rotation(argument):
+    """Match the native Q16 angle reduction and Q8 sine table exactly."""
+    if argument['kind']=='number':raw=argument['value']<<16
+    elif argument['kind']=='decimal':raw=argument['raw']<<8
+    elif argument['kind']=='negate':
+        child=argument['value']
+        if child['kind']=='number':raw=-(child['value']<<16)
+        elif child['kind']=='decimal':raw=-(child['raw']<<8)
+        else:return None
+    else:return None
+    import math
+    phase=(abs(raw)%411775)>>8
+    def sine(phase):
+        phase%=1608;negative=phase>=804
+        if negative:phase-=804
+        if phase>=403:phase=804-phase
+        value=round(math.sin(phase*math.pi/804)*256)&255
+        if phase and not value:value=256
+        return -value if negative else value
+    return [(sine(phase)*(-1 if raw<0 else 1))<<8,sine(phase+402)<<8]
+
+
 def camera_basis(values):
     """Exact integer counterpart of the native normalizer, for constant folding."""
     from math import isqrt

@@ -1,9 +1,19 @@
 import unittest
 
-from tipy.optimizer import optimize
+from tipy.optimizer import optimize, relax_graphics_branches
 
 
 class OptimizerTests(unittest.TestCase):
+    def test_graphics_short_branches_respect_both_displacement_boundaries(self):
+        for count,short in [(127,True),(128,False)]:
+            source='jp z,__gfx_end\n'+'nop\n'*count+'__gfx_end:\nret\n'
+            self.assertEqual(relax_graphics_branches(source).lstrip().startswith('jr z,'),short)
+        for count,short in [(126,True),(127,False)]:
+            source='__gfx_start:\n'+'nop\n'*count+'jp nc,__gfx_start\n'
+            self.assertEqual('jr nc,' in relax_graphics_branches(source),short)
+        source='jp m,__gfx_end\njp __external\n__gfx_end:\nret'
+        self.assertEqual(relax_graphics_branches(source),source)
+
     def test_redundant_stack_pairs_are_removed_until_stable(self):
         self.assertEqual(optimize("push hl\npush de\npop de\npop hl\nret\n"), "ret\n")
         source = "push hl\n__L1:\npop hl\n"

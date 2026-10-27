@@ -218,6 +218,27 @@ render()`,m)
     assert.deepEqual(m.graph,e.graph)
 })
 
+test('Constant camera rotations exactly match runtime coefficients on every axis',()=>{
+    for(const axis of ['x','y','z'])for(const angle of ['0.5','-0.5','7']) {
+        const a={project:true,maxSlices:20000},b={project:true,maxSlices:20000}
+        const suffix='\npoint(12,5,10)\npoint(-8,-6,-5)\nrender()'
+        execute('clear()\ninit_camera()\nrotate_'+axis+'('+angle+')'+suffix,a)
+        execute('clear()\ninit_camera()\nangle='+angle+'\nrotate_'+axis+'(angle)'+suffix,b)
+        assert.deepEqual(a.graph,b.graph,axis+': '+angle)
+        assert.doesNotMatch(a.assembly,/__gfx_mat_rotate:/)
+        assert.match(b.assembly,/__gfx_mat_rotate:/)
+    }
+})
+
+test('Camera example keeps its rendered output with a smaller code and data budget',()=>{
+    const m={project:true,optimization:'aggressive',maxSlices:20000}
+    execute(readFileSync(resolve('../../examples/camera.tip'),'utf8'),m)
+    const heap=Number(m.assembly.match(/__heap_start:\s*defs (\d+)/)[1])
+    assert.ok(m.bytes-heap<=19400,'Camera demo code/data must fit its reduced budget')
+    assert.ok(heap>=4608,'Code savings must remain available for allocations')
+    assert.equal(m.screen.reduce((sum,pixel)=>sum+pixel,0),180)
+})
+
 function expectedCurve(cx,cy,rx,ry,filled) {
     const inside=(x,y)=>{
         if(rx<0||ry<0)return false

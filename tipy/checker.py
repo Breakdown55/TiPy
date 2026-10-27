@@ -1025,7 +1025,11 @@ def check(tree):
             if name=='scale' and len(args)==1:args.extend([args[0],args[0]])
             elif name=='scale' and len(args)==2:args.append(number(1))
             item.update(kind='native_matrix',name=MATRIX_ENTRIES[name],type='void')
-            if name.startswith('rotate'):item['axis']={'rotate':2,'rotate_z':2,'rotate_x':0,'rotate_y':1}[name]
+            if name.startswith('rotate'):
+                from .camera_api import constant_rotation
+                item['axis']={'rotate':2,'rotate_z':2,'rotate_x':0,'rotate_y':1}[name]
+                coefficients=constant_rotation(args[0])
+                if coefficients is not None:item['rotation_constants']=coefficients
             freeze_arguments(item,original);return 'void',None
         elif kind=='call' and item['name'].startswith('__tipy_native_') and item['name'][len('__tipy_native_'):] in CAMERA_INTRINSICS:
             from .camera_api import INTRINSICS

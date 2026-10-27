@@ -614,6 +614,10 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                 emit('ld hl,1','ld (__gfx_cam_enabled),hl');pixels_used.add('cam_state')
             else:runtime(item['name'],item['arguments'],'__gfx_');pixels_used.add(item['name'])
         elif kind=='native_matrix':
+            if 'rotation_constants' in item:
+                for value in item['rotation_constants']:
+                    emit(f'ld hl,{value&65535}','push hl',f'ld hl,{(value>>16)&65535}','push hl')
+                emit(f"ld hl,{item['axis']}",'push hl','call __gfx_mat_rotate_coeff',*(['pop bc']*5));pixels_used.add('mat_rotate_coeff');return
             for arg in item['arguments']:
                 expression(arg)
                 if arg['type'] in {'i16','u8'}:emit('ex de,hl','ld hl,0')
