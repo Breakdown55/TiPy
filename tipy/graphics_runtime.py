@@ -336,7 +336,9 @@ def graphics_assembly(used):
         from .light_runtime import routines as light_routines
         capacity=max((int(n.split(':')[1]) for n in used if n.startswith('batch_capacity:')),default=64)
         extended=bool(used & {'solid_point_light','solid_directional_light'})
-        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity)+mesh_routines(capacity,solid,extended,'solid_only' not in used)+solid_routines(extended,'solid_no_cull' not in used)+light_routines('solid_point_light' in used)
+        no_depth='solid_no_depth' in used
+        dynamic_depth='solid_dynamic_depth' in used
+        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity)+mesh_routines(capacity,solid,extended,'solid_only' not in used,dynamic_depth)+solid_routines(extended,'solid_no_cull' not in used,not no_depth,dynamic_depth)+light_routines('solid_point_light' in used)
         roots={'__gfx_'+name for name in camera_entries}
         native=link(groups,roots)
         routines.append(native)

@@ -47,6 +47,7 @@ function execute(source, measurements) {
                 frameTimes.push(runner.machine.tStateCount)
                 const nextKeys=measurements.afterFrameKeys?.[frames.length-1]
                 if(nextKeys){runner.releaseKeys();for(const code of nextKeys)runner.setKey(code,true)}
+                measurements.onFrame?.(runner,result,frames.length)
             }
         }
     }
@@ -434,6 +435,37 @@ test(`${gameFile} pauses physics while continuing to poll the exit key`,()=>{
 }
 
 const meshCube='int model=mesh([(-8,-8,-8),(8,-8,-8),(8,8,-8),(-8,8,-8),(-8,-8,8),(8,-8,8),(8,8,8),(-8,8,8)],[(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)])\n'
+test('LUMEN RUN walks through all beacons, returns to the exit, wins and restarts',()=>{
+    let won=false,restarted=false
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000,
+        onFrame(r,result,count){
+            assert.ok(count<180,'Game route should finish in a bounded number of frames')
+            const value=name=>{const a=r.assembly.asm.scopes[0].symbols.get(result.symbols[name].label).value;const v=r.machine.memory[a]|r.machine.memory[a+1]<<8;return v>32767?v-65536:v}
+            const stage=value('stage'),yaw=value('yaw')
+            assert.ok(Math.abs(value('px'))<=224&&Math.abs(value('pz'))<=224)
+            r.releaseKeys()
+            if(stage===4){won=true;m.winFrame=r.lcd.pixels.slice();r.setKey(9,true)}
+            else if(won){restarted=true;assert.equal(stage,0);assert.equal(value('px'),-160);assert.equal(value('pz'),160);r.setKey(15,true)}
+            else {const delta=((stage*32-yaw+64)&127)-64;r.setKey(Math.abs(delta)<=2?4:delta>0?3:2,true)}
+        }}
+    execute(readFileSync(resolve('../../examples/lumen_run.tip'),'utf8'),m)
+    assert.ok(won&&restarted);assert.ok(m.frames.length>30);assert.ok(m.bytes<24170)
+    assert.ok(!m.assembly.includes('__gfx_solid_depth:'));assert.equal(m.clockHz,6_000_000)
+})
+
+test('LUMEN RUN clamps wall collisions and allows held-key strafing',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000,afterFrameKeys:Array.from({length:10},(_,i)=>i===9?[15]:[54,2])}
+    const values=execute(readFileSync(resolve('../../examples/lumen_run.tip'),'utf8'),m)
+    assert.equal(values.px,-224);assert.equal(values.pz,160);assert.equal(values.yaw,0)
+})
+
+test('Mixed depth-tested meshes and explicitly ordered overlays honor the per-draw switch',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000}
+    execute('int a=mesh([(-12,-10,12),(12,-10,12),(0,12,12)],faces=[(0,1,2,0)])\nint b=mesh([(-12,-10,0),(12,-10,0),(0,12,0)],faces=[(0,1,2,16)])\nclear()\ndraw_mesh(a,cull=False,shaded=False)\ndraw_mesh(b,cull=False,shaded=False)\nrender()\nclear()\ndraw_mesh(a,cull=False,shaded=False)\ndraw_mesh(b,cull=False,shaded=False,depth_test=False)\nrender()',m)
+    assert.equal(m.frames[0][32*96+48],1);assert.equal(m.frames[1][32*96+48],0)
+    assert.ok(m.frames[1].reduce((s,p)=>s+p,0)<m.frames[0].reduce((s,p)=>s+p,0))
+    assert.ok(m.assembly.includes('__gfx_solid_depth:'));assert.ok(m.assembly.includes('__gfx_solid_flat_span:'))
+})
 test('Explicit directional and point lights add, attenuate and respect world-space normals',()=>{
     const model='int m=mesh([(-12,-10,0),(12,-10,0),(0,12,0)],faces=[(0,1,2)])\n'
     const states=[

@@ -12,7 +12,7 @@ def _copy(r,src,dst,count=12):
     r.expr(src);r.emit('push hl');r.expr(dst);r.emit('ex de,hl','pop hl',f'ld bc,{count}','ldir')
 
 
-def routines(extended=False,culling=True):
+def routines(extended=False,culling=True,depth_enabled=True,dynamic_depth=False):
     out=['__gfx_solid_guard_before: db 165\n__gfx_solid_depth: defs 6144,0\n__gfx_solid_guard_after: db 90','__gfx_solid_flags: defs 64,0',
          '__gfx_solid_light_vector: dw -68,137,205\n__gfx_solid_ambient: dw 3\n__gfx_solid_direction_enabled: dw 1',
          '''__gfx_solid_poly_a: defs 144,0
@@ -98,7 +98,7 @@ __gfx_solid_pattern: db 0''']
         r.write(add('@__gfx_solid_flags','i'),invoke('solid_project','p'),1)
         r.set('p',add('p',12));r.set('i',add('i',1))
     r.while_(('ult','i','count'),prepare);r.ret();out.append(r.finish())
-    out.append(_span())
+    out.append(_span() if depth_enabled else _flat_span())
 
     r=NativeRoutine('solid_triangle',('a','b','c','shade'),('y','end','v','n','out','left','right'))
     for i,(a,b) in enumerate((('a','b'),('b','c'),('c','a'))):
@@ -117,7 +117,29 @@ __gfx_solid_pattern: db 0''']
         r.if_(('eq','n',2),span);r.set('y',add('y',1))
     r.while_(('ult','y','end'),row);r.ret();out.append(r.finish())
     out.append(_draw(extended,culling))
+    if not depth_enabled:
+        out[0]=''
+        out=[('__gfx_solid_clear:\n        ret' if s.startswith('__gfx_solid_clear:') else s) for s in out]
+    if dynamic_depth:
+        out=[s.replace('__gfx_solid_span:\n','__gfx_solid_span:\n        ld a,(__gfx_solid_depth_enabled)\n        or a\n        jp z,__gfx_solid_flat_span\n') for s in out]
+        out.extend(['__gfx_solid_depth_enabled: dw 1',_flat_span().replace('__gfx_solid_span','__gfx_solid_flat_span')])
     return out
+
+
+def _flat_span():
+    """Opaque ordered drawing for explicitly depth-free convex scenes."""
+    r=NativeRoutine('solid_span',('lx','lq','rx','rq','y','shade'),('start','end','pattern'))
+    for name,x in (('start','lx'),('end','rx')):
+        r.expr(add(x,127));r.emit('ld l,h','ld h,0');r._store(name)
+    r.if_(('uge','start','end'),lambda:r.ret())
+    r.expr('y');r.emit('ld a,l','and 3','ld c,a','ld b,0');r.expr('shade');r.emit('add hl,hl','add hl,hl','add hl,bc','ld de,__gfx_solid_patterns','add hl,de','ld l,(hl)','ld h,0');r._store('pattern')
+    r.expr('y');r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','push hl');r.expr('start');r.emit('srl l','srl l','srl l','pop de','add hl,de','ld de,0x9340','add hl,de','push hl')
+    r.expr('start');r.emit('ld a,l','and 7','ld b,a','ld a,128','inc b')
+    shift,ready,loop,black,store,step=(r.label() for _ in range(6))
+    r.emit(f'jr {ready}');r.mark(shift);r.emit('rrca');r.mark(ready);r.emit(f'djnz {shift}','ld c,a')
+    r.expr(sub('end','start'));r.emit('ld b,l');r.expr('pattern');r.emit('ld d,l','pop hl')
+    r.mark(loop);r.emit('ld a,d','and c',f'jr nz,{black}','ld a,c','cpl','and (hl)',f'jr {store}');r.mark(black);r.emit('ld a,(hl)','or c');r.mark(store);r.emit('ld (hl),a','rrc c',f'jr nc,{step}','inc hl');r.mark(step);r.emit(f'djnz {loop}',f'jp {r.name}_return')
+    return r.finish()
 
 
 def _edge_dda():

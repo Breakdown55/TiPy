@@ -1,0 +1,28 @@
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright')
+const {resolve}=require('node:path')
+const assert=require('node:assert/strict')
+;(async()=>{
+    const browser=await chromium.launch({headless:true,channel:'msedge'})
+    try {
+        const page=await browser.newPage({viewport:{width:1400,height:810}})
+        const errors=[];page.on('pageerror',e=>errors.push(e.message))
+        await page.goto('http://127.0.0.1:8084')
+        await page.locator('#open').setInputFiles(resolve('../../examples/lumen_run.tip'))
+        await page.waitForFunction(()=>document.querySelector('#status').textContent==='Opened lumen_run.tip')
+        await page.getByRole('button',{name:'Set lumen_run.tip as entry file',exact:true}).click()
+        await page.locator('#run').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Compiled · '))
+        console.log(await page.locator('#status').textContent())
+        await page.locator('#execute').click()
+        await page.waitForFunction(()=>Array.from(document.querySelector('#lcd').getContext('2d').getImageData(0,0,96,64).data).some((v,i)=>i%4!==3&&v===0))
+        const image=()=>page.locator('#lcd').evaluate(c=>c.toDataURL())
+        const press=async key=>{const previous=await image();await page.keyboard.down(key);await page.waitForFunction(previous=>document.querySelector('#lcd').toDataURL()!==previous,previous);await page.keyboard.up(key);await page.waitForTimeout(1000)}
+        await page.locator('#lcd').screenshot({path:'dist/lumen-start.png'})
+        await press('ArrowUp');await press('ArrowRight')
+        await page.keyboard.down('Control');await press('ArrowLeft');await page.keyboard.up('Control')
+        await page.locator('#lcd').screenshot({path:'dist/lumen-walk.png'})
+        await page.screenshot({path:'dist/lumen-browser.png',fullPage:true})
+        await page.keyboard.down('Escape');await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Finished · '));await page.keyboard.up('Escape')
+        assert.deepEqual(errors,[])
+        console.log('PASS: first-person movement, turning, strafing, shaded view and exit')
+    } finally {await browser.close()}
+})().catch(e=>{console.error(e);process.exitCode=1})

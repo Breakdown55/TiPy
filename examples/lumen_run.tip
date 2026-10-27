@@ -1,0 +1,101 @@
+# LUMEN RUN: collect three beacons, then return to the starting corner.
+# UP/DOWN walk. LEFT/RIGHT turn. Hold 2nd/Control + LEFT/RIGHT to strafe.
+# CLEAR/Escape exits. Enter restarts after winning. Click the LCD for input.
+# The convex room and uniformly colored pickup use ordered drawing without
+# a depth buffer. Arbitrary overlapping scenes should keep depth_test=True.
+# A carried point light illuminates the room; faces use native 1-bit shading.
+int room=mesh([
+    (-18,-8,-18),(18,-8,-18),(18,10,-18),(-18,10,-18),
+    (-18,-8,18),(18,-8,18),(18,10,18),(-18,10,18)
+],faces=[(0,1,2),(0,2,3),(5,4,7),(5,7,6),(4,0,3),(4,3,7),
+         (1,5,6),(1,6,2),(0,4,5),(0,5,1)])
+int beacon=mesh([(-2,0,-2),(2,0,-2),(2,0,2),(-2,0,2),(0,5,0)],
+    faces=[(0,1,4,5),(1,2,4,5),(2,3,4,5),(3,0,4,5)])
+
+# Small parabolic sine approximation, in 128 steps per turn. The camera
+# normalizes the direction, so no trig library or runtime lists are needed.
+def heading(int a) -> int:
+    a=a&127
+    int sign=1
+    if a>=64:
+        a-=64
+        sign=-1
+    return sign*((a*(64-a))>>3)
+
+set_cpu_speed(15)
+init_camera(75,2,90)
+int px=-160
+int pz=160
+int yaw=0
+int stage=0
+int tx=-10
+int tz=-10
+bool dirty=True
+while not key_down("clear"):
+    if stage==4:
+        if key_down("enter"):
+            px=-160
+            pz=160
+            yaw=0
+            stage=0
+            tx=-10
+            tz=-10
+            dirty=True
+    else:
+        int turn=int(key_down("right"))-int(key_down("left"))
+        int walk=int(key_down("up"))-int(key_down("down"))
+        int strafe=0
+        if key_down("2nd"):
+            strafe=turn
+            turn=0
+        if turn!=0 or walk!=0 or strafe!=0:
+            yaw=(yaw+turn*3)&127
+            int dx=heading(yaw)
+            int dz=-heading(yaw+32)
+            px=max(-224,min(224,px+(dx*walk-dz*strafe)//8))
+            pz=max(-224,min(224,pz+(dz*walk+dx*strafe)//8))
+            dirty=True
+        tx=-10 if stage==0 or stage==3 else 10
+        tz=-10 if stage<2 else 10
+        if abs(px-tx*16)<40 and abs(pz-tz*16)<40:
+            stage+=1
+            tx=-10 if stage==0 or stage==3 else 10
+            tz=-10 if stage<2 else 10
+            dirty=True
+    if dirty:
+        clear()
+        if stage==4:
+            print("YOU WIN",27,22)
+            print("ENTER: RETRY",12,38)
+        else:
+            int x=px>>4
+            int z=pz>>4
+            camera(x,0,z,x+heading(yaw)//8,0,z-heading(yaw+32)//8)
+            no_lights()
+            ambient_light(2)
+            directional_light(-1,2,1,intensity=6)
+            point_light(x,3,z,radius=36,intensity=16)
+            draw_mesh(room,cull=False,depth_test=False)
+            draw_mesh(beacon,x=tx,y=-8,z=tz,cull=False,shaded=False,depth_test=False)
+            for header_y in range(9):
+                for header_x in range(96):
+                    pixel_off(header_x,header_y)
+            print(stage,2,1)
+            print("/3",9,1)
+            if stage==3:
+                print("EXIT",30,1)
+            int aim_x=tx-x
+            int aim_z=tz-z
+            int aim_side=heading(yaw)*aim_z+heading(yaw+32)*aim_x
+            int aim_front=heading(yaw)*aim_x-heading(yaw+32)*aim_z
+            if aim_front<0:
+                print("TURN",60,1)
+            elif aim_side>100:
+                print(">",84,1)
+            elif aim_side<-100:
+                print("<",84,1)
+            else:
+                print("^",84,1)
+        render()
+        dirty=False
+set_cpu_speed(6)

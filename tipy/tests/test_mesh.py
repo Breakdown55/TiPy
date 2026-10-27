@@ -6,6 +6,10 @@ MODEL='int m=mesh([(0,10,0),(-10,-10,0),(10,-10,0)],[(0,1),(1,2),(2,0)])\n'
 
 
 class MeshTests(unittest.TestCase):
+    def test_explicit_ordered_scene_omits_depth_buffer(self):
+        result=compile_source('int m=mesh([(0,10,0),(-10,-10,0),(10,-10,0)],faces=[(0,1,2)])\nclear()\ndraw_mesh(m,depth_test=False)\nrender()')
+        self.assertNotIn('__gfx_solid_depth:',result['assembly'])
+        self.assertLess(result['estimated_bytes'],18000)
     def test_static_models_do_not_allocate_lists_or_general_camera(self):
         r=compile_source(MODEL+'init_camera()\ndraw_mesh(m,yaw=32,size=384)\nrender()')
         self.assertLess(r['estimated_bytes'],10000)

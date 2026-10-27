@@ -8,7 +8,7 @@ from .camera_math import NativeRoutine,invoke
 from .list_runtime import add,sub,word
 
 
-def routines(capacity=64,solid=False,extended=False,wire=True):
+def routines(capacity=64,solid=False,extended=False,wire=True,dynamic_depth=False):
     out=['''__gfx_mesh_ready: dw 0
 __gfx_mesh_near: dw 512
 __gfx_mesh_far: dw 30720
@@ -98,9 +98,10 @@ __gfx_mesh_gain: defs 512,0''']
     no_high=r.label();r.emit(f'jr z,{no_high}','add hl,de');r.mark(no_high);r._store('result')
     r.mark(done);r.if_(('ne','negative',0),lambda:r.ret(sub(0,'result')));r.ret('result');out.append(r.finish())
 
-    r=NativeRoutine('mesh_draw',('model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded'),
+    r=NativeRoutine('mesh_draw',('model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded','depth_test'),
                     ('sx','cx','sy','cy','sz','cz','a','b','i','j','p','record','vertices','edges','count','radius'))
     r.if_(('eq',word('@__gfx_mesh_ready'),0),lambda:r.expr(invoke('mesh_init',75,2,120)))
+    if dynamic_depth:r.write('@__gfx_solid_depth_enabled','depth_test')
     if extended:
         for i,n in enumerate(('x','y','z','size')):r.write(add('@__gfx_mesh_instance',i*2),n)
         r.write('@__gfx_mesh_source',add('model',10))
