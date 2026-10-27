@@ -1060,6 +1060,11 @@ def check(tree):
                 actual,c=expression(arg,expected_element=expected[:-2] if expected.endswith('[]') else expected);compatible(expected,actual,c,arg)
                 constants.append(c)
             item.update(kind='native_graphics',name=name,arguments=args,type=result,owned=managed(result))
+            if name in {'solid_point_light','solid_directional_light','solid_ambient_light'}:
+                bounds=([(0,16)] if name=='solid_ambient_light' else [(-512,512)]*3+[(1,1024),(0,16)] if name=='solid_point_light' else [(-2047,2047)]*3+[(0,16)])
+                for c,(low,high),arg in zip(constants,bounds,args):
+                    if c is not None and not low<=c<=high:raise CompileError(f'Light argument must be in {low}..{high}',arg)
+                if name=='solid_directional_light' and constants[:3]==[0,0,0]:raise CompileError('Directional light direction cannot be zero',item)
             if name in {'mesh_init','mesh_fov'}:
                 if constants[0] is not None and not 55<=constants[0]<=120:raise CompileError('Mesh camera FOV must be 55..120 degrees',item)
                 if name=='mesh_init' and all(c is not None for c in constants[1:]) and not 1<=constants[1]<constants[2]<=127:raise CompileError('Mesh clipping requires 1 <= near < far <= 127',item)

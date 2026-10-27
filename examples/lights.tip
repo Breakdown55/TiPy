@@ -1,0 +1,47 @@
+# Up to four persistent additive lights; no_lights() clears them and ambient.
+# Directions point TOWARD the light. Point-light positions use world units.
+# Intensities/ambient: 0..16. Radius: 1..1024, with linear distance falloff.
+# Arrows move the point light. 2nd/Control moves it in front/behind. Escape exits.
+# The three-pixel marker is a 2D overlay indicating the light's position.
+int cube=mesh([
+    (-14,-14,-14),(14,-14,-14),(14,14,-14),(-14,14,-14),
+    (-14,-14,14),(14,-14,14),(14,14,14),(-14,14,14)
+],faces=[
+    (4,5,6),(4,6,7),(1,0,3),(1,3,2),
+    (0,4,7),(0,7,3),(5,1,2),(5,2,6),
+    (3,7,6),(3,6,2),(0,1,5),(0,5,4)
+])
+set_cpu_speed(15)
+init_camera(fov=75,near=8,far=120)
+int light_x=-18
+int light_y=16
+int light_z=44
+bool second_was=False
+bool dirty=True
+while not key_down("clear"):
+    int dx=int(key_down("right"))-int(key_down("left"))
+    int dy=int(key_down("up"))-int(key_down("down"))
+    bool second=key_down("2nd")
+    if second and not second_was:
+        light_z=-light_z
+        dirty=True
+    second_was=second
+    if dx!=0 or dy!=0:
+        light_x=max(-30,min(30,light_x+dx*3))
+        light_y=max(-24,min(24,light_y+dy*3))
+        dirty=True
+    if dirty:
+        no_lights()
+        ambient_light(1)
+        directional_light(-1,2,1,intensity=3)
+        point_light(light_x,light_y,light_z,radius=80,intensity=16)
+        clear()
+        draw_mesh(cube,z=20,yaw=24,pitch=12,cull=False)
+        int marker_x=48+light_x*42//(80-light_z)
+        int marker_y=32-light_y*42//(80-light_z)
+        pixel_on(marker_x,marker_y)
+        pixel_on(marker_x+1,marker_y)
+        pixel_on(marker_x,marker_y+1)
+        render()
+        dirty=False
+set_cpu_speed(6)

@@ -14,7 +14,6 @@ target/
 Thumbs.db
 
 # Keep the compiler/editor and the pinned Z80 dependency, not the full upstream IDE.
-/tihle/
 /asm-editor/*
 !/asm-editor/ti84-runner/
 !/asm-editor/packages/

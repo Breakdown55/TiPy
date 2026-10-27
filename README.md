@@ -9,8 +9,8 @@ Clone with `git clone --recurse-submodules <repository-url>` to include the pinn
 Z80 assembler/CPU library. For an existing clone, run
 `git submodule update --init --recursive`. The editor lives in
 `asm-editor/ti84-runner`; see its README for build and server instructions.
-The rest of the original ASM Editor checkout and the experimental `tihle`
-checkout are local research dependencies and are not part of this repository.
+The rest of the original ASM Editor checkout is a local research dependency
+and is not part of this repository.
 
 Browser projects support qualified imported function calls:
 `import utils` followed by `utils.get_evens(x)`. Function names are scoped per

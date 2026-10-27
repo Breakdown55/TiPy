@@ -1,0 +1,25 @@
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright')
+const {resolve}=require('node:path')
+const assert=require('node:assert/strict')
+;(async()=>{
+    const browser=await chromium.launch({headless:true,channel:'msedge'})
+    try {
+        const page=await browser.newPage({viewport:{width:1400,height:810}})
+        const errors=[];page.on('pageerror',e=>errors.push(e.message))
+        await page.goto('http://127.0.0.1:8084')
+        await page.locator('#open').setInputFiles(resolve('../../examples/lights.tip'))
+        await page.waitForFunction(()=>document.querySelector('#status').textContent==='Opened lights.tip')
+        await page.getByRole('button',{name:'Set lights.tip as entry file',exact:true}).click()
+        await page.locator('#run').click();await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Compiled · '))
+        console.log(await page.locator('#status').textContent())
+        await page.locator('#execute').click();await page.waitForTimeout(1500)
+        const image=()=>page.locator('#lcd').evaluate(c=>c.toDataURL())
+        const press=async key=>{const previous=await image();await page.keyboard.down(key);await page.waitForFunction(previous=>document.querySelector('#lcd').toDataURL()!==previous,previous);await page.keyboard.up(key);await page.waitForTimeout(800)}
+        await page.locator('#lcd').screenshot({path:'dist/lights-front.png'})
+        await press('ArrowRight');await press('Control')
+        await page.locator('#lcd').screenshot({path:'dist/lights-back.png'})
+        await page.keyboard.down('Escape');await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Finished · '));await page.keyboard.up('Escape')
+        assert.deepEqual(errors,[])
+        console.log('PASS: point light movement, depth change, 1-bit shading and exit')
+    } finally {await browser.close()}
+})().catch(e=>{console.error(e);process.exitCode=1})

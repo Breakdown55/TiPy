@@ -1352,6 +1352,15 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
         code[:]=[part.replace(fatal,"        jp __arr_fail") for part in code]
     if pixels_used:
         from .graphics_runtime import graphics_assembly
+        mesh_calls=[n for n in walk(tree) if n.get('kind')=='native_graphics' and n.get('name')=='mesh_draw']
+        packets=[n for n in walk(tree) if n.get('kind')=='geometry_data']
+        def flag(n,i,v):
+            a=n['arguments'][i]
+            if a.get('kind')=='name':
+                a=next((e['value'] for e in n.get('evaluations',[]) if e['slot']['label']==a.get('label')),a)
+            return a.get('kind')=='boolean' and a['value']==v
+        if mesh_calls and packets and all(p.get('face_count',0)>0 for p in packets) and all(flag(n,8,True) for n in mesh_calls):pixels_used.add('solid_only')
+        if mesh_calls and all(flag(n,9,False) for n in mesh_calls):pixels_used.add('solid_no_cull')
         code.append(graphics_assembly(pixels_used))
     required = set(RUNTIME_TARGET.findall("\n".join(code)))
     if required:

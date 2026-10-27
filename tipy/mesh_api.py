@@ -1,7 +1,7 @@
 """Static indexed meshes with an allocation-free, bounded Q8.8 renderer."""
 from .errors import CompileError
 
-PUBLIC={'mesh','draw_mesh','load_obj','mesh_light'}
+PUBLIC={'mesh','draw_mesh','load_obj','mesh_light','no_lights','ambient_light','directional_light','point_light'}
 
 
 def install(tree):
@@ -95,5 +95,5 @@ def install(tree):
             data=[b for w in words for b in (w&255,(w>>8)&255)]+[i for e in edges for i in e]+face_data
             location={k:n[k] for k in ('line','column','filename') if k in n}
             n.clear();n.update(kind='geometry_data',data=data,vertex_count=len(vertices),face_count=len(faces),**location)
-        elif name in {'draw_mesh','mesh_light'} or mesh_active and name in {'init_camera','camera','set_fov'}:
-            n['name']='__tipy_native_'+{'draw_mesh':'mesh_draw','mesh_light':'solid_light','init_camera':'mesh_init','camera':'mesh_look','set_fov':'mesh_fov'}[name]
+        elif name in {'draw_mesh','mesh_light','no_lights','ambient_light','directional_light','point_light'} or mesh_active and name in {'init_camera','camera','set_fov'}:
+            n['name']='__tipy_native_'+{'draw_mesh':'mesh_draw','mesh_light':'solid_light','no_lights':'solid_no_lights','ambient_light':'solid_ambient_light','directional_light':'solid_directional_light','point_light':'solid_point_light','init_camera':'mesh_init','camera':'mesh_look','set_fov':'mesh_fov'}[name]

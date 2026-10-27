@@ -434,6 +434,46 @@ test(`${gameFile} pauses physics while continuing to poll the exit key`,()=>{
 }
 
 const meshCube='int model=mesh([(-8,-8,-8),(8,-8,-8),(8,8,-8),(-8,8,-8),(-8,-8,8),(8,-8,8),(8,8,8),(-8,8,8)],[(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)])\n'
+test('Explicit directional and point lights add, attenuate and respect world-space normals',()=>{
+    const model='int m=mesh([(-12,-10,0),(12,-10,0),(0,12,0)],faces=[(0,1,2)])\n'
+    const states=[
+        'no_lights()',
+        'no_lights()\npoint_light(0,0,24,radius=80)',
+        'no_lights()\npoint_light(0,0,160,radius=80)',
+        'no_lights()\npoint_light(0,0,-24,radius=80)',
+        'no_lights()\ndirectional_light(0,0,1)',
+        'no_lights()\ndirectional_light(0,0,1,intensity=4)\ndirectional_light(0,0,1,intensity=4)',
+        'no_lights()\nambient_light(16)',
+    ]
+    const m={project:true,optimization:'aggressive',maxSlices:20000,guardGraph:true,trackStack:true}
+    execute(model+states.map(s=>s+'\nclear()\ndraw_mesh(m,cull=False)\nrender()').join('\n'),m)
+    const counts=m.frames.map(f=>f.reduce((s,p)=>s+p,0))
+    assert.ok(counts[0]>0);assert.ok(counts[1]>0&&counts[1]<counts[0])
+    assert.equal(counts[2],counts[0]);assert.equal(counts[3],counts[0]);assert.equal(counts[4],0)
+    assert.ok(counts[5]>0&&counts[5]<counts[0]);assert.equal(counts[6],0)
+    assert.ok(!m.assembly.includes('__gfx_wf_draw:'));assert.ok(!m.assembly.includes('__gfx_solid_facing:'))
+})
+
+test('Point light falloff follows object translation and rotation, and zero distance is defined',()=>{
+    const m={project:true,optimization:'aggressive',maxSlices:20000,guardGraph:true}
+    execute('int m=mesh([(-12,-10,0),(12,-10,0),(0,12,0)],faces=[(0,1,2)])\nno_lights()\npoint_light(0,0,24,radius=80)\nclear()\ndraw_mesh(m,cull=False)\nrender()\nclear()\ndraw_mesh(m,x=20,cull=False)\nrender()\nclear()\ndraw_mesh(m,yaw=128,cull=False)\nrender()\nno_lights()\npoint_light(0,-3,0)\nclear()\ndraw_mesh(m,cull=False)\nrender()',m)
+    const counts=m.frames.map(f=>f.reduce((s,p)=>s+p,0))
+    assert.ok(counts[1]>counts[0]);assert.ok(counts[2]>counts[0]);assert.equal(counts[3],counts[2])
+})
+
+test('Four explicit lights saturate, and clearing them resets ambient and point-light state',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000}
+    execute('int m=mesh([(-12,-10,0),(12,-10,0),(0,12,0)],faces=[(0,1,2)])\nno_lights()\n'+Array.from({length:4},()=> 'directional_light(0,0,1,intensity=8)').join('\n')+'\nclear()\ndraw_mesh(m,cull=False)\nrender()\nno_lights()\nclear()\ndraw_mesh(m,cull=False)\nrender()',m)
+    assert.ok(!m.frames[0].some(Boolean));assert.ok(m.frames[1].some(Boolean))
+    assert.throws(()=>execute('no_lights()\n'+Array.from({length:5},()=> 'point_light(0,0,1)').join('\n'),{project:true}),/Runtime error/)
+})
+
+test('Interactive lights demo moves a native point light and exits without stack or memory damage',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000,afterFrameKeys:[[3],[54],[15]]}
+    execute(readFileSync(resolve('../../examples/lights.tip'),'utf8'),m)
+    assert.equal(m.frames.length,3);assert.notDeepEqual(m.frames[0],m.frames[1]);assert.notDeepEqual(m.frames[1],m.frames[2])
+    assert.equal(m.clockHz,6_000_000);assert.ok(m.bytes<24170)
+})
 test('Solid triangles cover pixel centers without cracks and implement all 17 Bayer shades',()=>{
     const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000}
     const declarations=Array.from({length:17},(_,i)=>`int t${i}=mesh([(-16,-16,0),(16,-16,0),(0,16,0)],faces=[(0,1,2,${i})])`).join('\n')

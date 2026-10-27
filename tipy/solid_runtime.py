@@ -12,9 +12,9 @@ def _copy(r,src,dst,count=12):
     r.expr(src);r.emit('push hl');r.expr(dst);r.emit('ex de,hl','pop hl',f'ld bc,{count}','ldir')
 
 
-def routines():
+def routines(extended=False,culling=True):
     out=['__gfx_solid_guard_before: db 165\n__gfx_solid_depth: defs 6144,0\n__gfx_solid_guard_after: db 90','__gfx_solid_flags: defs 64,0',
-         '__gfx_solid_light_vector: dw -68,137,205\n__gfx_solid_ambient: dw 3',
+         '__gfx_solid_light_vector: dw -68,137,205\n__gfx_solid_ambient: dw 3\n__gfx_solid_direction_enabled: dw 1',
          '''__gfx_solid_poly_a: defs 144,0
 __gfx_solid_poly_b: defs 144,0
 __gfx_solid_hits: defs 12,0
@@ -33,6 +33,7 @@ __gfx_solid_pattern: db 0''']
         ldir
         ret''')
     r=NativeRoutine('solid_light',('x','y','z','ambient'))
+    r.write('@__gfx_solid_direction_enabled',1);r.write('@__gfx_light_count',0);r.write('@__gfx_light_points',0)
     r.if_(('slt','ambient',0),lambda:r.fail(14));r.if_(('slt',16,'ambient'),lambda:r.fail(14))
     for n in 'xyz':
         r.if_(('slt',n,-2047),lambda:r.fail(14));r.if_(('slt',2047,n),lambda:r.fail(14))
@@ -115,7 +116,7 @@ __gfx_solid_pattern: db 0''']
             r.expr(invoke('solid_span',word('left'),word(add('left',2)),word('right'),word(add('right',2)),'y','shade'))
         r.if_(('eq','n',2),span);r.set('y',add('y',1))
     r.while_(('ult','y','end'),row);r.ret();out.append(r.finish())
-    out.append(_draw())
+    out.append(_draw(extended,culling))
     return out
 
 
@@ -182,7 +183,7 @@ def _span_setup(r):
     return t.code
 
 
-def _draw():
+def _draw(extended,culling):
     r=NativeRoutine('solid_draw',('faces','count','cull','shaded'),('i','face','j','p','n','flags','common','v','shade','poly','other'))
     r.if_(('uge','count',129),lambda:r.fail(14))
     for i in range(3):r.write(add('@__gfx_solid_local_light',i*2),invoke('mesh_dot','@__gfx_solid_light_vector',add('@__gfx_mesh_rotation',i*2),6))
@@ -200,12 +201,17 @@ def _draw():
         def cull():
             for j in range(3):r.write(add('@__gfx_solid_normal',j*2),invoke('mesh_dot',add('@__gfx_mesh_norm_view',j*6),add('face',4),2))
             r.if_(('eq',invoke('solid_facing','@__gfx_solid_normal','@__gfx_solid_poly_a'),0),lambda:r.emit(f'jp {skip}'))
-        r.if_(('ne','cull',0),cull)
+        if culling:r.if_(('ne','cull',0),cull)
         r.set('shade',byte(add('face',3)))
         def light():
-            r.set('v',invoke('mesh_dot',add('face',4),'@__gfx_solid_local_light',2))
-            r.if_(('negative','v'),lambda:r.set('v',0));r.if_(('slt',256,'v'),lambda:r.set('v',256))
-            r.set('v',add(word('@__gfx_solid_ambient'),invoke('mesh_mul','v',sub(16,word('@__gfx_solid_ambient')))))
+            r.set('v',word('@__gfx_solid_ambient'))
+            def legacy():
+                r.set('v',invoke('mesh_dot',add('face',4),'@__gfx_solid_local_light',2))
+                r.if_(('negative','v'),lambda:r.set('v',0));r.if_(('slt',256,'v'),lambda:r.set('v',256))
+                r.set('v',add(word('@__gfx_solid_ambient'),invoke('mesh_mul','v',sub(16,word('@__gfx_solid_ambient')))))
+            r.if_(('ne',word('@__gfx_solid_direction_enabled'),0),legacy)
+            if extended:r.set('v',add('v',invoke('light_faces','face')))
+            r.if_(('slt',16,'v'),lambda:r.set('v',16))
             r.expr(invoke('mesh_imul','v','shade'));r.emit('srl h','rr l','srl h','rr l','srl h','rr l','srl h','rr l');r._store('shade')
         r.if_(('ne','shaded',0),light)
         r.set('poly','@__gfx_solid_poly_a');r.set('other','@__gfx_solid_poly_b');r.set('n',3)

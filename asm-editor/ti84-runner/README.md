@@ -157,8 +157,7 @@ TI-84 Plus; eventual device or complete-emulator testing is still needed.
 - Assembler and CPU: [Specy/trs80](https://github.com/Specy/trs80), the MIT-licensed
   `z80-machine` and accompanying Z80 packages. Their source and license files are
   retained in the submodule; no TI ROM is included.
-- Hardware reference: [WikiTI](https://wikiti.brandonw.net/index.php?title=Category:83Plus:Ports)
-  and inspection of [tihle](https://github.com/tari/tihle).
+- Hardware reference: [WikiTI](https://wikiti.brandonw.net/index.php?title=Category:83Plus:Ports).
 
 New runner code is provided under the parent project's AGPL-3.0 license.
 
