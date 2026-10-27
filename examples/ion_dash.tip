@@ -1,0 +1,271 @@
+# ION DASH -- collect 12 cells, dodge the drones, keep your signal alive.
+# Arrows: move. 2nd / Control: dash (briefly invulnerable).
+# Enter: start / pause / retry. Clear / Escape: quit.
+import time
+
+set_cpu_speed(15)
+
+# Q4 positions keep slow and diagonal movement smooth without floats.
+int enemy_x=[240,1296,1296,240,768,768]
+int enemy_y=[272,736,272,736,224,784]
+int enemy_vx=[12,-12,-10,10,14,-14]
+int enemy_vy=[9,-9,11,-11,8,-8]
+int start_x=[240,1296,1296,240,768,768]
+int start_y=[272,736,272,736,224,784]
+int start_vx=[12,-12,-10,10,14,-14]
+int start_vy=[9,-9,11,-11,8,-8]
+int cell_x=[68,24,80,17,48,84,12,62,32,76,20,48]
+int cell_y=[31,18,44,44,17,20,30,46,31,15,26,31]
+int spark_x=[0,0,0,0,0,0,0,0]
+int spark_y=[0,0,0,0,0,0,0,0]
+int spark_vx=[0,0,0,0,0,0,0,0]
+int spark_vy=[0,0,0,0,0,0,0,0]
+int spark_life=[0,0,0,0,0,0,0,0]
+int burst_x=[32,23,0,-23,-32,-23,0,23]
+int burst_y=[0,23,32,23,0,-23,-32,-23]
+
+def burst(int x,int y):
+    for i in range(8):
+        spark_x[i]=x
+        spark_y[i]=y
+        spark_vx[i]=burst_x[i]
+        spark_vy[i]=burst_y[i]
+        spark_life[i]=24
+
+def heart(int x):
+    h_line(x+1,2,x+2,2)
+    h_line(x+4,2,x+5,2)
+    h_line(x,3,x+6,3)
+    h_line(x+1,4,x+5,4)
+    h_line(x+2,5,x+4,5)
+    pixel_on(x+3,6)
+
+def diamond(int x,int y,int radius):
+    line(x,y-radius,x+radius,y)
+    line(x+radius,y,x,y+radius)
+    line(x,y+radius,x-radius,y)
+    line(x-radius,y,x,y-radius)
+
+def arena(int score,int lives,int cooldown,bool paused):
+    h_line(1,10,94,10)
+    h_line(1,53,94,53)
+    v_line(1,10,1,53)
+    v_line(94,10,94,53)
+    for gy in range(18,51,16):
+        for gx in range(9,94,16):
+            pixel_on(gx,gy)
+    print("E",2,1)
+    print(score,10,1)
+    print("/12",25,1)
+    for i in range(lives):
+        heart(66+i*9)
+    if paused:
+        print("PAUSED / ENTER",5,56)
+    else:
+        print("2ND",3,56)
+        h_line(27,56,64,56)
+        h_line(27,62,64,62)
+        v_line(27,56,27,62)
+        v_line(64,56,64,62)
+        int charge=(128-cooldown)>>2
+        if charge>0:
+            for row in range(58,61):
+                h_line(29,row,28+charge,row)
+
+int player_x=768
+int player_y=496
+int facing_x=1
+int facing_y=0
+int score=0
+int lives=3
+int dash_cooldown=0
+int dash_left=0
+int invulnerable=0
+int mode=0
+int animation=0
+int physics=0
+int previous=time.frame_ticks()
+bool enter_was=False
+bool dash_was=False
+bool dirty=True
+
+while not key_down("clear"):
+    int now=time.frame_ticks()
+    int elapsed=min(16,(now-previous)&255)
+    previous=now
+    bool enter=key_down("enter")
+    bool dash=key_down("2nd")
+    bool enter_pressed=enter and not enter_was
+    bool dash_pressed=dash and not dash_was
+    enter_was=enter
+    dash_was=dash
+
+    if mode==0 or mode==2 or mode==4:
+        if enter_pressed:
+            player_x=768
+            player_y=496
+            facing_x=1
+            facing_y=0
+            score=0
+            lives=3
+            dash_cooldown=0
+            dash_left=0
+            invulnerable=48
+            physics=0
+            animation=0
+            for i in range(6):
+                enemy_x[i]=start_x[i]
+                enemy_y[i]=start_y[i]
+                enemy_vx[i]=start_vx[i]
+                enemy_vy[i]=start_vy[i]
+            for i in range(8):
+                spark_life[i]=0
+            mode=1
+            dirty=True
+    elif enter_pressed:
+        mode=3 if mode==1 else 1
+        physics=0
+        dirty=True
+
+    if mode==1:
+        animation=(animation+elapsed)&255
+        dash_cooldown=max(0,dash_cooldown-elapsed)
+        dash_left=max(0,dash_left-elapsed)
+        invulnerable=max(0,invulnerable-elapsed)
+        int dx=int(key_down("right"))-int(key_down("left"))
+        int dy=int(key_down("down"))-int(key_down("up"))
+        if dx!=0 or dy!=0:
+            facing_x=dx
+            facing_y=dy
+        if dash_pressed and dash_cooldown==0:
+            dash_left=16
+            dash_cooldown=128
+            burst(player_x,player_y)
+            dirty=True
+
+        physics+=elapsed
+        while physics>=4 and mode==1:
+            physics-=4
+            int move=11 if dx!=0 and dy!=0 else 16
+            if dash_left>0:
+                move=11 if facing_x!=0 and facing_y!=0 else 16
+                player_x+=facing_x*move*4
+                player_y+=facing_y*move*4
+            else:
+                player_x+=dx*move
+                player_y+=dy*move
+            player_x=max(64,min(1456,player_x))
+            player_y=max(224,min(784,player_y))
+
+            int active=min(6,2+score//2)
+            for i in range(active):
+                # Later rounds add a slower drone that follows the player.
+                if score>=4 and i==active-1:
+                    enemy_vx[i]=8 if enemy_x[i]<player_x else -8
+                    enemy_vy[i]=8 if enemy_y[i]<player_y else -8
+                int next_x=enemy_x[i]+enemy_vx[i]
+                int next_y=enemy_y[i]+enemy_vy[i]
+                if next_x<80 or next_x>1440:
+                    enemy_vx[i]=-enemy_vx[i]
+                    next_x=max(80,min(1440,next_x))
+                if next_y<224 or next_y>784:
+                    enemy_vy[i]=-enemy_vy[i]
+                    next_y=max(224,min(784,next_y))
+                enemy_x[i]=next_x
+                enemy_y[i]=next_y
+                if invulnerable==0 and dash_left==0:
+                    if abs(next_x-player_x)<64 and abs(next_y-player_y)<64:
+                        lives-=1
+                        invulnerable=80
+                        burst(player_x,player_y)
+                        if lives==0:
+                            mode=2
+
+            if mode==1 and abs((cell_x[score]<<4)-player_x)<=64 and abs((cell_y[score]<<4)-player_y)<=64:
+                burst(cell_x[score]<<4,cell_y[score]<<4)
+                score+=1
+                invulnerable=max(invulnerable,16)
+                if score==4 or score==8:
+                    lives=min(3,lives+1)
+                if score==12:
+                    mode=4
+
+            for i in range(8):
+                if spark_life[i]>0:
+                    spark_x[i]+=spark_vx[i]
+                    spark_y[i]+=spark_vy[i]
+                    spark_vy[i]+=1
+                    spark_life[i]-=1
+            dirty=True
+
+    if not dirty:
+        time.sleep(0.004)
+        continue
+
+    clear()
+    if mode==1 or mode==3:
+        arena(score,lives,dash_cooldown,mode==3)
+        int orb_x=cell_x[score]
+        int orb_y=cell_y[score]
+        diamond(orb_x,orb_y,3+((animation>>5)&1))
+        pixel_on(orb_x,orb_y)
+
+        for i in range(min(6,2+score//2)):
+            int hazard_x=enemy_x[i]>>4
+            int hazard_y=enemy_y[i]>>4
+            h_line(hazard_x-2,hazard_y-2,hazard_x+2,hazard_y-2)
+            h_line(hazard_x-2,hazard_y+2,hazard_x+2,hazard_y+2)
+            v_line(hazard_x-2,hazard_y-1,hazard_x-2,hazard_y+1)
+            v_line(hazard_x+2,hazard_y-1,hazard_x+2,hazard_y+1)
+            pixel_on(hazard_x,hazard_y)
+
+        for i in range(8):
+            if spark_life[i]>0:
+                int spark_px=spark_x[i]>>4
+                int spark_py=spark_y[i]>>4
+                if 2<=spark_px<94 and 11<=spark_py<53:
+                    pixel_on(spark_px,spark_py)
+                    if spark_life[i]>16:
+                        pixel_on(spark_px+1,spark_py)
+
+        int x=player_x>>4
+        int y=player_y>>4
+        if dash_left>0:
+            int ghost_x=max(4,min(91,x-facing_x*5))
+            int ghost_y=max(14,min(49,y-facing_y*5))
+            diamond(ghost_x,ghost_y,2)
+        if invulnerable==0 or mode==3 or (animation>>3)&1==0:
+            for row in range(-3,4):
+                int width=3-abs(row)
+                h_line(x-width,y+row,x+width,y+row)
+            pixel_off(x,y)
+        if mode==1:
+            print("II",80,56)
+    else:
+        h_line(0,0,95,0)
+        h_line(0,63,95,63)
+        v_line(0,0,0,63)
+        v_line(95,0,95,63)
+        if mode==0:
+            diamond(48,7,3)
+            print("ION DASH",24,14)
+            print("12 CELLS / 3 HP",6,27)
+            print("ARROWS MOVE",15,37)
+            print("CTRL/2ND DASH",12,46)
+            print("ENTER TO START",6,56)
+        elif mode==4:
+            print("CIRCUIT CLEAR",9,16)
+            print("SIGNAL STABLE",9,29)
+            print("ENTER / AGAIN",9,45)
+            print("ESC / EXIT",18,56)
+        else:
+            print("SIGNAL LOST",15,16)
+            print("CELLS",21,29)
+            print(score,60,29)
+            print("ENTER / RETRY",9,45)
+            print("ESC / EXIT",18,56)
+    render()
+    dirty=False
+
+time.stop_frame_timer()
+set_cpu_speed(6)

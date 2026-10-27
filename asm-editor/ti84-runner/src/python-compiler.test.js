@@ -388,6 +388,40 @@ test('Compact room projection remains within one LCD pixel of the reference rend
     }
 })
 
+test('ION DASH starts, moves, dashes, collects a cell, and restores the CPU clock',()=>{
+    const m={project:true,optimization:'aggressive',maxSlices:20000,
+        keyTimeline:[{at:1_000_000,keys:[9]},{at:2_000_000,keys:[3,54]},{at:6_000_000,keys:[15]}]}
+    const values=execute(readFileSync(resolve('../../examples/ion_dash.tip'),'utf8'),m)
+    assert.equal(values.mode,1);assert.ok(values.player_x>768)
+    assert.ok(values.score>=1);assert.ok(values.dash_cooldown>0)
+    assert.ok(m.frames.length>3);assert.ok(m.bytes<24_000)
+    assert.equal(m.clockHz,6_000_000)
+})
+
+test('ION DASH reaches its victory and defeat screens without invalid cell indexing',()=>{
+    const source=readFileSync(resolve('../../examples/ion_dash.tip'),'utf8')
+    for(const win of [true,false]) {
+        let game=source.replace('int mode=0','int mode=1')
+        game=win?game.replace('int score=0','int score=11'):
+            game.replace('int lives=3','int lives=1').replace('int enemy_x=[240,','int enemy_x=[768,').replace('int enemy_y=[272,','int enemy_y=[496,')
+        const m={project:true,optimization:'aggressive',maxSlices:20000,
+            keyTimeline:[{at:3_000_000,keys:[15]}]}
+        const values=execute(game,m)
+        assert.equal(values.mode,win?4:2)
+        assert.equal(win?values.score:values.lives,win?12:0)
+        assert.ok(m.frames.length>=2)
+    }
+})
+
+test('ION DASH pauses physics while continuing to poll the exit key',()=>{
+    const source=readFileSync(resolve('../../examples/ion_dash.tip'),'utf8').replace('int mode=0','int mode=1')
+    const m={project:true,optimization:'aggressive',maxSlices:20000,
+        keyTimeline:[{at:1_000_000,keys:[9]},{at:2_000_000,keys:[3]},{at:5_000_000,keys:[15]}]}
+    const values=execute(source,m)
+    assert.equal(values.mode,3);assert.equal(values.player_x,768)
+    assert.ok(m.frameTimes.at(-1)<3_000_000)
+})
+
 test('MONO/96 cycles through three animated native 2D effects and exits cleanly',()=>{
     const m={project:true,optimization:'aggressive',maxSlices:20000,afterFrameKeys:[[3],[],[3],[],[2],[],[15]]}
     execute(readFileSync(resolve('../../examples/mono96.tip'),'utf8'),m)
