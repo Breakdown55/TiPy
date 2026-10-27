@@ -1053,13 +1053,17 @@ def check(tree):
         elif kind=='call' and item['name'].startswith('__tipy_native_') and item['name'][len('__tipy_native_'):] in CAMERA_INTRINSICS:
             from .camera_api import INTRINSICS
             name=item['name'][len('__tipy_native_'):];names,types,result,defaults=INTRINSICS[name]
-            values={} if defaults is None else {n:{'kind':'number','value':v,'line':item['line'],'column':item['column']} for n,v in zip(names,defaults)}
+            values={} if defaults is None else {n:{'kind':'number','value':v,'line':item['line'],'column':item['column']} for n,v in (defaults.items() if isinstance(defaults,dict) else zip(names,defaults))}
             args,provided=bind_keywords(item['arguments'],names,values,item)
             constants=[]
             for arg,expected in zip(args,types):
                 actual,c=expression(arg,expected_element=expected[:-2] if expected.endswith('[]') else expected);compatible(expected,actual,c,arg)
                 constants.append(c)
             item.update(kind='native_graphics',name=name,arguments=args,type=result,owned=managed(result))
+            if name in {'mesh_init','mesh_fov'}:
+                if constants[0] is not None and not 55<=constants[0]<=120:raise CompileError('Mesh camera FOV must be 55..120 degrees',item)
+                if name=='mesh_init' and all(c is not None for c in constants[1:]) and not 1<=constants[1]<constants[2]<=127:raise CompileError('Mesh clipping requires 1 <= near < far <= 127',item)
+            if name=='mesh_draw' and constants[7] is not None and not 1<=constants[7]<=512:raise CompileError('Mesh size must be 1..512 (256 means 1x)',item)
             if name in {'cam_init','cam_fov','cam_look'} and all(c is not None for c in constants):
                 try:
                     if name in {'cam_init','cam_fov'}:

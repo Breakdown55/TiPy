@@ -321,15 +321,17 @@ __gfx_{name}_loop:
 def graphics_assembly(used):
     used=set(used)
     routines = []
-    camera_entries={name for name in used if name.startswith(('cam_','mat_','model_'))}
+    camera_entries={name for name in used if name.startswith(('cam_','mat_','model_','mesh_'))}
+    if any(name.startswith('mesh_') for name in used):used.add('ink')
     if 'line' in used:camera_entries.add('wf_raster');used.add('ink')
     if camera_entries:
         from .camera_math import routines as math_routines,link
         from .matrix_runtime import routines as matrix_routines
         from .camera_runtime import routines as camera_routines
         from .wireframe_runtime import routines as wireframe_routines
+        from .mesh_runtime import routines as mesh_routines
         capacity=max((int(n.split(':')[1]) for n in used if n.startswith('batch_capacity:')),default=64)
-        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity)
+        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity)+mesh_routines(capacity)
         roots={'__gfx_'+name for name in camera_entries}
         native=link(groups,roots)
         routines.append(native)

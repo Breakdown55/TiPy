@@ -153,11 +153,13 @@ __gfx_wf_udiv_next:
     r.set('count',word('data'));r.set('edges',add('data',8));r.write('@__gfx_wf_near',word(add('data',4)));r.write('@__gfx_wf_far',word(add('data',6)))
     r.set('index',word(add('data',2)));r.write('@__gfx_wf_gain',add('edges',add('index','index')))
     transformed=r.label();r.emit(f'ld hl,{transformed}','push hl');r.expr('record');r.emit('jp (hl)');r.mark(transformed)
+    r.expr(invoke('wf_draw','count','index','edges'));r.ret();out.append(r.finish())
+    r=NativeRoutine('wf_draw',('count','index','edges'),('i','record','pa','pb','flags')+words('a',6)+words('b',6))
     r.set('i',0);r.set('record','@__gfx_wf_records')
     def transform():
         r.expr(invoke('wf_project','record'));r.set('record',add('record',12));r.set('i',add('i',1))
     r.while_(('ult','i','count'),transform)
-    r.set('i',0);r.set('count',word(add('data',2)))
+    r.set('i',0);r.set('count','index')
     def edge():
         for target in ('a','b'):
             r.expr(byte('edges'));r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','ld de,__gfx_wf_records','add hl,de');r._store('record')

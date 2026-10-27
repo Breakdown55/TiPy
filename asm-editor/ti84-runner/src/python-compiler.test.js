@@ -19,6 +19,7 @@ function execute(source, measurements) {
     assert.equal(processResult.status,0,processResult.stderr)
     const result = JSON.parse(processResult.stdout)
     const runner = new Ti84Runner(result.assembly)
+    if(measurements?.guardGraph){runner.machine.memory[0x933f]=0xa5;runner.machine.memory[0x9640]=0x5a}
     for(const code of measurements?.heldKeys ?? [])runner.setKey(code,true)
     assert.ok(result.estimated_bytes>=runner.machineBytes,'RAM sizing must never underestimate assembled image bytes')
     if (measurements?.seedGraph) runner.machine.memory.set(measurements.seedGraph,0x9340)
@@ -56,6 +57,7 @@ function execute(source, measurements) {
     assert.equal(runner.machine.z80.regs.sp,0,'RET should pop the sentinel after a balanced expression stack')
     assert.equal(runner.machine.z80.regs.ix,0,'Functions must restore the caller frame pointer')
     assert.equal(runner.machine.z80.regs.iy,0x89f0,'Functions must preserve the calculator flags pointer')
+    if(measurements?.guardGraph){assert.equal(runner.machine.memory[0x933f],0xa5);assert.equal(runner.machine.memory[0x9640],0x5a)}
     if (measurements) Object.assign(measurements, { bytes: runner.machineBytes, tStates: runner.machine.tStateCount,
         screen: runner.lcd.pixels.slice(), graph: runner.machine.memory.slice(0x9340,0x9640),
         report: result.optimization_report, assembly: result.assembly, frames,frameTimes,clockHz:runner.clockHz })
@@ -424,6 +426,67 @@ test(`${gameFile} pauses physics while continuing to poll the exit key`,()=>{
 })
 
 }
+
+const meshCube='int model=mesh([(-8,-8,-8),(8,-8,-8),(8,8,-8),(-8,8,-8),(-8,-8,8),(8,-8,8),(8,8,8),(-8,8,8)],[(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)])\n'
+test('Mesh coefficient products match rounded signed Q8 arithmetic across signs and scales',()=>{
+    const pairs=[]
+    for(const a of [-15360,-257,-256,-171,-1,0,1,128,255,256,384,15360])
+        for(const b of [-512,-256,-171,-1,0,1,128,255,256,384,512])pairs.push([a,b])
+    const source=pairs.map(([a,b],i)=>`int v${i}=__tipy_native_mesh_mul(${a},${b})`).join('\n')
+    const values=execute(source,{})
+    for(const [i,[a,b]] of pairs.entries()) {
+        const product=a*b,rounded=Math.floor(Math.abs(product)/256+0.5)
+        assert.equal(values[`v${i}`],rounded===0?0:product<0?-rounded:rounded,`${a} * ${b}`)
+    }
+})
+
+test('Indexed mesh pixels stay within one LCD pixel of the general camera renderer',()=>{
+    const vertices=[[-8,-8,-8],[8,-8,-8],[8,8,-8],[-8,8,-8],[-8,-8,8],[8,-8,8],[8,8,8],[-8,8,8]]
+    const edges=[[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]]
+    const close=(a,b)=>{
+        for(let y=0;y<64;y++)for(let x=0;x<96;x++)if(a[y*96+x]) {
+            let found=false
+            for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)if(x+dx>=0&&x+dx<96&&y+dy>=0&&y+dy<64&&b[(y+dy)*96+x+dx])found=true
+            if(!found)return false
+        }
+        return true
+    }
+    for(const [yaw,pitch] of [[0,0],[32,20],[64,32],[170,210]]) {
+        const m={},r={}
+        execute(meshCube+`init_camera(75,2,120)\nclear()\ndraw_mesh(model,yaw=${yaw},pitch=${pitch},size=384)\nrender()`,m)
+        execute('no_fill()\ninit_camera(75,2,120)\ncamera(0,0,80,0,0,0)\nclear()\n'+`rotate_y(${yaw*Math.PI/128})\nrotate_x(${pitch*Math.PI/128})\nscale(1.5)\n`+edges.map(([a,b])=>`line(${[...vertices[a],...vertices[b]].join(',')})`).join('\n')+'\nrender()',r)
+        assert.ok(m.screen.some(Boolean));assert.ok(r.screen.some(Boolean))
+        assert.ok(close(m.screen,r.screen)&&close(r.screen,m.screen),`pose ${yaw}/${pitch}`)
+    }
+})
+
+test('Indexed meshes rotate, scale, translate, change camera and FOV without heap allocation',()=>{
+    const m={project:true,optimization:'aggressive'}
+    execute(meshCube+'init_camera(fov=75,near=2,far=120)\nclear()\ndraw_mesh(model)\nrender()\nclear()\ndraw_mesh(model,yaw=32,pitch=20,roll=12)\nrender()\nclear()\ndraw_mesh(model,x=15,size=384)\nrender()\nclear()\ncamera(20,10,70,0,0,0)\nset_fov(60)\ndraw_mesh(model)\nrender()',m)
+    assert.equal(m.frames.length,4)
+    for(let i=1;i<4;i++)assert.notDeepEqual(m.frames[i],m.frames[0])
+    for(const frame of m.frames)assert.ok(frame.reduce((n,p)=>n+p,0)>20)
+    assert.ok(m.bytes<13_000,`mesh image ${m.bytes}`);assert.ok(!m.assembly.includes('__heap_start:'))
+    assert.ok(!m.assembly.includes('__gfx_cam_project:'))
+})
+
+test('Indexed mesh repeated draws stay below a native CPU cycle budget',()=>{
+    const m={project:true,optimization:'aggressive'}
+    execute(meshCube+'init_camera()\nclear()\ndraw_mesh(model,yaw=32,pitch=20)\nrender()\nclear()\ndraw_mesh(model,yaw=33,pitch=20)\nrender()',m)
+    const cycles=m.frameTimes[1]-m.frameTimes[0]
+    assert.ok(cycles<450_000,`steady mesh frame uses ${cycles} T-states`)
+    assert.ok(!m.assembly.includes('__heap_start:'))
+})
+
+test('Indexed mesh depth and viewport clipping preserve the graph buffer boundaries',()=>{
+    const source='int model=mesh([(-20,-12,-12),(20,-12,-12),(0,20,12)],[(0,1),(1,2),(2,0)])\n'
+    const m={project:true,optimization:'aggressive',guardGraph:true}
+    execute(source+'init_camera(75,5,100)\ncamera(0,0,0,0,0,-1)\nclear()\ndraw_mesh(model,z=-8)\nrender()\nclear()\ndraw_mesh(model,z=30)\nrender()\nclear()\ndraw_mesh(model,z=-115)\nrender()\nclear()\ndraw_mesh(model,z=90)\nrender()',m)
+    assert.ok(m.frames[0].some(Boolean));assert.ok(!m.frames[1].some(Boolean))
+    assert.ok(!m.frames[2].some(Boolean))
+    assert.ok(!m.frames[3].some(Boolean))
+    assert.ok(m.frameTimes[3]-m.frameTimes[2]<150_000,'bounding volume should reject the distant model before transforming vertices')
+})
 
 test('ION DASH 3D projects depth, height, and shared actor vertices on the calculator',()=>{
     const source=readFileSync(resolve('../../examples/ion_dash_3d.tip'),'utf8')

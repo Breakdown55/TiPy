@@ -2,6 +2,11 @@
 CAMERA_PUBLIC={'init_camera','camera','set_fov'}
 MATRIX_ENTRIES={'translate':'mat_translate','scale':'mat_scale','rotate':'mat_rotate','rotate_x':'mat_rotate','rotate_y':'mat_rotate','rotate_z':'mat_rotate','push_matrix':'mat_push','pop_matrix':'mat_pop','reset_matrix':'mat_reset','apply_matrix':'mat_apply'}
 INTRINSICS={
+    'mesh_mul':(['a','b'],['i16']*2,'i16',None),
+    'mesh_init':(['fov','near','far'],['i16']*3,'void',[75,2,120]),
+    'mesh_fov':(['fov'],['i16'],'void',None),
+    'mesh_look':(['eye_x','eye_y','eye_z','target_x','target_y','target_z'],['i16']*6,'void',[0,0,80,0,0,0]),
+    'mesh_draw':(['model','x','y','z','yaw','pitch','roll','size'],['i16']*8,'void',{'x':0,'y':0,'z':0,'yaw':0,'pitch':0,'roll':0,'size':256}),
     'cam_init':(['fov','near','far'],['i16']*3,'void',[60,1,1000]),
     'cam_look':(['eye_x','eye_y','eye_z','target_x','target_y','target_z','up_x','up_y','up_z'],['i16']*9,'void',[0,0,80,0,0,0,0,1,0]),
     'cam_fov':(['fov'],['i16'],'void',None),
