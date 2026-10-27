@@ -7,11 +7,12 @@ from .codegen import generate
 from .optimization_pipeline import optimize_program
 
 
-def compile_source(source, *, optimize_graphics=True, optimization="aggressive"):
+def compile_source(source, *, optimize_graphics=True, optimization="aggressive", assets=None):
     from .stdlib import imports, resolve
     source, bindings = imports(source)
     tokens = tokenize(source)
     tree = parse(tokens)
+    tree['assets']=assets or {}
     tree['fast_wireframes']=optimization=='aggressive'
     resolve(tree, {None: bindings})
     checked, symbols = check(tree)

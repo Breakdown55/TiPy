@@ -321,7 +321,9 @@ __gfx_{name}_loop:
 def graphics_assembly(used):
     used=set(used)
     routines = []
-    camera_entries={name for name in used if name.startswith(('cam_','mat_','model_','mesh_'))}
+    camera_entries={name for name in used if name.startswith(('cam_','mat_','model_','mesh_','solid_'))}
+    solid='mesh_faces' in used and 'mesh_draw' in used
+    if solid:camera_entries.add('solid_clear')
     if any(name.startswith('mesh_') for name in used):used.add('ink')
     if 'line' in used:camera_entries.add('wf_raster');used.add('ink')
     if camera_entries:
@@ -330,8 +332,9 @@ def graphics_assembly(used):
         from .camera_runtime import routines as camera_routines
         from .wireframe_runtime import routines as wireframe_routines
         from .mesh_runtime import routines as mesh_routines
+        from .solid_runtime import routines as solid_routines
         capacity=max((int(n.split(':')[1]) for n in used if n.startswith('batch_capacity:')),default=64)
-        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity)+mesh_routines(capacity)
+        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity)+mesh_routines(capacity,solid)+solid_routines()
         roots={'__gfx_'+name for name in camera_entries}
         native=link(groups,roots)
         routines.append(native)
@@ -342,7 +345,9 @@ def graphics_assembly(used):
     styled=bool(used & {'ink','stroke','circle','ellipse','polygon','polyline','styled_rectangle','styled_line'})
     if used & {'background','sin_raw','sat_add','stroke','circle','ellipse','polygon','polyline','styled_line','styled_rectangle'}:
         from .shape_runtime import assembly
-        routines.append(assembly(used))
+        shapes=assembly(used)
+        if solid:shapes=shapes.replace('__gfx_background:\n','__gfx_background:\n        call __gfx_solid_clear\n')
+        routines.append(shapes)
         if used & {'circle','ellipse','polygon','styled_rectangle'}:routines.append(_axis_line(False,True).replace('__gfx_h_line','__gfx_styled_h_line'))
         if used & {'polygon','polyline','stroke','styled_line'}:routines.append(_line(True).replace('__gfx_line','__gfx_styled_line').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
     if 'styled_rectangle' in used:routines.append(_rectangle().replace('__gfx_rectangle','__gfx_styled_rectangle').replace('call __gfx_pixel_on','call __gfx_ink_pixel').replace('call __gfx_h_line','call __gfx_styled_h_line'))
@@ -353,7 +358,7 @@ def graphics_assembly(used):
         if name in used:
             routines.append(_apply_row(name))
     if "clear" in used:
-        routines.append(CLEAR)
+        routines.append(CLEAR.replace('        ret','        jp __gfx_solid_clear') if solid else CLEAR)
     if "render" in used:
         routines.append(RENDER)
     if "line" in used:

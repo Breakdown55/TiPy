@@ -78,6 +78,7 @@ def compile_project(files, entry, *, optimization="aggressive"):
     from .preprocessor import expand_tokens
     tokens = expand_tokens(tokens, {name: files[name] for name in visited})
     tree = parse(tokens)
+    tree['assets']={name:text for name,text in files.items() if name.endswith('.obj')}
     tree['fast_wireframes']=optimization=='aggressive'
     from .stdlib import resolve as resolve_native
     resolve_native(tree, native_imports)

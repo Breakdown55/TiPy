@@ -47,12 +47,25 @@ test('HTTP compile resolves callbacks throughout the complete feature demo',asyn
 })
 test('HTTP compile supports py5-style 2D, orthographic and perspective demos',async()=>{
     await withServer(process.env.TIPY_PYTHON || 'python',async url=>{
-        for(const name of ['graphics_2d.tip','graphics_3d_ready.tip','camera.tip','room.tip','mono96.tip','mesh_lab.tip']) {
+        for(const name of ['graphics_2d.tip','graphics_3d_ready.tip','camera.tip','room.tip','mono96.tip','mesh_lab.tip','solid_cube.tip']) {
             const source=await readFile(new URL('../../examples/'+name,import.meta.url),'utf8')
             const response=await post(url,{files:{'main.tip':source},entry:'main.tip'})
             const result=await response.json()
             assert.equal(response.status,200,JSON.stringify(result.error));assert.equal(result.ok,true)
         }
+    })
+})
+
+test('HTTP compiler imports OBJ project assets and reports errors in the asset',async()=>{
+    const source=await readFile(new URL('../../examples/shaded_mesh.tip',import.meta.url),'utf8')
+    const obj=await readFile(new URL('../../examples/chair.obj',import.meta.url),'utf8')
+    await withServer(process.env.TIPY_PYTHON || 'python',async url=>{
+        const response=await post(url,{files:{'main.tip':source,'chair.obj':obj},entry:'main.tip'})
+        const result=await response.json();assert.equal(response.status,200,JSON.stringify(result.error))
+        assert.match(result.assembly,/__gfx_solid_depth: defs 6144/)
+        assert.doesNotMatch(result.assembly,/__heap_start:/)
+        const bad=await (await post(url,{files:{'main.tip':source,'chair.obj':'v 0 0 0\nf 0 1 2'},entry:'main.tip'})).json()
+        assert.equal(bad.ok,false);assert.equal(bad.error.filename,'chair.obj');assert.equal(bad.error.line,2)
     })
 })
 

@@ -522,6 +522,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
         elif kind=="global_value":
             emit(f"ld hl,({item['label']})")
         elif kind=='geometry_data':
+            if item.get('face_count'):pixels_used.add('mesh_faces')
             data=tuple(item['data'])
             if item.get('compact'):
                 if data not in geometry_packets:
@@ -1388,6 +1389,12 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
         code.extend(["__heap_start:", f"        defs {_heap_bytes},0", "__heap_end:"])
     code.append("__program_end:")
     assembly=optimize("\n".join(code) + "\n")
+    if not lists_used and 'mesh_faces' in pixels_used and 'mesh_draw' in pixels_used:
+        from .assembly_size import estimate
+        from .errors import CompileError
+        if estimate(assembly)>0xFFFE-0x9D95-1024:
+            location=next((n for n in tree['body'] if 'line' in n),{'line':1,'column':1})
+            raise CompileError('Solid 3D program exceeds TI-84 Plus RAM with 1 KB reserved for the stack; simplify geometry or code',location)
     if lists_used:
         from .assembly_size import estimate
         from .errors import CompileError

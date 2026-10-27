@@ -24,7 +24,8 @@ def main():
             tokens = tokenize(source)
             print(json.dumps(tokens if args.show == "tokens" else parse(tokens), indent=2))
             return 0
-        result = compile_source(source, optimization=args.optimization)
+        assets={} if args.source=='-' else {p.name:p.read_text(encoding='utf-8-sig') for p in Path(args.source).parent.glob('*.obj') if p.is_file() and p.stat().st_size<=1_000_000}
+        result = compile_source(source, optimization=args.optimization,assets=assets)
         if args.output:
             args.output.write_text(result["assembly"], encoding="utf-8")
         if args.show == "assembly":

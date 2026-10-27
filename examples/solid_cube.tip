@@ -1,0 +1,72 @@
+# Native solid cube: no asset file needed. MODE switches the light.
+# Arrows rotate. 2nd/Control toggles solid/wireframe. Enter toggles spin.
+# Clear/Escape exits. Click the LCD for input.
+# CCW faces point outward. Flat Lambert lighting + ambient uses 17 Bayer levels.
+# clear() resets pixels AND the 8-bit inverse-depth buffer; render() presents.
+import time
+
+int cube=mesh([
+    (-14,-14,-14),(14,-14,-14),(14,14,-14),(-14,14,-14),
+    (-14,-14,14),(14,-14,14),(14,14,14),(-14,14,14)
+],faces=[
+    (4,5,6),(4,6,7),(1,0,3),(1,3,2),
+    (0,4,7),(0,7,3),(5,1,2),(5,2,6),
+    (3,7,6),(3,6,2),(0,1,5),(0,5,4)
+])
+set_cpu_speed(15)
+init_camera(fov=75,near=8,far=120)
+int yaw=24
+int pitch=12
+int previous=time.frame_ticks()
+int motion=0
+bool spin=False
+bool filled=True
+bool enter_was=False
+bool second_was=False
+bool mode_was=False
+int light=0
+bool dirty=True
+
+while not key_down("clear"):
+    int now=time.frame_ticks()
+    int elapsed=min(16,(now-previous)&255)
+    previous=now
+    bool enter=key_down("enter")
+    bool second=key_down("2nd")
+    bool mode=key_down("mode")
+    if enter and not enter_was:
+        spin=not spin
+        dirty=True
+    if second and not second_was:
+        filled=not filled
+        dirty=True
+    if mode and not mode_was:
+        light=(light+1)%2
+        if light==0:
+            mesh_light(-1,2,3,ambient=3)
+        else:
+            mesh_light(3,1,0,ambient=2)
+        dirty=True
+    mode_was=mode
+    enter_was=enter
+    second_was=second
+    int turn=int(key_down("right"))-int(key_down("left"))
+    int tilt=int(key_down("up"))-int(key_down("down"))
+    motion+=elapsed
+    if motion>=8:
+        int steps=motion//8
+        motion%=8
+        if spin or turn!=0 or tilt!=0:
+            yaw=(yaw+(turn*2+int(spin and turn==0))*steps)&255
+            pitch=(pitch+tilt*steps*2)&255
+            dirty=True
+    if not dirty:
+        time.sleep(0.004)
+        continue
+    clear()
+    draw_mesh(cube,z=20,yaw=yaw,pitch=pitch,size=320,filled=filled)
+    render()
+    dirty=False
+
+time.stop_frame_timer()
+set_cpu_speed(6)

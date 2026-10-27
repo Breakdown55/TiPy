@@ -73,6 +73,7 @@ function renderFiles() {
         entryButton.title = name === entry ? 'Entry file' : 'Set as entry file'
         entryButton.setAttribute('aria-label',`Set ${name} as entry file`)
         entryButton.setAttribute('aria-pressed',String(name === entry))
+        if(name.endsWith('.obj')){entryButton.disabled=true;entryButton.title='OBJ model asset';entryButton.setAttribute('aria-label',`${name} model asset`)}
         entryButton.onclick = () => { save(); invalidateCompile(); entry = name; persist(); renderFiles(); status(`Entry: ${name}`) }
         row.append(button,entryButton)
         $('files').append(row)
@@ -208,7 +209,7 @@ $('source').onkeydown = event => {
 $('new-file').onclick = () => {
     const name = prompt('File name','utils.tip')?.trim()
     if (!name) return
-    if (!/^[A-Za-z_]\w*\.(tip|asm|z80)$/.test(name) || name === 'main.asm') { status('Use a name such as utils.tip. main.asm is generated.',true); return }
+    if (!/^[A-Za-z_]\w*\.(tip|asm|z80|obj)$/.test(name) || name === 'main.asm') { status('Use a .tip, .obj, .asm, or .z80 name. main.asm is generated.',true); return }
     save()
     if (!Object.hasOwn(files,name)) files[name] = ''
     select(name)
@@ -219,7 +220,7 @@ $('open').onchange = async event => {
     if (!file) return
     if (file.size > 1_000_000) { status('File must be smaller than 1 MB.',true); return }
     const name = file.name === 'main.asm' ? 'input.asm' : file.name
-    if (!/^[A-Za-z_]\w*\.(tip|asm|z80)$/.test(name)) { status('Use a file name such as main.tip or input.asm.',true); return }
+    if (!/^[A-Za-z_]\w*\.(tip|asm|z80|obj)$/.test(name)) { status('Use a file name such as main.tip, model.obj, or input.asm.',true); return }
     save()
     const content = await file.text()
     invalidateCompile()

@@ -8,17 +8,21 @@ import { Ti84Runner } from './hardware.js'
 function execute(source, measurements) {
     const python = process.env.TIPY_PYTHON || 'python'
     const args = measurements?.project
-        ? ['-c','import json,sys; from tipy.project import compile_project; from tipy.assembly_size import estimate; r=compile_project({"main.tip":sys.stdin.read()},"main.tip",optimization=sys.argv[1]); r["estimated_bytes"]=estimate(r["assembly"]); print(json.dumps(r))',measurements?.optimization ?? 'reference']
+        ? ['-c','import json,sys; from tipy.project import compile_project; from tipy.assembly_size import estimate; source=sys.stdin.read(); files=json.loads(source) if sys.argv[2]=="assets" else {"main.tip":source}; r=compile_project(files,"main.tip",optimization=sys.argv[1]); r["estimated_bytes"]=estimate(r["assembly"]); print(json.dumps(r))',measurements?.optimization ?? 'reference',measurements?.assets?'assets':'source']
         : measurements?.optimizeGraphics === false
         ? ['-c','import json,sys; from tipy import compile_source; print(json.dumps(compile_source(sys.stdin.read(), optimize_graphics=False, optimization="reference")))']
         : ['-m','tipy','-','--optimization', measurements?.optimization ?? 'reference','--show','all']
     const processResult = spawnSync(python,args,{
-        cwd: resolve('../..'), input: source, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024
+        cwd: resolve('../..'), input: measurements?.assets?JSON.stringify({...measurements.assets,'main.tip':source}):source, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024
     })
     assert.ifError(processResult.error)
     assert.equal(processResult.status,0,processResult.stderr)
     const result = JSON.parse(processResult.stdout)
     const runner = new Ti84Runner(result.assembly)
+    let minStack=65535
+    if(measurements?.trackStack){const step=runner.machine.step.bind(runner.machine);runner.machine.step=()=>{if(runner.machine.z80.regs.sp)minStack=Math.min(minStack,runner.machine.z80.regs.sp);return step()}}
+    const depth=runner.assembly.asm.scopes[0].symbols.get('__gfx_solid_depth')?.value
+    const depthGuards=depth===undefined?null:[runner.machine.memory[depth-1],runner.machine.memory[depth+6144]]
     if(measurements?.guardGraph){runner.machine.memory[0x933f]=0xa5;runner.machine.memory[0x9640]=0x5a}
     for(const code of measurements?.heldKeys ?? [])runner.setKey(code,true)
     assert.ok(result.estimated_bytes>=runner.machineBytes,'RAM sizing must never underestimate assembled image bytes')
@@ -58,6 +62,8 @@ function execute(source, measurements) {
     assert.equal(runner.machine.z80.regs.ix,0,'Functions must restore the caller frame pointer')
     assert.equal(runner.machine.z80.regs.iy,0x89f0,'Functions must preserve the calculator flags pointer')
     if(measurements?.guardGraph){assert.equal(runner.machine.memory[0x933f],0xa5);assert.equal(runner.machine.memory[0x9640],0x5a)}
+    if(depthGuards)assert.deepEqual([runner.machine.memory[depth-1],runner.machine.memory[depth+6144]],depthGuards,'Depth writes must stay inside the buffer')
+    if(measurements?.trackStack){assert.ok(minStack>=0x9d95+runner.machineBytes,'Native stack must stay above program code/data');measurements.stackBytes=65536-minStack}
     if (measurements) Object.assign(measurements, { bytes: runner.machineBytes, tStates: runner.machine.tStateCount,
         screen: runner.lcd.pixels.slice(), graph: runner.machine.memory.slice(0x9340,0x9640),
         report: result.optimization_report, assembly: result.assembly, frames,frameTimes,clockHz:runner.clockHz })
@@ -428,6 +434,61 @@ test(`${gameFile} pauses physics while continuing to poll the exit key`,()=>{
 }
 
 const meshCube='int model=mesh([(-8,-8,-8),(8,-8,-8),(8,8,-8),(-8,8,-8),(-8,-8,8),(8,-8,8),(8,8,8),(-8,8,8)],[(0,1),(1,2),(2,3),(3,0),(4,5),(5,6),(6,7),(7,4),(0,4),(1,5),(2,6),(3,7)])\n'
+test('Solid triangles cover pixel centers without cracks and implement all 17 Bayer shades',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000}
+    const declarations=Array.from({length:17},(_,i)=>`int t${i}=mesh([(-16,-16,0),(16,-16,0),(0,16,0)],faces=[(0,1,2,${i})])`).join('\n')
+    execute(declarations+'\nint plane_mesh=mesh([(-16,-16,0),(16,-16,0),(16,16,0),(-16,16,0)],faces=[(0,1,2,0),(0,2,3,0)])\ninit_camera(75,8,120)\n'+Array.from({length:17},(_,i)=>`clear()\ndraw_mesh(t${i},shaded=False)\nrender()`).join('\n')+'\nclear()\ndraw_mesh(plane_mesh,shaded=False)\nrender()',m)
+    const bayer=[[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]]
+    for(let level=0;level<17;level++){
+        const expected=new Uint8Array(6144)
+        for(let y=24;y<40;y++)for(let x=0;x<96;x++){
+            const half=(y+0.5-24)/2
+            if(x+0.5>=48-half && x+0.5<48+half && bayer[y&3][x&3]>=level)expected[y*96+x]=1
+        }
+        assert.deepEqual(m.frames[level],expected,`brightness ${level}`)
+    }
+    const quad=new Uint8Array(6144)
+    for(let y=24;y<40;y++)for(let x=40;x<56;x++)quad[y*96+x]=1
+    assert.deepEqual(m.frames[17],quad,'Shared triangle edge must leave no holes')
+    assert.ok(m.bytes<24_170);assert.ok(m.stackBytes<1024)
+})
+
+test('Opaque white triangles occlude black ones in either submission order',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000}
+    const source='int dark=mesh([(-16,-16,0),(16,-16,0),(0,16,0)],faces=[(0,1,2,0)])\nint white=mesh([(-16,-16,12),(16,-16,12),(0,16,12)],faces=[(0,1,2,16)])\ninit_camera(75,8,120)\n'
+    execute(source+'clear()\ndraw_mesh(dark,shaded=False)\ndraw_mesh(white,shaded=False)\nrender()\nclear()\ndraw_mesh(white,shaded=False)\ndraw_mesh(dark,shaded=False)\nrender()',m)
+    assert.ok(!m.frames[0].some(Boolean));assert.deepEqual(m.frames[0],m.frames[1])
+})
+
+test('Intersecting solid triangles use interpolated reciprocal depth rather than face sorting',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000}
+    const source='int a=mesh([(-12,-12,24),(12,-12,-24),(0,12,0)],faces=[(0,1,2,0)])\nint b=mesh([(-12,-12,-24),(12,-12,24),(0,12,0)],faces=[(0,1,2,16)])\ninit_camera(75,8,120)\ncamera(0,0,0,0,0,-1)\n'
+    execute(source+'clear()\ndraw_mesh(a,z=-48,cull=False,shaded=False)\ndraw_mesh(b,z=-48,cull=False,shaded=False)\nrender()\nclear()\ndraw_mesh(b,z=-48,cull=False,shaded=False)\ndraw_mesh(a,z=-48,cull=False,shaded=False)\nrender()',m)
+    assert.deepEqual(m.frames[0],m.frames[1]);assert.ok(m.frames[0].some(Boolean))
+    assert.equal(m.frames[0][36*96+42],1);assert.equal(m.frames[0][36*96+54],0)
+})
+
+test('Solid clipping crosses the near plane and LCD edges without writing outside buffers',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000}
+    execute('int t=mesh([(-20,-8,0),(20,-8,-20),(0,20,12)],faces=[(0,1,2,0)])\ninit_camera(75,4,50)\ncamera(0,0,0,0,0,-1)\nclear()\ndraw_mesh(t,z=-8,cull=False,shaded=False)\nrender()',m)
+    assert.ok(m.screen.some(Boolean));assert.ok(m.stackBytes<1024)
+})
+
+test('Backface winding, directional lighting, ambient light and wireframe mode execute natively',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000}
+    execute('int t=mesh([(-16,-16,0),(16,-16,0),(0,16,0)],faces=[(0,2,1)])\ninit_camera(75,8,120)\nclear()\ndraw_mesh(t)\nrender()\nclear()\ndraw_mesh(t,cull=False,shaded=False)\nrender()\nclear()\nmesh_light(0,0,-1,ambient=0)\ndraw_mesh(t,cull=False)\nrender()\nclear()\nmesh_light(0,0,1,ambient=0)\ndraw_mesh(t,cull=False)\nrender()\nclear()\ndraw_mesh(t,filled=False)\nrender()',m)
+    assert.ok(!m.frames[0].some(Boolean));assert.ok(!m.frames[1].some(Boolean))
+    assert.ok(!m.frames[2].some(Boolean));assert.ok(m.frames[3].some(Boolean));assert.ok(m.frames[4].some(Boolean))
+})
+
+test('The OBJ chair demo fits calculator RAM, renders, handles input and exits cleanly',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000,
+        assets:{'chair.obj':readFileSync(resolve('../../examples/chair.obj'),'utf8')},afterFrameKeys:[[3],[54],[15]]}
+    execute(readFileSync(resolve('../../examples/shaded_mesh.tip'),'utf8'),m)
+    assert.ok(m.bytes<24_170);assert.ok(m.stackBytes<1024);assert.equal(m.clockHz,6_000_000)
+    assert.ok(m.frames.length>=3);assert.notDeepEqual(m.frames[0],m.frames[1])
+    assert.ok(m.frames[0].reduce((s,p)=>s+p,0)>100)
+})
 test('Mesh coefficient products match rounded signed Q8 arithmetic across signs and scales',()=>{
     const pairs=[]
     for(const a of [-15360,-257,-256,-171,-1,0,1,128,255,256,384,15360])

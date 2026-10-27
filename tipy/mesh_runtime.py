@@ -8,7 +8,7 @@ from .camera_math import NativeRoutine,invoke
 from .list_runtime import add,sub,word
 
 
-def routines(capacity=64):
+def routines(capacity=64,solid=False):
     out=['''__gfx_mesh_ready: dw 0
 __gfx_mesh_near: dw 512
 __gfx_mesh_far: dw 30720
@@ -16,6 +16,7 @@ __gfx_mesh_eye: dw 0,0,80
 __gfx_mesh_basis: dw 256,0,0,0,256,0,0,0,-256
 __gfx_mesh_rotation: defs 18,0
 __gfx_mesh_view: defs 18,0
+__gfx_mesh_norm_view: defs 18,0
 __gfx_mesh_center: defs 6,0
 __gfx_mesh_vertex: defs 6,0
 __gfx_mesh_gain: defs 512,0''']
@@ -46,8 +47,8 @@ __gfx_mesh_gain: defs 512,0''']
             r.if_(('slt',prefix+axis,-120),lambda:r.fail(14));r.if_(('slt',120,prefix+axis),lambda:r.fail(14))
         r.set(axis,sub('t'+axis,'e'+axis));r.write(add('@__gfx_mesh_eye','xyz'.index(axis)*2),'e'+axis)
     r.if_(('eq','x',0),lambda:r.if_(('eq','z',0),lambda:r.fail(14)))
-    r.expr(invoke('wf_normalize',sub(0,'z'),0,'x','@__gfx_mesh_basis'))
-    r.expr(invoke('wf_normalize','x','y','z',add('@__gfx_mesh_basis',12)))
+    r.expr(invoke('mesh_normalize',sub(0,'z'),0,'x','@__gfx_mesh_basis'))
+    r.expr(invoke('mesh_normalize','x','y','z',add('@__gfx_mesh_basis',12)))
     for axis,(j,k) in enumerate(((1,2),(2,0),(0,1))):
         r.set('a',invoke('wf_qmul',word(add('@__gfx_mesh_basis',j*2)),word(add('@__gfx_mesh_basis',12+k*2))))
         r.set('b',invoke('wf_qmul',word(add('@__gfx_mesh_basis',k*2)),word(add('@__gfx_mesh_basis',12+j*2))))
@@ -97,7 +98,7 @@ __gfx_mesh_gain: defs 512,0''']
     no_high=r.label();r.emit(f'jr z,{no_high}','add hl,de');r.mark(no_high);r._store('result')
     r.mark(done);r.if_(('ne','negative',0),lambda:r.ret(sub(0,'result')));r.ret('result');out.append(r.finish())
 
-    r=NativeRoutine('mesh_draw',('model','x','y','z','yaw','pitch','roll','size'),
+    r=NativeRoutine('mesh_draw',('model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded'),
                     ('sx','cx','sy','cy','sz','cz','a','b','i','j','p','record','vertices','edges','count','radius'))
     r.if_(('eq',word('@__gfx_mesh_ready'),0),lambda:r.expr(invoke('mesh_init',75,2,120)))
     r.if_(('ne',word('model'),0x4d54),lambda:r.fail(14))
@@ -139,10 +140,11 @@ __gfx_mesh_gain: defs 512,0''']
             r.set('a',invoke('mesh_dot',add('@__gfx_mesh_basis','i'),add('@__gfx_mesh_rotation','j'),6))
             # Unit basis rounding may exceed one by a few Q8 increments.
             r.if_(('slt',256,'a'),lambda:r.set('a',256));r.if_(('slt','a',-256),lambda:r.set('a',-256))
+            if solid:r.write(add('@__gfx_mesh_norm_view',add('i','j')),'a')
             r.write(add('@__gfx_mesh_view',add('i','j')),mul('a','size'));r.set('j',add('j',2))
         r.while_(('ult','j',6),matrix_col);r.set('i',add('i',6))
     r.while_(('ult','i',18),matrix_row)
-    r.set('p',add('model',8));r.set('record','@__gfx_wf_records');r.set('count',0)
+    r.set('p',add('model',10));r.set('record','@__gfx_wf_records');r.set('count',0)
     def vertex():
         for i in range(3):
             r.expr(word(add('p',i*2)));r.emit(f'ld (__gfx_mesh_vertex+{i*2}),hl')
@@ -155,5 +157,40 @@ __gfx_mesh_gain: defs 512,0''']
     r.while_(('ult','count','vertices'),vertex)
     r.write('@__gfx_wf_near',word('@__gfx_mesh_near'));r.write('@__gfx_wf_far',word('@__gfx_mesh_far'));r.write('@__gfx_wf_gain','@__gfx_mesh_gain')
     r.emit('ld a,1','ld (__gfx_ink),a')
+    if solid:
+        r.if_(('ne','filled',0),lambda:r.if_(('ne',word(add('model',8)),0),lambda:(r.expr(invoke('solid_prepare','vertices')),r.expr(invoke('solid_draw',add('p',add('edges','edges')),word(add('model',8)),'cull','shaded')),r.ret())))
     r.expr(invoke('wf_draw','vertices','edges','p'));r.ret();out.append(r.finish())
+    out.append(_normalize())
     return out
+
+
+def _normalize():
+    """Camera/light changes are rare: integer square root saves the 1.5KB LUT."""
+    from .shape_runtime import words
+    r=NativeRoutine('mesh_normalize',('x','y','z','out'),('sx','sy','sz','max','lo','hi','mid','v')+words('sum',2)+words('p',2))
+    r.set('max',0)
+    for n in 'xyz':
+        r.set('s'+n,0);r.if_(('negative',n),lambda n=n:(r.set(n,sub(0,n)),r.set('s'+n,1)))
+        r.if_(('slt','max',n),lambda n=n:r.set('max',n))
+    r.if_(('eq','max',0),lambda:r.fail(14));r.if_(('slt',2047,'max'),lambda:r.fail(14))
+    def enlarge():
+        for n in 'xyz':r.set(n,add(n,n))
+        r.set('max',add('max','max'))
+    r.while_(('ult','max',1024),enlarge);r.zero('sum')
+    for n in 'xyz':
+        r.expr(n);r.emit('ld d,h','ld e,l','ld b,h','ld c,l','call __gfx_wf_umul');r._store('p0');r.emit('ex de,hl');r._store('p1');r.binary('sum','sum','p')
+    r.set('lo',0);r.set('hi',4096)
+    def root():
+        r.expr(add(add('lo','hi'),1));r.emit('srl h','rr l');r._store('mid')
+        r.emit('ld d,h','ld e,l','ld b,h','ld c,l','call __gfx_wf_umul');r._store('p0');r.emit('ex de,hl');r._store('p1')
+        higher,lower,done=r.label(),r.label(),r.label()
+        r.if_(('ult','sum1','p1'),lambda:r.emit(f'jp {higher}'))
+        r.if_(('ult','p1','sum1'),lambda:r.emit(f'jp {lower}'))
+        r.if_(('ult','sum0','p0'),lambda:r.emit(f'jp {higher}'))
+        r.mark(lower);r.set('lo','mid');r.emit(f'jp {done}');r.mark(higher);r.set('hi',sub('mid',1));r.mark(done)
+    r.while_(('ult','lo','hi'),root)
+    for i,n in enumerate('xyz'):
+        r.expr(n);r.emit('ld d,0','ld e,h','ld h,l','ld l,0','push hl');r.expr('lo');r.emit('srl h','rr l','ld b,h','ld c,l','pop hl','add hl,bc')
+        carry=r.label();r.emit(f'jr nc,{carry}','inc de');r.mark(carry);r.emit('push hl');r.expr('lo');r.emit('ld b,h','ld c,l','pop hl','call __gfx_wf_udiv');r._store('v')
+        r.if_(('ne','s'+n,0),lambda:r.set('v',sub(0,'v')));r.write(add('out',i*2),'v')
+    r.ret();return r.finish()

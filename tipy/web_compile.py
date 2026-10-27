@@ -17,7 +17,7 @@ def main():
         entry = request.get("entry")
         if not isinstance(files, dict) or not 1 <= len(files) <= 64:
             raise ValueError("Provide between 1 and 64 source files")
-        if any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_]\w*\.(?:tip|asm|z80)", name)
+        if any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_]\w*\.(?:tip|asm|z80|obj)", name)
                or not isinstance(text, str) for name, text in files.items()):
             raise ValueError("Invalid source file name or contents")
         if not isinstance(entry, str) or not entry.endswith(".tip") or entry not in files:

@@ -1053,7 +1053,7 @@ def check(tree):
         elif kind=='call' and item['name'].startswith('__tipy_native_') and item['name'][len('__tipy_native_'):] in CAMERA_INTRINSICS:
             from .camera_api import INTRINSICS
             name=item['name'][len('__tipy_native_'):];names,types,result,defaults=INTRINSICS[name]
-            values={} if defaults is None else {n:{'kind':'number','value':v,'line':item['line'],'column':item['column']} for n,v in (defaults.items() if isinstance(defaults,dict) else zip(names,defaults))}
+            values={} if defaults is None else {n:{'kind':'boolean' if isinstance(v,bool) else 'number','value':v,'line':item['line'],'column':item['column']} for n,v in (defaults.items() if isinstance(defaults,dict) else zip(names,defaults))}
             args,provided=bind_keywords(item['arguments'],names,values,item)
             constants=[]
             for arg,expected in zip(args,types):
