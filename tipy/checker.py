@@ -7,6 +7,7 @@ from .types import is_dict, dict_types, managed, is_tuple, tuple_types, split_ty
 PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
 SHAPE_BUILTINS = {"circle","ellipse","triangle","polygon","polyline"}
 from .graphics_library import PUBLIC as PY5_BUILTINS
+from .camera_api import INTRINSICS as CAMERA_INTRINSICS
 GRAPHICS_BUILTINS = PIXEL_BUILTINS | SHAPE_BUILTINS | PY5_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input"}
 PYTHON_BUILTINS = {"range", "list", "abs", "sum", "min", "max", "any", "all", "enumerate", "zip"}
 
@@ -1013,6 +1014,44 @@ def check(tree):
             item["kind"] = "text_print" if name == "print" else "text_input"
             value_type = "void" if name == "print" else "i16" if expected_element in {"int", "i16", "u8"} else "str"
             if value_type == "str": item["owned"] = True
+        elif kind=='call' and item['name'].startswith('__tipy_matrix_'):
+            from .camera_api import MATRIX_ENTRIES
+            name=item['name'][len('__tipy_matrix_'):];args=item['arguments'];original=list(args)
+            if any(a.get('kind')=='keyword' for a in args):raise CompileError('Use positional matrix arguments',item)
+            for arg in args:
+                if expression(arg)[0] not in {'i16','u8','fixed','float','i32'}:raise CompileError('Matrix arguments must be numbers',arg)
+            def number(value):return {'kind':'number','value':value,'type':'i16','line':item['line'],'column':item['column']}
+            if name=='translate' and len(args)==2:args.append(number(0))
+            if name=='scale' and len(args)==1:args.extend([args[0],args[0]])
+            elif name=='scale' and len(args)==2:args.append(number(1))
+            item.update(kind='native_matrix',name=MATRIX_ENTRIES[name],type='void')
+            if name.startswith('rotate'):item['axis']={'rotate':2,'rotate_z':2,'rotate_x':0,'rotate_y':1}[name]
+            freeze_arguments(item,original);return 'void',None
+        elif kind=='call' and item['name'].startswith('__tipy_native_') and item['name'][len('__tipy_native_'):] in CAMERA_INTRINSICS:
+            from .camera_api import INTRINSICS
+            name=item['name'][len('__tipy_native_'):];names,types,result,defaults=INTRINSICS[name]
+            values={} if defaults is None else {n:{'kind':'number','value':v,'line':item['line'],'column':item['column']} for n,v in zip(names,defaults)}
+            args,provided=bind_keywords(item['arguments'],names,values,item)
+            constants=[]
+            for arg,expected in zip(args,types):
+                actual,c=expression(arg,expected_element=expected[:-2] if expected.endswith('[]') else expected);compatible(expected,actual,c,arg)
+                constants.append(c)
+            item.update(kind='native_graphics',name=name,arguments=args,type=result,owned=managed(result))
+            if name in {'cam_init','cam_fov','cam_look'} and all(c is not None for c in constants):
+                try:
+                    if name in {'cam_init','cam_fov'}:
+                        if not 1<=constants[0]<=179:raise ValueError('Camera FOV must be between 1 and 179 degrees')
+                        if name=='cam_init' and not 1<=constants[1]<constants[2]:raise ValueError('Camera clipping distances require 1 <= near < far')
+                        import math
+                        item['camera_constants']={'focal':round(32/math.tan(math.radians(constants[0])/2)*16)}
+                        if name=='cam_init':item['camera_constants'].update(near=constants[1]<<14,far=constants[2]<<14)
+                    else:
+                        from .camera_api import camera_basis
+                        item['camera_constants']={'eye':constants[:3],'basis':camera_basis(constants)}
+                except ValueError as error:
+                    item.pop('camera_constants',None)
+                    if not checked['tracing_heap']:raise CompileError(str(error),item) from error
+            freeze_arguments(item,provided);return result,None
         elif kind=='call' and item['name'] in {'__tipy_native_background','__tipy_native_ink','__tipy_native_add','__tipy_native_sin_raw'}:
             name,args=item['name'],item['arguments']
             if len(args)!=(2 if name=='__tipy_native_add' else 1):raise CompileError('Invalid native graphics arguments',item)

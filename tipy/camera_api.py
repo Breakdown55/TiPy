@@ -1,0 +1,83 @@
+"""Camera intrinsic signatures; these compile to the calculator's native code."""
+CAMERA_PUBLIC={'init_camera','camera','set_fov'}
+MATRIX_ENTRIES={'translate':'mat_translate','scale':'mat_scale','rotate':'mat_rotate','rotate_x':'mat_rotate','rotate_y':'mat_rotate','rotate_z':'mat_rotate','push_matrix':'mat_push','pop_matrix':'mat_pop','reset_matrix':'mat_reset','apply_matrix':'mat_apply'}
+INTRINSICS={
+    'cam_init':(['fov','near','far'],['i16']*3,'void',[60,1,1000]),
+    'cam_look':(['eye_x','eye_y','eye_z','target_x','target_y','target_z','up_x','up_y','up_z'],['i16']*9,'void',[0,0,80,0,0,0,0,1,0]),
+    'cam_fov':(['fov'],['i16'],'void',None),
+    'cam_begin':([],[],'void',None),'cam_mode':([],[],'i16',None),
+    'cam_mark':(['mode'],['i16'],'void',None),
+    'cam_point':(['x','y','z','width'],['i16']*4,'void',None),
+    'cam_line':(['x1','y1','z1','x2','y2','z2','width'],['i16']*7,'void',None),
+    'cam_vertex':(['x','y','z'],['i16']*3,'i16[]',None),
+    'cam_fill':(['points'],['i16[][]'],'void',None),
+    'cam_edges':(['points','closed','width'],['i16[][]','bool','i16'],'void',None),
+    'model_axis':(['x','y','z','axis'],['i16']*4,'i16',None),
+    'model_contour':(['x','y','rx','ry'],['i16']*4,'tuple[i16,i16][]',None),
+}
+
+
+def camera_basis(values):
+    """Exact integer counterpart of the native normalizer, for constant folding."""
+    from math import isqrt
+    eye=values[:3];target=values[3:6];up=values[6:9]
+    def normalize(v):
+        signs=[-1 if n<0 else 1 for n in v];v=list(map(abs,v))
+        if not any(v):raise ValueError('Camera eye/target/up vectors are degenerate')
+        while max(v)>=16384:v=[n//2 for n in v]
+        while max(v)<8192:v=[n*2 for n in v]
+        length=isqrt(sum(n*n for n in v))
+        if not length:raise ValueError('Camera eye/target/up vectors are degenerate')
+        return [sign*n*16384//length if sign>0 else -(n*16384//length) for sign,n in zip(signs,v)]
+    def cross(a,b):return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]
+    forward=normalize([b-a for a,b in zip(eye,target)]);right=normalize(cross(forward,normalize(up)));actual_up=normalize(cross(right,forward))
+    return [*right,*actual_up,*forward]
+
+
+def install_helpers(helpers,matrix,dimensions):
+    """Change only XYZ entry points; XY entry points retain screen projection."""
+    from .parser import parse
+    from .lexer import tokenize
+    replacement={
+        '__tipy_gfx_begin_shape':'__tipy_gfx_vertices.clear()\n__tipy_gfx_camera_vertices.clear()\n__tipy_native_cam_begin()',
+        '__tipy_gfx_vertex2':'__tipy_native_cam_mark(2)\n__tipy_gfx_vertices.append(__tipy_gfx_project(x,y,0))',
+        '__tipy_gfx_vertex3':'__tipy_native_cam_mark(3)\n__tipy_gfx_camera_vertices.append(__tipy_native_cam_vertex(x,y,z))',
+        '__tipy_gfx_line4':'__tipy_gfx_outline([__tipy_gfx_project(x1,y1,0),__tipy_gfx_project(x2,y2,0)],False)',
+        '__tipy_gfx_point2':'__tipy_gfx_outline([__tipy_gfx_project(x,y,0)],False)',
+        '__tipy_gfx_line6':'if __tipy_gfx_style[2]!=0:\n    __tipy_gfx_ink(__tipy_gfx_style[3])\n    __tipy_native_cam_line(x1,y1,z1,x2,y2,z2,__tipy_gfx_style[4])',
+        '__tipy_gfx_point3':'if __tipy_gfx_style[2]!=0:\n    __tipy_gfx_ink(__tipy_gfx_style[3])\n    __tipy_native_cam_point(x,y,z,__tipy_gfx_style[4])',
+        '__tipy_gfx_end_shape':'''if __tipy_native_cam_mode()==3:
+    if __tipy_gfx_style[0]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[1])
+        __tipy_native_cam_fill(__tipy_gfx_camera_vertices)
+    if __tipy_gfx_style[2]!=0:
+        __tipy_gfx_ink(__tipy_gfx_style[3])
+        __tipy_native_cam_edges(__tipy_gfx_camera_vertices,closed,__tipy_gfx_style[4])
+else:
+    __tipy_gfx_draw_polygon(__tipy_gfx_vertices,closed)
+__tipy_gfx_vertices.clear()
+__tipy_gfx_camera_vertices.clear()
+__tipy_native_cam_begin()''',
+        '__tipy_gfx_contour':'__tipy_gfx_polygon(__tipy_native_model_contour(x,y,rx,ry))',
+    }
+    if matrix:replacement['__tipy_gfx_project']='return __tipy_native_model_axis(x,y,z,0),__tipy_native_model_axis(x,y,z,1)'
+    if 2 not in dimensions:
+        replacement['__tipy_gfx_begin_shape']='__tipy_gfx_camera_vertices.clear()\n__tipy_native_cam_begin()'
+        replacement['__tipy_gfx_end_shape']='''if __tipy_gfx_style[0]!=0:
+    __tipy_gfx_ink(__tipy_gfx_style[1])
+    __tipy_native_cam_fill(__tipy_gfx_camera_vertices)
+if __tipy_gfx_style[2]!=0:
+    __tipy_gfx_ink(__tipy_gfx_style[3])
+    __tipy_native_cam_edges(__tipy_gfx_camera_vertices,closed,__tipy_gfx_style[4])
+__tipy_gfx_camera_vertices.clear()
+__tipy_native_cam_begin()'''
+    elif 3 not in dimensions:
+        replacement['__tipy_gfx_begin_shape']='__tipy_gfx_vertices.clear()'
+        replacement['__tipy_gfx_vertex2']='__tipy_gfx_vertices.append(__tipy_gfx_project(x,y,0))'
+        replacement['__tipy_gfx_end_shape']='__tipy_gfx_draw_polygon(__tipy_gfx_vertices,closed)\n__tipy_gfx_vertices.clear()'
+    for f in helpers['body']:
+        if f.get('kind')=='function' and f['name'] in replacement:
+            source='def wrapper():\n'+'\n'.join('    '+line for line in replacement[f['name']].splitlines())+'\n'
+            f['body']=parse(tokenize(source))['body'][0]['body']
+            if f['name']=='__tipy_gfx_project':f['return_type']='tuple[int,int]'
+    helpers['body'].insert(0,parse(tokenize('int[][] __tipy_gfx_camera_vertices=[]\n'))['body'][0])

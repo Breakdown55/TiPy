@@ -1,0 +1,23 @@
+# Camera settings affect XYZ calls only. XY shapes and print stay on screen.
+# FOV is vertical degrees; clipping distances are positive integer world units.
+# The default camera is (0,0,80), looking toward (0,0,0), with +Y up.
+clear()
+no_fill()
+init_camera(fov=60, near=1, far=300)
+camera(0, 0, 80, 0, 0, 0)
+
+# Try set_fov(35) for a tighter view, or set_fov(90) for a wider one.
+push_matrix()
+translate(0, 0, 15)
+rotate_y(0.5)
+begin_shape()
+vertex(-18, -14, 0)
+vertex(18, -14, 0)
+vertex(0, 18, 0)
+end_shape(CLOSE)
+pop_matrix()
+
+# These are XY/HUD calls; the camera does not project them.
+rect(2, 2, 16, 10)
+print("HUD", 2, 55)
+render()

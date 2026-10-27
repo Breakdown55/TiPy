@@ -284,6 +284,17 @@ __gfx_{name}_loop:
 def graphics_assembly(used):
     used=set(used)
     routines = []
+    camera_entries={name for name in used if name.startswith(('cam_','mat_','model_'))}
+    if camera_entries:
+        from .camera_math import routines as math_routines,link
+        from .matrix_runtime import routines as matrix_routines
+        from .camera_runtime import routines as camera_routines
+        native=link(math_routines()+matrix_routines()+camera_routines(),{'__gfx_'+name for name in camera_entries})
+        routines.append(native)
+        if '__gfx_sin_raw' in native:used.add('sin_raw')
+        if '__gfx_sat_add' in native:used.add('sat_add')
+        if '__gfx_polygon' in native:used.add('polygon')
+        if '__gfx_styled_line' in native:used.add('stroke')
     styled=bool(used & {'ink','stroke','circle','ellipse','polygon','polyline','styled_rectangle'})
     if used & {'background','sin_raw','sat_add','stroke','circle','ellipse','polygon','polyline'}:
         from .shape_runtime import assembly

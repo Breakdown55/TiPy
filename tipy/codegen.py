@@ -55,6 +55,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
 
     def has_arrays(item):
         if isinstance(item, dict):
+            if item.get('kind')=='native_matrix' and item.get('name') in {'mat_push','mat_pop'}:return True
             if item.get('kind')=='graphics' and item.get('name')=='triangle':return True
             if item.get("unreachable") is True:
                 return False
@@ -120,7 +121,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             return item.get("iteration_kind") == "range" and "fast_range" not in item or string_field(item,"kind") in {"modulo", "floor_divide"} or string_field(item,"operator") in {"//=", "%="} or any(has_modulo(value) for value in item.values())
         return isinstance(item, list) and any(has_modulo(value) for value in item)
 
-    errors_used = lists_used or has_modulo(tree) or bool(native_used) or any(n.get("kind") in {"function","power","shift_left","shift_right","numeric_builtin","true_divide"} for n in walk(tree))
+    errors_used = lists_used or has_modulo(tree) or bool(native_used) or any(n.get("kind") in {"function","power","shift_left","shift_right","numeric_builtin","true_divide","native_matrix","native_graphics"} for n in walk(tree))
 
     def label():
         nonlocal serial
@@ -600,6 +601,33 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             if item["name"] == "pop" and not item["arguments"]:
                 arguments.append(-1)
             runtime(item["name"], arguments)
+        elif kind=='native_graphics':
+            if 'camera_constants' in item:
+                good=label();emit('ld hl,(__gfx_cam_path_mode)','ld a,h','or l',f'jp z,{good}','ld hl,14','jp __arr_fail');mark(good)
+                constants=item['camera_constants']
+                for key in ('focal','near','far'):
+                    if key in constants:
+                        emit(f"ld hl,{constants[key]&65535}",f'ld (__gfx_cam_{key}),hl')
+                        if key!='focal':emit(f"ld hl,{(constants[key]>>16)&65535}",f'ld (__gfx_cam_{key}+2),hl')
+                for key in ('eye','basis'):
+                    for i,value in enumerate(constants.get(key,[])):emit(f'ld hl,{value&65535}',f'ld (__gfx_cam_{key}+{i*2}),hl')
+                emit('ld hl,1','ld (__gfx_cam_enabled),hl');pixels_used.add('cam_state')
+            else:runtime(item['name'],item['arguments'],'__gfx_');pixels_used.add(item['name'])
+        elif kind=='native_matrix':
+            for arg in item['arguments']:
+                expression(arg)
+                if arg['type'] in {'i16','u8'}:emit('ex de,hl','ld hl,0')
+                elif arg['type']=='fixed':
+                    positive=label();emit('ld e,h','ld h,l','ld l,0','ld d,0','bit 7,e',f'jp z,{positive}','ld d,255');mark(positive)
+                elif arg['type']=='float':
+                    emit('push hl','call __gfx_mat_from_float','pop bc');pixels_used.add('mat_from_float')
+                else:
+                    negative,good,bad=label(),label(),label()
+                    emit('ld e,(hl)','inc hl','ld d,(hl)','ex de,hl','ld c,(hl)','inc hl','ld b,(hl)','inc hl','ld e,(hl)','inc hl','ld d,(hl)','bit 7,b',f'jp nz,{negative}','ld a,d','or e',f'jp z,{good}',f'jp {bad}')
+                    mark(negative);emit('ld a,d','and e','cp 255',f'jp z,{good}');mark(bad);emit('ld hl,14','jp __arr_fail');mark(good);emit('ld d,b','ld e,c','ld hl,0')
+                emit('push hl','push de')
+            if 'axis' in item:emit(f"ld hl,{item['axis']}",'push hl');modulo_used=True
+            emit(f"call __gfx_{item['name']}",*(['pop bc']*(len(item['arguments'])*2+int('axis' in item))));pixels_used.add(item['name'])
         elif kind=='raw_fixed':expression(item['value'])
         elif kind=='graphics_value':
             if item['name']=='sin_raw':modulo_used=True
@@ -1287,6 +1315,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
     required = set(RUNTIME_TARGET.findall("\n".join(code)))
     if required:
         object_types={t for node in walk(tree) if isinstance(node.get("type"),str) for t in all_types(node["type"])}
+        if pixels_used & {'mat_push','mat_pop','cam_fill','cam_vertex'}:object_types.update({'i16[][]','i16[]','tuple[i16,i16][]','tuple[i16,i16]'})
         if any(n.get('kind')=='graphics' and n.get('name')=='triangle' for n in walk(tree)):object_types.update({'tuple[i16,i16][]','tuple[i16,i16]'})
         dictionary_types = {dict_types(t) if is_dict(t) else (element_type(t),"i16") for t in object_types if is_dict(t) or is_set(t)}
         code.extend(["", "; Used heap runtime routines and their dependencies", runtime_assembly(required, dictionary_types, object_types,tracing,generators,_heap_bytes)])
@@ -1307,6 +1336,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
     if tracing:
         code.extend(["__exception_handler: dw 0","__exception_code: dw 0","__exception_message: dw 0","__gc_changed: dw 0","__gc_roots:"])
         roots=[s["label"] for s in [*symbols.values(),*tree.get("temporaries",{}).values()] if managed(s["type"])]
+        if pixels_used & {'mat_push','mat_pop'}:roots.append('__gfx_model_stack')
         code.append("        dw "+",".join([*roots,"__exception_message",*(["__gen_active","__gen_value"] if generators else []),"0"]))
     if generators:code.extend(["__gen_active: dw 0","__gen_value: dw 0","__gen_continuation: dw 0","__gen_finished_object: dw 0"])
     if iterator_helpers or iterator_new_used:code.append("__iterator_exhausted: dw 0")

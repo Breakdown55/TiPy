@@ -1,8 +1,9 @@
 """Demand-linked py5-style facade, compiled to Z80 with 4x4 matrices."""
 from pathlib import Path
 from .errors import CompileError
+from .camera_api import CAMERA_PUBLIC,install_helpers as install_camera_helpers
 MATRIX_NAMES={'translate','scale','rotate','rotate_x','rotate_y','rotate_z','push_matrix','pop_matrix','reset_matrix','apply_matrix'}
-PUBLIC={'background','circle','ellipse','rect','triangle','quad','polygon','polyline','point','fill','no_fill','stroke','no_stroke','stroke_weight','begin_shape','vertex','end_shape'}|MATRIX_NAMES
+PUBLIC={'background','circle','ellipse','rect','triangle','quad','polygon','polyline','point','fill','no_fill','stroke','no_stroke','stroke_weight','begin_shape','vertex','end_shape'}|MATRIX_NAMES|CAMERA_PUBLIC
 SIGNATURES={'circle':(3,),'ellipse':(4,),'rect':(4,),'triangle':(6,),'quad':(8,),'polygon':(1,),'polyline':(1,2),'point':(2,3),'line':(4,6),'fill':(1,),'stroke':(1,),'no_fill':(0,),'no_stroke':(0,),'stroke_weight':(1,),'translate':(2,3),'scale':(1,2,3),'rotate':(1,),'rotate_x':(1,),'rotate_y':(1,),'rotate_z':(1,),'push_matrix':(0,),'pop_matrix':(0,),'reset_matrix':(0,),'apply_matrix':(16,),'begin_shape':(0,),'vertex':(2,3),'end_shape':(0,1)}
 SIGNATURES['background']=(1,)
 def walk(n):
@@ -22,6 +23,8 @@ def install(tree):
         if name in visited or name not in user_functions:continue
         visited.add(name);active.append(user_functions[name]);pending.update(n['name'] for n in walk(user_functions[name]) if n.get('kind') in {'call','name'})
     matrix=any(n.get('kind')=='call' and n['name'] in MATRIX_NAMES for n in walk(active))
+    camera=any(n.get('kind')=='call' and n['name'] in CAMERA_PUBLIC for n in walk(active))
+    dimensions={len(n['arguments']) for n in walk(active) if n.get('kind')=='call' and n.get('name')=='vertex'}
     outline_only=False
     if 'fill' not in called:
         for statement in tree['body']:
@@ -33,11 +36,18 @@ def install(tree):
             value=statement.get('value',{})
             if statement.get('kind')=='expression_statement' and value.get('kind')=='call':
                 if value['name']=='clear' or value['name']=='background' and all(a.get('kind')=='number' for a in value['arguments']):continue
+                if value['name'] in CAMERA_PUBLIC|MATRIX_NAMES|{'stroke','no_stroke','stroke_weight'} and not any(a.get('kind') in {'call','method'} for arg in value['arguments'] for a in walk(arg)):continue
                 if value['name']=='no_fill':outline_only=True
             break
     for n in nodes:
         if n.get('kind')=='function' and (n['name'] in PUBLIC or n['name'].startswith('__tipy_gfx_')):raise CompileError('Graphics names are reserved',n)
-        if n.get('kind')=='call' and n['name'] in SIGNATURES:
+        if n.get('kind')=='call' and n['name'] in CAMERA_PUBLIC:
+            n['name']='__tipy_native_'+{'init_camera':'cam_init','camera':'cam_look','set_fov':'cam_fov'}[n['name']]
+        elif n.get('kind')=='call' and camera and n['name'] in MATRIX_NAMES:
+            name=n['name']
+            if len(n['arguments']) not in SIGNATURES[name]:raise CompileError(f'Invalid arguments to {name}',n)
+            n['name']='__tipy_matrix_'+name
+        elif n.get('kind')=='call' and n['name'] in SIGNATURES:
             name=n['name'];args=n['arguments'];count=len(args)
             if count not in SIGNATURES[name]:raise CompileError(f'Invalid arguments to {name}',n)
             if any(a.get('kind')=='keyword' for a in args):raise CompileError('Use positional arguments for graphics functions',n)
@@ -66,6 +76,11 @@ def install(tree):
     for n in helpers['body']:
         if not matrix and n.get('kind')=='function' and n['name']=='__tipy_gfx_project':n['body']=parse(tokenize('def identity(int x,int y,int z):\n    return x,y\n'))['body'][0]['body']
         if n.get('kind')=='function':n['body']=prune(n['body'])
+    if camera:
+        install_camera_helpers(helpers,matrix,dimensions)
+        # The camera end-shape wrapper also needs the proven outline-only pass.
+        for n in helpers['body']:
+            if n.get('kind')=='function' and n['name']=='__tipy_gfx_end_shape':n['body']=prune(n['body'])
     functions={n['name']:n for n in helpers['body'] if n.get('kind')=='function'}
     globals_={n['name']:n for n in helpers['body'] if n.get('kind')=='declare'}
     live=set();pending={n['name'] for n in walk(tree) if n.get('kind') in {'call','name'}}

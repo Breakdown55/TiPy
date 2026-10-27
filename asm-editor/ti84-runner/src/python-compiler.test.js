@@ -93,6 +93,131 @@ function execute(source, measurements) {
     return values
 }
 
+test('Perspective camera changes XYZ drawings and leaves XY drawings in screen space',()=>{
+    const m={project:true,maxSlices:20000}
+    execute(`init_camera(fov=60,near=1,far=100)
+clear()
+point(10,0,0)
+point(10,0,40)
+point(0,10,0)
+point(3,4)
+render()
+set_fov(120)
+clear()
+point(10,0,0)
+point(3,4)
+render()`,m)
+    const expected={};execute('clear()\npixel_on(55,32)\npixel_on(62,32)\npixel_on(48,25)\npixel_on(3,4)\nrender()\nclear()\npixel_on(50,32)\npixel_on(3,4)\nrender()',expected)
+    assert.deepEqual(m.frames,expected.frames)
+    assert.doesNotMatch(m.assembly,/__obj_f32_multiply:/)
+})
+
+test('Perspective near/far and viewport clipping happen before narrowing coordinates',()=>{
+    const m={project:true,maxSlices:20000}
+    execute(`clear()
+no_fill()
+init_camera(60,10,100)
+camera(0,0,0,0,0,-1)
+line(-10,0,-5,10,0,-20)
+render()
+clear()
+line(-20,0,-80,20,0,-120)
+render()
+clear()
+line(-32768,-32768,-10,32767,32767,-10)
+render()
+clear()
+line(-10,0,1,10,0,0)
+point(0,0,-9)
+point(0,0,-101)
+render()`,m)
+    const expected={};execute('clear()\nline(30,32,76,32)\nrender()\nclear()\nline(34,32,48,32)\nrender()\nclear()\nline(17,63,80,0)\nrender()\nclear()\nrender()',expected)
+    assert.deepEqual(m.frames,expected.frames)
+})
+test('Runtime camera look-at agrees with constant setup for arbitrary positions and up vectors',()=>{
+    for(const values of [[0,0,80,0,0,0,0,1,0],[80,0,0,0,0,0,0,1,0],[25,30,80,0,0,0,0,1,0],[0,80,0,0,0,0,0,0,-1],[0,0,0,1,1,0,0,0,1]]) {
+        const a={project:true,maxSlices:20000},b={project:true,maxSlices:20000}
+        const draw='clear()\npoint(10,0,0)\npoint(0,10,0)\npoint(0,0,10)\nline(-10,-10,0,10,10,0)\nrender()'
+        execute('init_camera()\ncamera('+values.join(',')+')\n'+draw,a)
+        const names=values.map((v,i)=>'v'+i)
+        execute('init_camera()\n'+values.map((v,i)=>'int v'+i+'='+v).join('\n')+'\ncamera('+names.join(',')+')\n'+draw,b)
+        assert.deepEqual(a.graph,b.graph,values.join(','))
+    }
+})
+test('Perspective vertex paths fill clipped polygons and keep 2D paths separate',()=>{
+    const m={project:true,maxSlices:20000}
+    execute(`clear()
+init_camera(60,10,100)
+camera(0,0,0,0,0,-1)
+fill(BLACK)
+no_stroke()
+begin_shape()
+vertex(-10,-10,-20)
+vertex(10,-10,-20)
+vertex(0,10,-20)
+end_shape(CLOSE)
+render()
+clear()
+begin_shape()
+vertex(-10,-10,-5)
+vertex(10,-10,-20)
+vertex(0,10,-20)
+end_shape(CLOSE)
+render()
+clear()
+begin_shape()
+vertex(2,2)
+vertex(12,2)
+vertex(2,12)
+end_shape(CLOSE)
+render()`,m)
+    const screenToGraph=screen=>Uint8Array.from({length:768},(_,i)=>Array.from({length:8},(_,b)=>screen[i*8+b]<<(7-b)).reduce((a,b)=>a|b,0))
+    assert.deepEqual(screenToGraph(m.frames[0]),expectedPolygon([[20,60],[76,60],[48,4]],true))
+    assert.deepEqual(screenToGraph(m.frames[1]),expectedPolygon([[11,50],[18,63],[70,63],[76,60],[48,4]],true))
+    assert.deepEqual(screenToGraph(m.frames[2]),expectedPolygon([[2,2],[12,2],[2,12]],true))
+})
+test('Camera programs use a fixed-point model stack without changing 2D overlays',()=>{
+    const m={project:true,maxSlices:20000}
+    execute(`clear()
+no_fill()
+init_camera()
+camera(0,0,80,0,0,0)
+push_matrix()
+rotate_y(1.5707963267948966)
+point(0,0,10)
+pop_matrix()
+point(10,0,0)
+point(3,4)
+render()`,m)
+    const e={};execute('clear()\npixel_on(55,32)\npixel_on(3,4)\nrender()',e)
+    assert.deepEqual(m.graph,e.graph);assert.doesNotMatch(m.assembly,/__obj_f32_multiply:/)
+})
+
+test('Camera clipping retains thick strokes overlapping the screen edge',()=>{
+    const m={project:true,maxSlices:20000},e={}
+    execute('clear()\ninit_camera(90)\ncamera(0,0,0,0,0,-1)\nstroke_weight(5)\npoint(-49,0,-32)\npoint(48,0,-32)\nrender()',m)
+    execute('clear()\nstroke_weight(5)\npoint(-1,32)\npoint(96,32)\nrender()',e)
+    assert.deepEqual(m.graph,e.graph)
+})
+
+test('Camera matrix translation scaling and explicit matrices compose and restore',()=>{
+    const m={project:true,maxSlices:20000},e={}
+    execute(`clear()
+init_camera(90)
+push_matrix()
+translate(10,20)
+scale(2,3)
+point(2,3)
+pop_matrix()
+apply_matrix(1,0,0,5,0,1,0,6,0,0,1,0,0,0,0,1)
+point(2,3)
+reset_matrix()
+point(2,3)
+render()`,m)
+    execute('clear()\npixel_on(14,29)\npixel_on(7,9)\npixel_on(2,3)\nrender()',e)
+    assert.deepEqual(m.graph,e.graph)
+})
+
 function expectedCurve(cx,cy,rx,ry,filled) {
     const inside=(x,y)=>{
         if(rx<0||ry<0)return false
