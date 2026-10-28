@@ -335,7 +335,7 @@ def graphics_assembly(used):
         from .solid_runtime import routines as solid_routines
         from .light_runtime import routines as light_routines
         capacity=max((int(n.split(':')[1]) for n in used if n.startswith('batch_capacity:')),default=64)
-        extended=bool(used & {'solid_point_light','solid_directional_light'})
+        extended=bool(used & {'solid_point_light','solid_directional_light','solid_directional_coeff'})
         no_depth='solid_no_depth' in used
         dynamic_depth='solid_dynamic_depth' in used
         quads='solid_quads' in used

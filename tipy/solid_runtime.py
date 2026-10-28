@@ -69,29 +69,7 @@ __gfx_solid_pattern: db 0''']
     r.if_(('eq','axis',4),lambda:(interpolate(0),interpolate(2)),screen_cut)
     r.write(add('out','axis'),'bound');r.ret();out.append(r.finish())
 
-    r=NativeRoutine('solid_clip',('src','count','dst','axis','bound','keep'),('prev','cur','ip','ic','i','n','out','outside','inside'))
-    r.if_(('eq','count',0),lambda:r.ret(0))
-    r.set('prev',add('src',invoke('mesh_imul',sub('count',1),12)));r.set('cur','src');r.set('out','dst');r.set('i',0);r.set('n',0)
-    def inside(point,target):
-        equal,done=r.label(),r.label()
-        r.expr(word(add(point,'axis')));r.emit('push hl');r.expr('bound')
-        r.emit('ex de,hl','pop hl','ld a,h','xor 128','ld h,a','ld a,d','xor 128','ld d,a','or a','sbc hl,de',f'jr z,{equal}',
-               'ld a,0','adc a,0','ld b,a',f"ld a,(ix{r.slots['keep']:+d})",'xor b','ld l,a','ld h,0',f'jr {done}')
-        r.mark(equal);r.emit('ld hl,1');r.mark(done);r._store(target)
-    inside('prev','ip')
-    def append(src):
-        _copy(r,src,'out');r.set('out',add('out',12));r.set('n',add('n',1))
-    def clip():
-        inside('cur','ic')
-        def intersection():
-            r.set('outside','prev');r.set('inside','cur')
-            r.if_(('ne','ip',0),lambda:(r.set('outside','cur'),r.set('inside','prev')))
-            def cut():
-                r.expr(invoke('solid_cut','outside','inside','out','axis','bound'));r.set('out',add('out',12));r.set('n',add('n',1))
-            r.if_(('ne',word(add('inside','axis')),'bound'),cut)
-        r.if_(('ne','ip','ic'),intersection);r.if_(('ne','ic',0),lambda:append('cur'))
-        r.set('prev','cur');r.set('cur',add('cur',12));r.set('ip','ic');r.set('i',add('i',1))
-    r.while_(('ult','i','count'),clip);r.ret('n');out.append(r.finish())
+    out.append(_clip())
 
     out.extend(_edge_dda())
     r=NativeRoutine('solid_project',('p',),('flags','v'))
@@ -135,6 +113,44 @@ __gfx_solid_pattern: db 0''']
         out=[s.replace('__gfx_solid_span:\n','__gfx_solid_span:\n        ld a,(__gfx_solid_depth_enabled)\n        or a\n        jp z,__gfx_solid_flat_span\n') for s in out]
         out.extend(['__gfx_solid_depth_enabled: dw 1',_flat_span().replace('__gfx_solid_span','__gfx_solid_flat_span')])
     return out
+
+
+def _clip():
+    """Sutherland-Hodgman with register-held cursor and byte predicates."""
+    r=NativeRoutine('solid_clip',('src','count','dst','axis','bound','keep'),
+                    ('prev','ip','ic','out','n','outside','inside'))
+    r.if_(('eq','count',0),lambda:r.ret(0))
+    r.emit('push iy');r.expr('src');r.emit('push hl','pop iy')
+    r.expr('count');r.emit('dec hl','add hl,hl','add hl,hl','ld d,h','ld e,l','add hl,hl','add hl,de','push hl')
+    r.expr('src');r.emit('pop de','add hl,de');r._store('prev')
+    r.set('out','dst');r.set('n',0)
+    def value(point):
+        if point=='current':r.emit('push iy','pop hl')
+        else:r.expr(point)
+        r.emit(f"ld e,(ix{r.slots['axis']:+d})",f"ld d,(ix{r.slots['axis']+1:+d})",'add hl,de',
+               'ld e,(hl)','inc hl','ld h,(hl)','ld l,e',
+               f"ld e,(ix{r.slots['bound']:+d})",f"ld d,(ix{r.slots['bound']+1:+d})")
+    def inside(point):
+        equal,done=r.label(),r.label();value(point)
+        r.emit('ld a,h','xor 128','ld h,a','ld a,d','xor 128','ld d,a','or a','sbc hl,de',f'jr z,{equal}',
+               'ld a,0','adc a,0','ld c,a',f"ld a,(ix{r.slots['keep']:+d})",'xor c',f'jr {done}')
+        r.mark(equal);r.emit('ld a,1');r.mark(done)
+    inside('prev');r.emit(f"ld (ix{r.slots['ip']:+d}),a",f"ld b,(ix{r.slots['count']:+d})")
+    loop,no_cross,selected,no_append=(r.label() for _ in range(4));r.mark(loop);r.emit('push bc')
+    inside('current');r.emit(f"ld (ix{r.slots['ic']:+d}),a",'ld c,a',f"ld a,(ix{r.slots['ip']:+d})",'xor c',f'jp z,{no_cross}')
+    r.set('outside','prev');r.emit('push iy','pop hl');r._store('inside')
+    r.emit(f"ld a,(ix{r.slots['ip']:+d})",'or a',f'jr z,{selected}')
+    r.set('inside','prev');r.emit('push iy','pop hl');r._store('outside');r.mark(selected)
+    value('inside');r.emit('or a','sbc hl,de',f'jp z,{no_cross}')
+    for argument in ('outside','inside','out','axis','bound'):r.expr(argument);r.emit('push hl')
+    r.emit('call __gfx_solid_cut','ld hl,10','add hl,sp','ld sp,hl')
+    r.expr('out');r.emit('ld de,12','add hl,de');r._store('out');r.emit(f"inc (ix{r.slots['n']:+d})")
+    r.mark(no_cross);r.emit(f"ld a,(ix{r.slots['ic']:+d})",'or a',f'jr z,{no_append}','push iy','pop hl',
+        f"ld e,(ix{r.slots['out']:+d})",f"ld d,(ix{r.slots['out']+1:+d})",'ld bc,12','ldir',
+        f"ld (ix{r.slots['out']:+d}),e",f"ld (ix{r.slots['out']+1:+d}),d",f"inc (ix{r.slots['n']:+d})")
+    r.mark(no_append);r.emit('push iy','pop hl');r._store('prev')
+    r.emit(f"ld a,(ix{r.slots['ic']:+d})",f"ld (ix{r.slots['ip']:+d}),a",'ld de,12','add iy,de','pop bc','dec b',f'jp nz,{loop}','pop iy')
+    r.ret('n');return r.finish()
 
 
 def _flat_span():

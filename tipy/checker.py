@@ -1067,6 +1067,9 @@ def check(tree):
                 for c,(low,high),arg in zip(constants,bounds,args):
                     if c is not None and not low<=c<=high:raise CompileError(f'Light argument must be in {low}..{high}',arg)
                 if name=='solid_directional_light' and constants[:3]==[0,0,0]:raise CompileError('Directional light direction cannot be zero',item)
+                def literal(arg):return arg.get('kind') in {'number','boolean'} or arg.get('kind')=='negate' and literal(arg['value'])
+                if name=='solid_directional_light' and all(c is not None for c in constants) and all(literal(arg) for arg in args):
+                    item['light_direction_constants']=constants
             if name in {'mesh_init','mesh_fov'}:
                 if constants[0] is not None and not 55<=constants[0]<=120:raise CompileError('Mesh camera FOV must be 55..120 degrees',item)
                 if name=='mesh_init' and all(c is not None for c in constants[1:]) and not 1<=constants[1]<constants[2]<=127:raise CompileError('Mesh clipping requires 1 <= near < far <= 127',item)
@@ -1085,7 +1088,9 @@ def check(tree):
                 except ValueError as error:
                     item.pop('camera_constants',None)
                     if not checked['tracing_heap']:raise CompileError(str(error),item) from error
-            freeze_arguments(item,provided);return result,None
+            freeze_arguments(item,provided)
+            if 'light_direction_constants' in item:item['evaluations']=[];item['arguments']=[]
+            return result,None
         elif kind=='call' and item['name'] in {'__tipy_native_background','__tipy_native_ink','__tipy_native_add','__tipy_native_sin_raw'}:
             name,args=item['name'],item['arguments']
             if len(args)!=(2 if name=='__tipy_native_add' else 1):raise CompileError('Invalid native graphics arguments',item)

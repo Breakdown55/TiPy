@@ -24,7 +24,7 @@ class TextRoutine(Routine):
 
 
 def draw():
-    r = TextRoutine("draw", ("pointer", "length", "x", "y"), ("origin", "index", "glyph", "row", "col", "bits"))
+    r = TextRoutine("draw", ("pointer", "length", "x", "y"), ("origin", "index", "glyph", "col"))
     r.set("origin", "x"); r.set("index", 0)
     def character():
         r.set("glyph", byte(add("pointer", "index")))
@@ -34,19 +34,11 @@ def draw():
             r.if_(("ult", "glyph", 32), lambda: r.set("glyph", 63))
             r.if_(("uge", "glyph", 127), lambda: r.set("glyph", 63))
             r.expr(sub("glyph", 32)); r.emit("add hl,hl", "add hl,hl", "add hl,hl", "ld de,__text_font", "add hl,de")
-            r.store_hl("glyph"); r.set("row", 0)
-            def row():
-                r.set("bits", byte(add("glyph", "row"))); r.set("col", 0)
-                def column():
-                    r.expr("bits"); r.emit("ld a,l", "and 16")
-                    skip = r.label(); r.emit(f"jp z,{skip}")
-                    r.pixel(add("x", "col"), add("y", "row"))
-                    r.mark(skip)
-                    r.expr("bits"); r.emit("add hl,hl"); r.store_hl("bits")
-                    r.set("col", add("col", 1))
-                r.while_(("ult", "col", 5), column)
-                r.set("row", add("row", 1))
-            r.while_(("ult", "row", 7), row)
+            r.emit('push iy','push hl','pop iy','ld b,7','ld c,0')
+            row,ready=r.label(),r.label();r.mark(row);r.emit('push bc')
+            r.expr('x');r.emit(f"ld e,(ix{r.slots['y']:+d})",f"ld d,(ix{r.slots['y']+1:+d})",
+                'ld a,e','add a,c','ld e,a',f'jr nc,{ready}','inc d');r.mark(ready)
+            r.emit('ld a,(iy+0)','call __text_blit_row','pop bc','inc iy','inc c',f'djnz {row}','pop iy')
             r.set("x", add("x", 6))
         def tab():
             r.set("col",sub("x","origin"))
@@ -57,7 +49,103 @@ def draw():
     r.while_(("ult", "index", "length"), character)
     r.write("@__text_end_x", "x"); r.write("@__text_end_y", "y")
     r.ret()
-    return r.finish()
+    return r.finish()+_blit_row()
+
+
+def _blit_row():
+    """HL=x, DE=y, A=5-bit row. Transparent OR into up to two LCD bytes."""
+    return '''
+__text_blit_row:
+        or a
+        ret z
+        ld c,a
+        ld a,d
+        or a
+        ret nz
+        ld a,e
+        cp 64
+        ret nc
+        ld a,h
+        or a
+        jr z,__text_blit_positive
+        inc a
+        ret nz
+        ld a,l
+        cp 252
+        ret c
+        neg
+        ld b,a
+        xor a
+        push af
+        ld a,c
+        add a,a
+        add a,a
+        add a,a
+__text_blit_left_shift:
+        add a,a
+        djnz __text_blit_left_shift
+        ld h,a
+        ld l,0
+        jr __text_blit_mask_ready
+__text_blit_positive:
+        ld a,l
+        cp 96
+        ret nc
+        and 7
+        ld b,a
+        ld a,l
+        srl a
+        srl a
+        srl a
+        push af
+        ld a,c
+        add a,a
+        add a,a
+        add a,a
+        ld h,a
+        ld l,0
+        inc b
+        jr __text_blit_shift_ready
+__text_blit_shift:
+        srl h
+        rr l
+__text_blit_shift_ready:
+        djnz __text_blit_shift
+__text_blit_mask_ready:
+        ld b,h
+        ld c,l
+        ld l,e
+        ld h,0
+        add hl,hl
+        add hl,hl
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,de
+        pop af
+        ld e,a
+        ld d,0
+        add hl,de
+        ld de,0x9340
+        add hl,de
+        cp 11
+        jr z,__text_blit_last_byte
+        ld a,(hl)
+        or b
+        ld (hl),a
+        ld a,c
+        or a
+        ret z
+        inc hl
+        or (hl)
+        ld (hl),a
+        ret
+__text_blit_last_byte:
+        ld a,(hl)
+        or b
+        ld (hl),a
+        ret
+'''
 
 
 def number():

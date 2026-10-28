@@ -24,6 +24,10 @@ def routines(points=True,quads=False):
         r.if_(('slt',n,-2047),lambda:r.fail(14));r.if_(('slt',2047,n),lambda:r.fail(14))
     r.set('p',invoke('light_acquire','intensity'));r.write('p',1);r.write(add('p',8),'intensity')
     r.expr(invoke('mesh_normalize','x','y','z',add('p',2)));r.ret();out.append(r.finish())
+    r=NativeRoutine('solid_directional_coeff',('x','y','z','intensity'),('p',))
+    r.set('p',invoke('light_acquire','intensity'));r.write('p',1)
+    for i,n in enumerate(('x','y','z','intensity')):r.write(add('p',2+i*2),n)
+    r.ret();out.append(r.finish())
     r=NativeRoutine('solid_point_light',('x','y','z','radius','intensity'),('p',))
     r.if_(('slt','radius',1),lambda:r.fail(14));r.if_(('slt',1024,'radius'),lambda:r.fail(14))
     for n in 'xyz':

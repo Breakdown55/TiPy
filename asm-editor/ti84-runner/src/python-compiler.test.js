@@ -502,7 +502,7 @@ test('Restoring mesh square root preserves exact bounded normalization',()=>{
             const actual=[0,2,4].map(o=>{const value=r.machine.memory[base+o]|r.machine.memory[base+o+1]<<8;return value>32767?value-65536:value})
             assert.deepEqual(actual,expected,`normalize ${input}`)
         }}
-    execute(vectors.map(v=>`no_lights()\ndirectional_light(${v.join(',')})\nclear()\nrender()`).join('\n'),m)
+    execute(vectors.map(v=>`no_lights()\ndirectional_light(${v[0]}+int(key_down("left")),${v[1]},${v[2]})\nclear()\nrender()`).join('\n'),m)
     assert.equal(m.frames.length,vectors.length)
 })
 
@@ -2745,4 +2745,92 @@ test('For iteration retains its descriptor across rebinding and observes length 
 })
 test('Repeated for early returns and borrowed/temporary parameters release references',() => {
     assert.deepEqual(execute('def first(int[] a) -> int:\n    for value in a:\n        return value\n    return 0\nint i=0\nint total=0\nwhile i<400:\n    total+=first([1,2,3])\n    i+=1'),{ i: 400, total: 400 })
+})
+
+
+test('Byte font blitter matches independent transparent pixel rasterization',()=>{
+    const fontResult=spawnSync(process.env.TIPY_PYTHON||'python',['-c','import json; from tipy.text_font import FONT,EXTRA; print(json.dumps({**FONT,**EXTRA}))'],{cwd:resolve('../..'),encoding:'utf8'})
+    assert.equal(fontResult.status,0,fontResult.stderr)
+    const font=JSON.parse(fontResult.stdout),seed=Uint8Array.from({length:768},(_,i)=>(i*37+91)&255)
+    const wrap=n=>((n+32768)&65535)-32768
+    const alphabet=Array.from({length:95},(_,i)=>String.fromCharCode(32+i)).join('')
+    const grid=alphabet.match(/.{1,12}/g).join('\n')
+    const cases=Array.from({length:8},(_,x)=>[grid,x,0])
+    for(const [x,y] of [[-6,0],[-4,-1],[-1,-6],[91,60],[95,63],[96,64],[32767,32767],[-32768,-32768]])cases.push(['Wabc!?',x,y])
+    cases.push(['A\tB\rC\nD',3,1])
+    for(const [text,startX,startY] of cases){
+        const expected=Array.from({length:6144},(_,i)=>(seed[i>>3]>>(7-(i&7)))&1)
+        let x=startX,y=startY
+        for(const char of text){
+            if(char==='\n'){x=startX;y=wrap(y+8);continue}
+            if(char==='\r'){x=startX;continue}
+            if(char==='\t'){x=wrap(x+48-(((x-startX)&65535)%48));continue}
+            const glyph=font[char]||font['?']
+            for(let row=0;row<7;row++)for(let col=0;col<5;col++){
+                const px=wrap(x+col),py=wrap(y+row)
+                if((glyph[row]&(16>>col))&&px>=0&&px<96&&py>=0&&py<64)expected[py*96+px]=1
+            }
+            x=wrap(x+6)
+        }
+        const m={seedGraph:seed,guardGraph:true,onFrame(r){
+            const word=name=>{const a=r.assembly.asm.scopes[0].symbols.get(name).value;return wrap(r.machine.memory[a]|r.machine.memory[a+1]<<8)}
+            assert.equal(word('__text_end_x'),x);assert.equal(word('__text_end_y'),y)
+        }}
+        execute(`print(${JSON.stringify(text)},${startX},${startY})\nrender()`,m)
+        assert.deepEqual(Array.from(m.frames[0]),expected,`text at ${startX},${startY}`)
+    }
+})
+
+test('Register interpolation preserves signed endpoints and fractional rounding',()=>{
+    const kernel=spawnSync(process.env.TIPY_PYTHON||'python',['-c','from tipy.wireframe_runtime import routines; print("\\n".join(s for s in routines(1) if s.startswith(("__gfx_wf_umul:","__gfx_wf_lerp:"))))'],{cwd:resolve('../..'),encoding:'utf8'})
+    assert.equal(kernel.status,0,kernel.stderr)
+    const cases=[]
+    for(const a of [-32768,-7800,-1,0,1,7800,32767])for(const b of [-32768,-1,0,32767])for(const [n,d] of [[0,1],[1,1],[1,2],[2,3],[512,1537]])cases.push([a,b,n,d])
+    const code=['org 0x9d95'],data=[]
+    for(const [i,args] of cases.entries()){
+        for(const value of args)code.push(`ld hl,${value}`,'push hl')
+        code.push('call __gfx_wf_lerp',...Array(4).fill('pop bc'),`ld (lerp_${i}),hl`)
+        data.push(`lerp_${i}: dw 0`)
+    }
+    const runner=new Ti84Runner([...code.map(s=>'        '+s),'        ret',...data,kernel.stdout].join('\n'))
+    for(let i=0;i<2000&&!runner.done;i++)runner.runSlice()
+    assert.ok(runner.done)
+    for(const [i,[a,b,n,d]] of cases.entries()){
+        const address=runner.assembly.asm.scopes[0].symbols.get(`lerp_${i}`).value
+        const value=runner.machine.memory[address]|runner.machine.memory[address+1]<<8
+        assert.equal(value,(a+Math.sign(b-a)*Math.floor(Math.abs(b-a)*n/d))&65535,`${a},${b},${n}/${d}`)
+    }
+})
+
+test('Literal directional lights match native normalization with both quality policies',()=>{
+    for(const quality of ['exact','aggressive']){
+        const mesh='int model=mesh([(-5,-5,0),(5,-5,0),(0,5,0)],faces=[(0,1,2)])\n'
+        const captures=[]
+        for(const dynamic of [false,true]){
+            const records=[]
+            const m={project:true,optimization:'aggressive',onFrame(r){
+                const a=r.assembly.asm.scopes[0].symbols.get('__gfx_light_records').value
+                records.push(Array.from(r.machine.memory.slice(a,a+48)))
+            }}
+            const lights=[[1,1,1],[-3,7,-11],[2047,2047,-2047],[17,29,-31]]
+            const calls=lights.map(v=>`directional_light(${v[0]}${dynamic?'+int(key_down("left"))':''},${v[1]},${v[2]},12)`).join('\n')
+            execute(`set_render_quality("${quality}")\n${mesh}no_lights()\n${calls}\nclear()\ndraw_mesh(model,cull=False,depth_test=False)\nrender()`,m)
+            captures.push({records,frames:m.frames})
+            assert.equal(m.assembly.includes('__gfx_solid_directional_coeff:'),!dynamic)
+        }
+        assert.deepEqual(captures[0],captures[1],quality)
+    }
+})
+
+
+test('Precomputed directional lights retain registry capacity and validation',()=>{
+    const errors=[]
+    for(const dynamic of [false,true]){
+        const call=`directional_light(1${dynamic?'+int(key_down("left"))':''},2,3)\n`
+        assert.throws(()=>execute('no_lights()\n'+call.repeat(5)),error=>{errors.push(error.message);return true})
+    }
+    assert.equal(errors[0],errors[1])
+    assert.throws(()=>execute('directional_light(0,0,0)'),/direction cannot be zero/)
+    assert.throws(()=>execute('directional_light(2048,0,0)'),/Light argument must be/)
+    assert.throws(()=>execute('directional_light(1,0,0,17)'),/Light argument must be/)
 })

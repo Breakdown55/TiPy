@@ -30,6 +30,18 @@ INTRINSICS={
 }
 
 
+def mesh_unit_vector(values,approximate=False):
+    """Integer counterpart of mesh_normalize for literal light directions."""
+    from math import isqrt
+    signs=[-1 if value<0 else 1 for value in values]
+    values=list(map(abs,values))
+    if not any(values) or max(values)>2047:raise ValueError('Invalid bounded direction')
+    while max(values)<1024:values=[value*2 for value in values]
+    length=isqrt(sum(value*value for value in values))
+    if approximate:length=(length>>3)<<3
+    return [sign*((value*256+(length>>1))//length) for sign,value in zip(signs,values)]
+
+
 def constant_rotation(argument):
     """Match the native Q16 angle reduction and Q8 sine table exactly."""
     if argument['kind']=='number':raw=argument['value']<<16

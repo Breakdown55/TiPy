@@ -226,11 +226,18 @@ __gfx_wf_udiv_next:
 
     out.append(_project())
 
-    r=NativeRoutine('wf_lerp',('a','b','n','d'),('negative',))
-    r.set('negative',0);r.if_(('slt','b','a'),lambda:(r.set('negative',1),r.set('b',sub('a','b'))),lambda:r.set('b',sub('b','a')))
-    r.expr('b');r.emit('ex de,hl');r.expr('n');r.emit('ld b,h','ld c,l','call __gfx_wf_umul')
-    r.emit('push hl');r.expr('d');r.emit('ld b,h','ld c,l','pop hl','call __gfx_wf_udiv');r._store('b')
-    r.if_(('ne','negative',0),lambda:r.ret(sub('a','b')));r.ret(add('a','b'));out.append(r.finish())
+    # Keep the signed direction in AF' across the integer kernels and the
+    # original endpoint on the stack; avoid spilling intermediate words.
+    r=NativeRoutine('wf_lerp',('a','b','n','d'))
+    r.expr('a');r.emit('push hl',f"ld e,(ix{r.slots['b']:+d})",f"ld d,(ix{r.slots['b']+1:+d})",
+        'ld a,h','xor 128','ld b,a','ld a,d','xor 128','cp b','jr c,__gfx_wf_lerp_negative','jr nz,__gfx_wf_lerp_positive','ld a,e','cp l','jr c,__gfx_wf_lerp_negative')
+    r.mark('__gfx_wf_lerp_positive');r.emit('ex de,hl','or a','sbc hl,de','ld a,0',"ex af,af'",'jr __gfx_wf_lerp_product')
+    r.mark('__gfx_wf_lerp_negative');r.emit('or a','sbc hl,de','ld a,1',"ex af,af'")
+    r.mark('__gfx_wf_lerp_product')
+    r.emit('ex de,hl',f"ld c,(ix{r.slots['n']:+d})",f"ld b,(ix{r.slots['n']+1:+d})",'call __gfx_wf_umul',
+        f"ld c,(ix{r.slots['d']:+d})",f"ld b,(ix{r.slots['d']+1:+d})",'call __gfx_wf_udiv',"ex af,af'",'or a','jr nz,__gfx_wf_lerp_subtract','pop de','add hl,de',f'jp {r.name}_return')
+    r.mark('__gfx_wf_lerp_subtract');r.emit('pop de','ex de,hl','or a','sbc hl,de',f'jp {r.name}_return')
+    out.append(r.finish())
 
     r=NativeRoutine('wf_inside',('point','axis','bound','keep'))
     r.if_(('slt',word(add('point','axis')),'bound'),lambda:r.ret(sub(1,'keep')))
