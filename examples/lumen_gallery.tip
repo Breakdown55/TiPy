@@ -20,19 +20,21 @@ def heading(int angle) -> int:
     if angle >= 64:
         angle -= 64
         sign = -1
-    return sign * angle * (64 - angle) // 8
+    int value = angle * (64 - angle) // 8
+    value -= value * (128 - value) * 7 // 4096
+    return sign * value
 
 
 def slide(int position, int other, int amount, bool horizontal) -> int:
-    # Movement keeps fractional units; the collision API takes world units.
+    # Movement, camera, and collision share the same fractional units.
     if amount == 0:
         return position
     int candidate = position + amount
     if horizontal:
-        if collides(walls, candidate // 16, other // 16):
+        if collides(walls, candidate, other, coordinate_scale=16):
             return position
     else:
-        if collides(walls, other // 16, candidate // 16):
+        if collides(walls, other, candidate, coordinate_scale=16):
             return position
     return candidate
 
@@ -47,6 +49,8 @@ init_camera(fov=75, near=2, far=90)
 int player_x = -18 * 16
 int player_z = 10 * 16
 int yaw = 16
+int movement_x = 0
+int movement_z = 0
 int previous_tick = time.frame_ticks()
 int sun_clock = 0
 bool collected = False
@@ -70,8 +74,12 @@ while not key_down("clear"):
         yaw = (yaw + turn * max(1, elapsed // 3)) % 128
         int forward_x = heading(yaw)
         int forward_z = -heading(yaw + 32)
-        int step_x = (forward_x * walk - forward_z * strafe) * elapsed // 128
-        int step_z = (forward_z * walk + forward_x * strafe) * elapsed // 128
+        movement_x += (forward_x * walk - forward_z * strafe) * elapsed
+        movement_z += (forward_z * walk + forward_x * strafe) * elapsed
+        int step_x = movement_x // 128
+        int step_z = movement_z // 128
+        movement_x %= 128
+        movement_z %= 128
         player_x = slide(player_x, player_z, step_x, True)
         player_z = slide(player_z, player_x, step_z, False)
         if abs(player_x - 14 * 16) < 40 and abs(player_z + 8 * 16) < 40:
@@ -86,7 +94,9 @@ while not key_down("clear"):
     else:
         int x = player_x // 16
         int z = player_z // 16
-        camera(x, 0, z, x + heading(yaw) // 8, 0, z - heading(yaw + 32) // 8)
+        camera(player_x, 0, player_z,
+               player_x + heading(yaw) * 2, 0, player_z - heading(yaw + 32) * 2,
+               coordinate_scale=16)
         no_lights()
         ambient_light(14)
         point_light(sun_x, 24, sun_z, radius=96, intensity=8)

@@ -137,6 +137,17 @@ INTRINSICS = {
 }
 
 
+for _fraction_bits in range(1, 5):
+    _names, _types, _result, _defaults = INTRINSICS["mesh_look"]
+    INTRINSICS[f"mesh_look_q{_fraction_bits}"] = (
+        _names,
+        _types,
+        _result,
+        [value * (1 << _fraction_bits) for value in _defaults],
+    )
+    INTRINSICS[f"mesh_collides_q{_fraction_bits}"] = INTRINSICS["mesh_collides"]
+
+
 def mesh_unit_vector(values, approximate=False):
     """Integer counterpart of mesh_normalize for literal light directions."""
     from math import isqrt

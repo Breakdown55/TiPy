@@ -23,6 +23,8 @@ def routines(
     unit_transform=False,
     prepare_only=False,
     tight_frustum=False,
+    fractional_camera=False,
+    direction_only=False,
 ):
     need_instance = extended or solid and unit_transform
     out = ["""__gfx_mesh_ready: dw 0
@@ -93,15 +95,32 @@ __gfx_mesh_gain: defs 512,0"""]
     routine.ret()
     out.append(routine.finish())
 
+    if fractional_camera:
+        out.append("__gfx_mesh_eye_shift: defs 6,0")
     routine = NativeRoutine(
-        "mesh_look", ("ex", "ey", "ez", "tx", "ty", "tz"), ("x", "y", "z", "a", "b")
+        "mesh_look",
+        ("ex", "ey", "ez", "tx", "ty", "tz"),
+        ("a", "b") if direction_only else ("x", "y", "z", "a", "b"),
     )
+    if direction_only:
+        # Validated fractional wrappers already supply a direction. Read their
+        # parameter slots directly instead of copying it through local RAM.
+        for axis in "xyz":
+            routine.slots[axis] = routine.slots["t" + axis]
+    if fractional_camera and not direction_only:
+        routine.emit(
+            "ld hl,0",
+            "ld (__gfx_mesh_eye_shift),hl",
+            "ld (__gfx_mesh_eye_shift+2),hl",
+            "ld (__gfx_mesh_eye_shift+4),hl",
+        )
     for axis in "xyz":
-        for prefix in ("e", "t"):
-            routine.if_(("slt", prefix + axis, -120), lambda: routine.fail(14))
-            routine.if_(("slt", 120, prefix + axis), lambda: routine.fail(14))
-        routine.set(axis, sub("t" + axis, "e" + axis))
-        routine.write(add("@__gfx_mesh_eye", "xyz".index(axis) * 2), "e" + axis)
+        if not direction_only:
+            for prefix in ("e", "t"):
+                routine.if_(("slt", prefix + axis, -120), lambda: routine.fail(14))
+                routine.if_(("slt", 120, prefix + axis), lambda: routine.fail(14))
+            routine.set(axis, sub("t" + axis, "e" + axis))
+            routine.write(add("@__gfx_mesh_eye", "xyz".index(axis) * 2), "e" + axis)
     routine.if_(
         ("eq", "x", 0), lambda: routine.if_(("eq", "z", 0), lambda: routine.fail(14))
     )
@@ -425,28 +444,28 @@ __gfx_mesh_gain: defs 512,0"""]
         routine.if_(("slt", "size", 1), lambda: routine.fail(14))
         routine.if_(("slt", 512, "size"), lambda: routine.fail(14))
     # Reject distant instances before rotating or projecting a single vertex.
+    relative_limit = 123 if fractional_camera else 120
     for i, axis in enumerate("xyz"):
         routine.set(axis, sub(axis, word(add("@__gfx_mesh_eye", i * 2))))
-        routine.if_(("slt", axis, -120), lambda: routine.ret())
-        routine.if_(("slt", 120, axis), lambda: routine.ret())
+        routine.if_(("slt", axis, -relative_limit), lambda: routine.ret())
+        routine.if_(("slt", relative_limit, axis), lambda: routine.ret())
         routine.expr(axis)
         routine.emit(f"ld (__gfx_mesh_vertex+{i*2}),hl")
-    # A conservative camera-relative L1 bound guarantees safe Q8 dot products.
+    # A camera-relative L1 bound guarantees safe Q8 dot products. Fractional
+    # eyes need three units of rounding margin before subtracting their shift.
     routine.set("a", 0)
     for axis in "xyz":
         routine.set("b", axis)
         routine.if_(("negative", "b"), lambda: routine.set("b", sub(0, "b")))
         routine.set("a", add("a", "b"))
-    routine.if_(("slt", 120, "a"), lambda: routine.ret())
+    routine.if_(("slt", relative_limit, "a"), lambda: routine.ret())
     for axis in range(3):
-        routine.write(
-            add("@__gfx_mesh_center", axis * 2),
-            invoke(
-                "mesh_vertex_dot",
-                add("@__gfx_mesh_basis", axis * 6),
-                "@__gfx_mesh_vertex",
-            ),
+        center = invoke(
+            "mesh_vertex_dot", add("@__gfx_mesh_basis", axis * 6), "@__gfx_mesh_vertex"
         )
+        if fractional_camera:
+            center = sub(center, word(add("@__gfx_mesh_eye_shift", axis * 2)))
+        routine.write(add("@__gfx_mesh_center", axis * 2), center)
     if unit_transform:
         routine.expr(word(add("model", 6)))
         routine.emit("ld h,l", "ld l,0")

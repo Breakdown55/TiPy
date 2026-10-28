@@ -361,6 +361,31 @@ def install(tree):
             or mesh_active
             and name in {"init_camera", "camera", "set_fov"}
         ):
+            if name in {"camera", "collides"}:
+                scales = [
+                    argument
+                    for argument in n["arguments"]
+                    if argument.get("kind") == "keyword"
+                    and argument["name"] == "coordinate_scale"
+                ]
+                if scales:
+                    scale = integer(scales[0]["value"])
+                    if len(scales) != 1 or scale not in {1, 2, 4, 8, 16}:
+                        raise CompileError(
+                            "coordinate_scale must be a constant 1, 2, 4, 8, or 16", n
+                        )
+                    n["arguments"] = [
+                        argument
+                        for argument in n["arguments"]
+                        if argument not in scales
+                    ]
+                    target = "mesh_look" if name == "camera" else "mesh_collides"
+                    n["name"] = (
+                        "__tipy_native_"
+                        + target
+                        + (f"_q{scale.bit_length()-1}" if scale > 1 else "")
+                    )
+                    continue
             n["name"] = (
                 "__tipy_native_"
                 + {

@@ -18,6 +18,7 @@ def routines(
     compiled_vertices=False,
     fixed_scale=None,
     grounded=False,
+    fractional_camera=False,
 ):
     routine = NativeRoutine(
         "mesh_shadow",
@@ -182,20 +183,22 @@ def routines(
                 "or a",
                 f"jp nz,{finished}",
                 "ld a,l",
-                "cp 121",
+                "cp 124" if fractional_camera else "cp 121",
                 f"jp nc,{finished}",
                 "ld b,h",
                 "ld c,l",
             )
         for axis in range(3):
-            routine.write(
-                add("record", axis * 2),
-                invoke(
-                    "mesh_vertex_dot",
-                    add("@__gfx_mesh_basis", axis * 6),
-                    "@__gfx_mesh_vertex",
-                ),
+            coordinate = invoke(
+                "mesh_vertex_dot",
+                add("@__gfx_mesh_basis", axis * 6),
+                "@__gfx_mesh_vertex",
             )
+            if fractional_camera:
+                coordinate = sub(
+                    coordinate, word(add("@__gfx_mesh_eye_shift", axis * 2))
+                )
+            routine.write(add("record", axis * 2), coordinate)
         routine.mark(advance)
         routine.set("source", add("source", 6))
         routine.set("record", add("record", 12))

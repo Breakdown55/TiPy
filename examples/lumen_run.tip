@@ -105,7 +105,7 @@ while not key_down("clear"):
         else:
             int x=px>>4
             int z=pz>>4
-            camera(x,0,z,x+heading(yaw)//8,0,z-heading(yaw+32)//8)
+            camera(px,0,pz,px+(heading(yaw)//8)*16,0,pz-(heading(yaw+32)//8)*16,coordinate_scale=16)
             no_lights()
             # Keep room surfaces pale: dense dithering hides corners on a 1-bit LCD.
             ambient_light(14)

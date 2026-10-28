@@ -2989,6 +2989,23 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                 return -argument["value"]["value"]
             return None
 
+        for bits in range(1, 5):
+            scaled_calls = [
+                node
+                for node in walk(tree)
+                if node.get("kind") == "native_graphics"
+                and node.get("name") == f"mesh_look_q{bits}"
+            ]
+            for index in range(6):
+                if scaled_calls and all(
+                    fixed_argument(node, index) is not None
+                    and -120 * (1 << bits)
+                    <= fixed_argument(node, index)
+                    <= 120 * (1 << bits)
+                    for node in scaled_calls
+                ):
+                    pixels_used.add(f"q{bits}_camera_checked_{index}")
+
         camera_setups = [
             node
             for node in walk(tree)

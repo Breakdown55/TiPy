@@ -3114,3 +3114,104 @@ test('Gallery averages at least 20 FPS with its OBJ props, collision checks and 
     assert.ok(m.bytes<=24169);assert.ok(m.stackBytes<1024)
     assert.ok(!m.assembly.includes('__heap_start:'))
 })
+
+
+test('Sub-unit diagonal camera motion advances continuously without alternating whole-unit axis jumps',()=>{
+    const poses=[]
+    const m={project:true,guardGraph:true,trackStack:true,onFrame(r){
+        const symbols=r.assembly.asm.scopes[0].symbols,mem=r.machine.memory
+        const word=a=>{const v=mem[a]|mem[a+1]<<8;return v>32767?v-65536:v}
+        const base=symbols.get('__gfx_mesh_basis').value,center=symbols.get('__gfx_mesh_center').value
+        poses.push({basis:Array.from({length:9},(_,i)=>word(base+i*2)),center:Array.from({length:3},(_,i)=>word(center+i*2))})
+    }}
+    execute(`int model=mesh([(-4,-4,0),(4,-4,0),(4,4,0),(-4,4,0)],faces=[(0,1,2,0),(0,2,3,0)])
+init_camera(75,2,90)
+for phase in range(17):
+    camera(-288+phase,0,160-phase,-96+phase,0,-32-phase,coordinate_scale=16)
+    clear()
+    draw_mesh(model,cull=False,shaded=False,depth_test=False)
+    render()`,m)
+    assert.equal(poses.length,17)
+    for(let i=0;i<poses.length;i++){
+        assert.deepEqual(poses[i].basis,poses[0].basis,'Translation must not wobble camera direction')
+        const eye=[(-288+i)/16,0,(160-i)/16]
+        for(let axis=0;axis<3;axis++){
+            const expected=-eye.reduce((sum,value,j)=>sum+value*poses[i].basis[axis*3+j],0)
+            assert.ok(Math.abs(poses[i].center[axis]-expected)<=1,`Phase ${i}, axis ${axis}: preserve fractional translation`)
+        }
+    }
+    const side=poses.map(p=>p.center[0])
+    assert.ok(Math.max(...side)-Math.min(...side)<=1,'Straight diagonal walk must not staircase sideways')
+    for(let i=1;i<poses.length;i++)assert.ok(Math.abs(poses[i].center[2]-poses[i-1].center[2])<32,'Each 1/16-unit step stays below a whole-unit jump')
+    assert.notDeepEqual(m.frames[0],m.frames.at(-1))
+})
+
+test('Fractional camera modes reset correctly when switching back to ordinary camera coordinates',()=>{
+    const prefix='int model=mesh([(-2,-2,0),(2,-2,0),(2,2,0),(-2,2,0)],faces=[(0,1,2,0),(0,2,3,0)])\ninit_camera(75,1,32)\n'
+    const draw='clear()\ndraw_mesh(model,cull=False,shaded=False,depth_test=False)\nrender()\n'
+    const mixed={project:true,guardGraph:true,trackStack:true},plain={project:true,guardGraph:true}
+    execute(prefix+'camera(-20,0,136,-20,0,-120,coordinate_scale=16)\n'+draw+'camera(-2,0,8,-2,0,-8)\n'+draw,mixed)
+    execute(prefix+'camera(-2,0,8,-2,0,-8)\n'+draw,plain)
+    assert.deepEqual(mixed.frames[1],plain.screen)
+    assert.notDeepEqual(mixed.frames[0],plain.screen)
+})
+
+test('Scaled collision tests preserve sub-unit edge clearance on both sides of an obstacle',()=>{
+    const v=execute(`int walls=collision_map([(-2,-2,2,2)])
+bool left_clear=collides(walls,-49,0,coordinate_scale=16)
+bool left_touch=collides(walls,-48,0,coordinate_scale=16)
+bool right_touch=collides(walls,48,0,coordinate_scale=16)
+bool right_clear=collides(walls,49,0,coordinate_scale=16)
+bool positive_clear=collides(walls,33,0,radius=0,coordinate_scale=16)
+bool negative_clear=collides(walls,-33,0,radius=0,coordinate_scale=16)`,{project:true,guardGraph:true,trackStack:true})
+    assert.deepEqual([v.left_clear,v.left_touch,v.right_touch,v.right_clear,v.positive_clear,v.negative_clear],[0,1,1,0,0,0])
+})
+
+test('Gallery forward diagonal motion keeps a constant camera direction and balanced signed movement',()=>{
+    const poses=[]
+    const m={project:true,optimization:'aggressive',assets:{'lumen_gallery.obj':readFileSync(resolve('../../examples/lumen_gallery.obj'),'utf8')},guardGraph:true,trackStack:true,maxSlices:30000,
+        afterFrameKeys:Array.from({length:16},(_,i)=>i===15?[15]:[4]),onFrame(r,result){
+            const symbols=r.assembly.asm.scopes[0].symbols,mem=r.machine.memory
+            const word=a=>{const v=mem[a]|mem[a+1]<<8;return v>32767?v-65536:v}
+            const read=name=>word(symbols.get(result.symbols[name].label).value)
+            poses.push({x:read('player_x'),z:read('player_z'),side:word(symbols.get('__gfx_mesh_center').value),basis:Array.from({length:9},(_,i)=>word(symbols.get('__gfx_mesh_basis').value+i*2))})
+        }}
+    execute(readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8'),m)
+    const totals=poses.map(p=>p.x+p.z),side=poses.map(p=>p.side)
+    assert.ok(poses.at(-1).x>poses[0].x&&poses.at(-1).z<poses[0].z)
+    assert.ok(Math.max(...totals)-Math.min(...totals)<=1,'Signed division carries fractional movement instead of introducing drift')
+    assert.ok(Math.max(...side)-Math.min(...side)<=12,'Panel stays centered during straight diagonal movement')
+    for(const pose of poses)assert.deepEqual(pose.basis,poses[0].basis)
+})
+
+
+test('Fractional shadow rendering agrees between compiled and generic mesh transforms',()=>{
+    const source=`int model=mesh([(-2,0,-2),(2,0,-2),(2,0,2),(-2,0,2),(0,5,0)],faces=[(0,1,4,2),(1,2,4,2),(2,3,4,2),(3,0,4,2)])
+init_camera(75,1,80)
+for phase in range(3):
+    camera(-64+phase,128+phase,384-phase,0,0,0,coordinate_scale=16)
+    clear()
+    draw_shadow(model,15,24,0)
+    draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)
+    render()`
+    const fast={project:true,guardGraph:true,trackStack:true},generic={project:true,genericVertices:true,guardGraph:true,trackStack:true}
+    execute(source,fast);execute(source,generic)
+    assert.ok(fast.screen.some(Boolean))
+    assert.deepEqual(fast.frames,generic.frames)
+})
+
+test('Fractional coordinate scales share consistent collision radius and ordinary camera defaults',()=>{
+    for(const scale of [2,4,8,16]){
+        const v=execute(`int walls=collision_map([(-2,-2,2,2)])
+bool touching=collides(walls,${3*scale},0,coordinate_scale=${scale})
+bool outside=collides(walls,${3*scale+1},0,coordinate_scale=${scale})`,{project:true,guardGraph:true,trackStack:true})
+        assert.deepEqual([v.touching,v.outside],[1,0])
+    }
+    const prefix='int m=mesh([(-8,-8,0),(8,-8,0),(0,8,0)],faces=[(0,1,2,0)])\ninit_camera(75,1,120)\n'
+    const draw='clear()\ndraw_mesh(m,cull=False,shaded=False,depth_test=False)\nrender()'
+    const scaled={project:true,guardGraph:true},ordinary={project:true,guardGraph:true}
+    execute(prefix+'camera(coordinate_scale=16)\n'+draw,scaled)
+    execute(prefix+'camera()\n'+draw,ordinary)
+    assert.ok(scaled.screen.some(Boolean))
+    assert.deepEqual(scaled.screen,ordinary.screen)
+})

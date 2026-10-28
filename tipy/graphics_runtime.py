@@ -542,6 +542,7 @@ def graphics_assembly(used):
         quads = "solid_quads" in used
         outlines = "mesh_outlines" in used
         centroids = "solid_centroids" in used
+        fractional_bits = [bits for bits in range(1, 5) if f"mesh_look_q{bits}" in used]
         groups = (
             math_routines()
             + matrix_routines()
@@ -563,6 +564,8 @@ def graphics_assembly(used):
                 "mesh_unit_transform" in used,
                 "mesh_shadow" in used and "compiled_mesh_vertices" in used,
                 "mesh_tight_frustum" in used,
+                bool(fractional_bits),
+                bool(fractional_bits) and "mesh_look" not in used,
             )
             + solid_routines(
                 extended,
@@ -575,7 +578,7 @@ def graphics_assembly(used):
                 centroids,
                 "mesh_shadow" in used,
                 "solid_no_legacy_light" not in used,
-                "mesh_unit_transform" in used,
+                "mesh_unit_transform" in used and not fractional_bits,
             )
             + light_routines(
                 "solid_point_light" in used and (not quads or centroids),
@@ -608,16 +611,34 @@ def graphics_assembly(used):
                     None,
                 ),
                 "shadow_grounded" in used,
+                bool(fractional_bits),
             )
+        if fractional_bits:
+            from .fractional_camera import routines as fractional_routines
+
+            for bits in fractional_bits:
+                groups += fractional_routines(
+                    bits,
+                    "mesh_look" not in used,
+                    {
+                        index
+                        for index in range(6)
+                        if f"q{bits}_camera_checked_{index}" in used
+                    },
+                )
         roots = {"__gfx_" + name for name in camera_entries}
         if "compiled_mesh_vertices" in used:
             roots.add("__gfx_mesh_vertex_plan")
             if "mesh_blank_spans" in used:
                 roots.add("__gfx_mesh_identity_active")
-        if "mesh_collides" in used:
+        collision_bits = ([0] if "mesh_collides" in used else []) + [
+            bits for bits in range(1, 5) if f"mesh_collides_q{bits}" in used
+        ]
+        if collision_bits:
             from .collision_runtime import routines as collision_routines
 
-            groups += collision_routines()
+            for bits in collision_bits:
+                groups += collision_routines(bits)
         native = link(groups, roots)
         routines.append(native)
         if "__gfx_sin_raw" in native:
