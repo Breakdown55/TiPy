@@ -1377,6 +1377,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
                 a=next((e['value'] for e in n.get('evaluations',[]) if e['slot']['label']==a.get('label')),a)
             return a.get('kind')=='boolean' and a['value']==v
         if mesh_calls and packets and all(p.get('face_count',0)>0 for p in packets) and all(flag(n,8,True) and flag(n,12,False) for n in mesh_calls):pixels_used.add('solid_only')
+        if mesh_calls and not all(flag(n,12,False) for n in mesh_calls):pixels_used.add('mesh_outlines')
         if mesh_calls and all(flag(n,9,False) for n in mesh_calls):pixels_used.add('solid_no_cull')
         if mesh_calls and all(flag(n,11,False) for n in mesh_calls):pixels_used.add('solid_no_depth')
         elif mesh_calls and not all(flag(n,11,True) for n in mesh_calls):pixels_used.add('solid_dynamic_depth')

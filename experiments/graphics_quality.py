@@ -4,7 +4,6 @@ This does not change the editor's compiler defaults. All approximations execute
 on the emulated Z80; the host only assembles, measures and captures the LCD.
 """
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -69,10 +68,8 @@ __gfx_preview_quantize_no_carry:
     def solid(*args, **kwargs):
         groups = original_solid(*args, **kwargs)
         if profile['row_step'] == 2:
-            groups = [re.sub(r'inc b\n        ld a,b\n        cp (\(ix-\d+\))',
-                             r'inc b\n        inc b\n        ld a,b\n        cp \1',g)
-                      .replace('ld l,d\n        ld h,0','ld a,d\n        and 254\n        ld l,a\n        ld h,0')
-                      .replace('ld l,e\n','ld a,e\n        inc a\n        and 254\n        ld l,a\n')
+            groups = [g.replace('        call __gfx_solid_span_row',
+                                '        ld a,d\n        and 1\n        jr nz,__gfx_preview_skip_row\n        call __gfx_solid_span_row\n__gfx_preview_skip_row:')
                       if g.startswith('__gfx_solid_flat_polygon:') else g for g in groups]
             groups = [g.replace('ld a,d\n        and 3', 'ld a,d\n        srl a\n        and 3')
                       if g.startswith('__gfx_solid_span:') else g for g in groups]

@@ -8,7 +8,7 @@ from .camera_math import NativeRoutine,invoke
 from .list_runtime import add,sub,word
 
 
-def routines(capacity=64,solid=False,extended=False,wire=True,dynamic_depth=False):
+def routines(capacity=64,solid=False,extended=False,wire=True,dynamic_depth=False,no_depth=False,outlines=True):
     out=['''__gfx_mesh_ready: dw 0
 __gfx_mesh_near: dw 512
 __gfx_mesh_far: dw 30720
@@ -66,15 +66,17 @@ __gfx_mesh_gain: defs 512,0''']
     r=NativeRoutine('mesh_vertex_dot',('a','b'),('sum',))
     r.set('sum',0)
     for i in range(3):
-        r.expr(('byte',add('b',i*2)));r.emit('ld c,l')
-        r.expr(word(add('a',i*2)));r.emit('ld d,h','ld e,l','ld a,c','or a')
+        zero=r.label()
+        r.expr(word(add('a',i*2)));r.emit('ld a,h','or l',f'jr z,{zero}','ld b,h','ld c,l')
+        r.expr(('byte',add('b',i*2)));r.emit('ld d,b','ld e,c','ld a,l','or a')
         positive,ready,loop,skip,done=(r.label() for _ in range(5))
         r.emit(f'jp p,{positive}','neg','ld c,a','xor a','sub e','ld e,a','sbc a,a','sub d','ld d,a','ld a,c',f'jr {ready}')
         r.mark(positive);r.mark(ready);r.emit('ld hl,0','or a',f'jr z,{done}')
         r.mark(loop);r.emit('srl a',f'jr nc,{skip}','add hl,de');r.mark(skip)
         r.emit('sla e','rl d','or a',f'jr nz,{loop}');r.mark(done)
         offset=r.slots['sum'];r.emit(f'ld e,(ix{offset:+d})',f'ld d,(ix{offset+1:+d})','add hl,de');r._store('sum')
-    r.emit(f'jp {r.name}_return');out.append(r.finish())
+        r.mark(zero)
+    r.ret('sum');out.append(r.finish())
 
     r=NativeRoutine('mesh_imul',('a','b'))
     r.expr('a');r.emit('ld a,l','or a')
@@ -186,10 +188,24 @@ __gfx_mesh_gain: defs 512,0''']
     r.write('@__gfx_wf_near',word('@__gfx_mesh_near'));r.write('@__gfx_wf_far',word('@__gfx_mesh_far'));r.write('@__gfx_wf_gain','@__gfx_mesh_gain')
     r.emit('ld a,1','ld (__gfx_ink),a')
     if solid:
-        r.if_(('ne','filled',0),lambda:r.if_(('ne',word(add('model',8)),0),lambda:(r.expr(invoke('solid_prepare','vertices')),r.expr(invoke('solid_draw',add('p',add('edges','edges')),word(add('model',8)),'cull','shaded')),r.if_(('eq','outline',0),lambda:r.ret()))))
+        def filled_mesh():
+            r.expr(invoke('solid_prepare','vertices'))
+            r.expr(invoke('solid_draw',add('p',add('edges','edges')),word(add('model',8)),'cull','shaded'))
+            if not outlines:r.ret();return
+            r.if_(('eq','outline',0),lambda:r.ret())
+            if wire:
+                if not no_depth:r.expr(invoke('mesh_restore_flags','vertices'))
+                r.expr(invoke('wf_draw_prepared','vertices','edges','p'));r.ret()
+        r.if_(('ne','filled',0),lambda:r.if_(('ne',word(add('model',8)),0),filled_mesh))
     if wire:r.expr(invoke('wf_draw','vertices','edges','p'))
     r.ret();out.append(r.finish())
     out.append('__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256\n__gfx_mesh_identity_active: dw 0')
+    if solid and wire and outlines and not no_depth:
+        r=NativeRoutine('mesh_restore_flags',('count',))
+        loop,advance=r.label(),r.label()
+        r.expr('count');r.emit('ld b,l','ld hl,__gfx_wf_records+10','ld de,__gfx_solid_flags')
+        r.mark(loop);r.emit('ld a,(de)','ld (hl),a','inc hl','ld (hl),0','ld a,l','add a,11','ld l,a',f'jr nc,{advance}','inc h')
+        r.mark(advance);r.emit('inc de',f'djnz {loop}');r.ret();out.append(r.finish())
     if extended:out.append('__gfx_mesh_instance: defs 8,0\n__gfx_mesh_source: dw 0')
     out.append(_normalize())
     return out

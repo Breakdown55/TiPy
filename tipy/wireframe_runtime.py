@@ -8,11 +8,13 @@ from .shape_runtime import slot,words
 from .list_runtime import add,sub,word,byte
 
 
-def routines(capacity):
+def routines(capacity,prepared_draw=False):
     out=['__gfx_wf_records: defs '+str(capacity*12)+',0\n__gfx_wf_basis: defs 18,0\n__gfx_wf_near: dw 0\n__gfx_wf_far: dw 0\n__gfx_wf_gain: dw 0']
     import math
     table=[round(128*4096/math.sqrt(n)) for n in range(256,1024)]
     out.append('__gfx_wf_root_table:\n        dw '+','.join(map(str,table)))
+    # Four-way partial unrolling trades a few bytes for fewer loop branches.
+    # See map.grauw.nl/articles/mult_div_shifts.php for the Z80 tradeoff.
     out.append('''__gfx_wf_umul:
         ld a,b
         or c
@@ -37,16 +39,40 @@ __gfx_wf_umul_zero:
         ret
 __gfx_wf_umul_general:
         ld hl,0
-        ld a,16
+        ld a,4
 __gfx_wf_umul_loop:
         add hl,hl
         rl e
         rl d
-        jr nc,__gfx_wf_umul_skip
+        jr nc,__gfx_wf_umul_skip0
         add hl,bc
-        jr nc,__gfx_wf_umul_skip
+        jr nc,__gfx_wf_umul_skip0
         inc de
-__gfx_wf_umul_skip:
+__gfx_wf_umul_skip0:
+        add hl,hl
+        rl e
+        rl d
+        jr nc,__gfx_wf_umul_skip1
+        add hl,bc
+        jr nc,__gfx_wf_umul_skip1
+        inc de
+__gfx_wf_umul_skip1:
+        add hl,hl
+        rl e
+        rl d
+        jr nc,__gfx_wf_umul_skip2
+        add hl,bc
+        jr nc,__gfx_wf_umul_skip2
+        inc de
+__gfx_wf_umul_skip2:
+        add hl,hl
+        rl e
+        rl d
+        jr nc,__gfx_wf_umul_skip3
+        add hl,bc
+        jr nc,__gfx_wf_umul_skip3
+        inc de
+__gfx_wf_umul_skip3:
         dec a
         jr nz,__gfx_wf_umul_loop
         ret
@@ -65,16 +91,40 @@ __gfx_wf_udiv:
         jr z,__gfx_wf_udiv_general
         bit 7,a
         jr nz,__gfx_wf_udiv_general
-        ld e,16
+        ld e,4
 __gfx_wf_udiv_small:
         add hl,hl
         rl d
         ld a,d
         sub c
-        jr c,__gfx_wf_udiv_small_next
+        jr c,__gfx_wf_udiv_small_next0
         ld d,a
         inc l
-__gfx_wf_udiv_small_next:
+__gfx_wf_udiv_small_next0:
+        add hl,hl
+        rl d
+        ld a,d
+        sub c
+        jr c,__gfx_wf_udiv_small_next1
+        ld d,a
+        inc l
+__gfx_wf_udiv_small_next1:
+        add hl,hl
+        rl d
+        ld a,d
+        sub c
+        jr c,__gfx_wf_udiv_small_next2
+        ld d,a
+        inc l
+__gfx_wf_udiv_small_next2:
+        add hl,hl
+        rl d
+        ld a,d
+        sub c
+        jr c,__gfx_wf_udiv_small_next3
+        ld d,a
+        inc l
+__gfx_wf_udiv_small_next3:
         dec e
         jr nz,__gfx_wf_udiv_small
         ld e,d
@@ -207,10 +257,12 @@ __gfx_wf_udiv_next:
     transformed=r.label();r.emit(f'ld hl,{transformed}','push hl');r.expr('record');r.emit('jp (hl)');r.mark(transformed)
     r.expr(invoke('wf_draw','count','index','edges'));r.ret();out.append(r.finish())
     r=NativeRoutine('wf_draw',('count','index','edges'),('i','record','pa','pb','flags')+words('a',6)+words('b',6))
+    prepared_prologue=list(r.code[1:]);prepared=r.label()
     r.set('i',0);r.set('record','@__gfx_wf_records')
     def transform():
         r.expr(invoke('wf_project','record'));r.set('record',add('record',12));r.set('i',add('i',1))
     r.while_(('ult','i','count'),transform)
+    r.mark(prepared)
     r.set('i',0);r.set('count','index')
     def edge():
         for target in ('a','b'):
@@ -230,7 +282,8 @@ __gfx_wf_udiv_next:
             clean=r.label();r.expr('flags');r.emit(f'bit {bit},l',f'jp z,{clean}')
             r.if_(('eq',invoke('wf_clip',slot('a0'),slot('b0'),axis,bound,keep),0),lambda:r.emit(f'jp {skip}'));r.mark(clean)
         r.expr(invoke('wf_raster','a3','a4','b3','b4'));r.mark(skip);r.set('i',add('i',1))
-    r.while_(('ult','i','count'),edge);r.ret();out.append(r.finish())
+    r.while_(('ult','i','count'),edge);r.ret()
+    out.append(r.finish()+('\n__gfx_wf_draw_prepared:\n'+'\n'.join(prepared_prologue)+f'\n        jp {prepared}' if prepared_draw else ''))
     return out
 
 

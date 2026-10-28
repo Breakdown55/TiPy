@@ -126,7 +126,7 @@ __gfx_solid_pattern: db 0''']
         r.if_(('eq','n',2),span);r.set('y',add('y',1))
     r.while_(('ult','y','end'),row);r.ret();out.append(r.finish())
     if not depth_enabled or dynamic_depth:
-        out.extend(['__gfx_solid_bounds: defs 256,0',_flat_polygon('solid_flat_span_row' if depth_enabled else 'solid_span_row')])
+        out.extend(['__gfx_solid_chain_x: defs 128,0',_flat_polygon('solid_flat_span_row' if depth_enabled else 'solid_span_row')])
     out.append(_draw(extended,culling,depth_enabled,dynamic_depth,quads))
     if not depth_enabled:
         out[0]=''
@@ -321,54 +321,56 @@ def _span_setup(r):
 
 
 def _flat_polygon(row_name='solid_span_row'):
-    """Scan each convex clipped boundary once, without fan diagonals or depth."""
-    r=NativeRoutine('solid_flat_polygon',('poly','count','shade'),('i','a','b','v','ya','yb','y','end','x','step','negative','left','right','top','bottom'))
-    # Touch only rows this polygon covers, especially important for small
-    # meshes. Projected/clipped y coordinates are integers in 0..64.
+    """Walk the two monotone chains of a convex clipped polygon.
+
+    The first chain stores one intersection per row; the second emits spans
+    directly. No per-row min/max initialization or second bounds pass.
+    Scanline coherence: graphics.stanford.edu/courses/cs248-08/scan/scan1.html
+    """
+    r=NativeRoutine('solid_flat_polygon',('poly','count','shade'),
+                    ('first','last','top_point','bottom_point','top','bottom','p','next','chain','delta','ya','yb','x0','x1','step','negative'))
+    r.set('top_point',0);r.set('bottom_point',0)
     extent,next_top,next_bottom,advance=(r.label() for _ in range(4))
-    r.expr('count');r.emit('ld b,l');r.expr('poly');r.emit('ld de,8','add hl,de','ld d,64','ld e,0')
-    r.mark(extent);r.emit('ld a,(hl)','cp d',f'jr nc,{next_top}','ld d,a');r.mark(next_top)
-    r.emit('cp e',f'jr c,{next_bottom}','ld e,a');r.mark(next_bottom)
-    r.emit('ld a,l','add a,12','ld l,a',f'jr nc,{advance}','inc h');r.mark(advance);r.emit(f'djnz {extent}')
+    r.expr('count');r.emit('ld b,l','ld c,0');r.expr('poly');r.emit('ld de,8','add hl,de','ld d,64','ld e,0')
+    r.mark(extent);r.emit('ld a,(hl)','cp d',f'jr nc,{next_top}','ld d,a',f"ld (ix{r.slots['top_point']:+d}),c");r.mark(next_top)
+    r.emit('cp e',f'jr c,{next_bottom}',f'jr z,{next_bottom}','ld e,a',f"ld (ix{r.slots['bottom_point']:+d}),c");r.mark(next_bottom)
+    r.emit('ld a,l','add a,12','ld l,a',f'jr nc,{advance}','inc h');r.mark(advance);r.emit('inc c',f'djnz {extent}')
     r.emit('ld l,d','ld h,0');r._store('top');r.emit('ld l,e');r._store('bottom')
     r.if_(('uge','top','bottom'),lambda:r.ret())
-    # Interleaved min/max bounds let one index register address both sides.
-    initialize=r.label()
-    r.expr(sub('bottom','top'));r.emit('ld b,l');r.expr('top');r.emit('add hl,hl','add hl,hl','ld de,__gfx_solid_bounds','add hl,de');r.mark(initialize)
-    r.emit('ld (hl),255','inc hl','ld (hl),127','inc hl','ld (hl),0','inc hl','ld (hl),0','inc hl',f'djnz {initialize}')
-    r.set('a',add('poly',invoke('mesh_imul',sub('count',1),12)))
-    r.set('b','poly');r.set('i',0)
-    def edge():
-        r.set('left','a');r.set('right','b')
-        r.set('ya',word(add('left',8)));r.set('yb',word(add('right',8)))
-        r.if_(('slt','yb','ya'),lambda:(r.set('v','left'),r.set('left','right'),r.set('right','v'),r.set('v','ya'),r.set('ya','yb'),r.set('yb','v')))
-        def active():
-            r.set('end',sub('yb','ya'))
-            for n,p in (('x','left'),('step','right')):
-                r.expr(word(add(p,6)));r.emit('ld h,l','ld l,0');r._store(n)
-            r.set('negative',0)
-            r.if_(('ult','step','x'),lambda:(r.set('negative',1),r.set('step',sub('x','step'))),lambda:r.set('step',sub('step','x')))
-            r.expr('end');r.emit('ld b,h','ld c,l');r.expr('step');r.emit('ld de,0','call __gfx_wf_udiv');r._store('step')
-            r.if_(('ne','negative',0),lambda:r.set('step',sub(0,'step')))
-            r.expr('ya');r.emit('add hl,hl','add hl,hl','ld de,__gfx_solid_bounds','add hl,de','push iy','push hl','pop iy')
-            r.expr('end');r.emit('ld b,l');r.expr('step');r.emit('ld d,h','ld e,l','sra h','rr l','push hl');r.expr('x');r.emit('pop bc','add hl,bc','push hl');r.expr('end');r.emit('ld b,l','pop hl')
-            scan,minimum,maximum,next_min,next_max=(r.label() for _ in range(5))
-            r.mark(scan)
-            r.emit('ld a,h','cp (iy+1)',f'jr c,{minimum}',f'jr nz,{next_min}','ld a,l','cp (iy+0)',f'jr nc,{next_min}')
-            r.mark(minimum);r.emit('ld (iy+0),l','ld (iy+1),h');r.mark(next_min)
-            r.emit('ld a,(iy+3)','cp h',f'jr c,{maximum}',f'jr nz,{next_max}','ld a,(iy+2)','cp l',f'jr nc,{next_max}')
-            r.mark(maximum);r.emit('ld (iy+2),l','ld (iy+3),h');r.mark(next_max)
-            r.emit('add hl,de','inc iy','inc iy','inc iy','inc iy',f'djnz {scan}','pop iy')
-        r.if_(('ne','ya','yb'),active)
-        r.set('a','b');r.set('b',add('b',12));r.set('i',add('i',1))
-    r.while_(('ult','i','count'),edge)
-    r.expr('shade');r.emit('ld c,l');r.expr('top');r.emit('ld b,l','add hl,hl','add hl,hl','ld de,__gfx_solid_bounds','add hl,de','push iy','push hl','pop iy')
-    fill=r.label();r.mark(fill)
-    r.emit('push bc','push bc','ld l,(iy+0)','ld h,(iy+1)','ld e,(iy+2)','ld d,(iy+3)',
-           'ld a,l','add a,127','ld a,h','adc a,0','ld b,a',
-           'ld a,e','add a,127','ld a,d','adc a,0','ld c,a','pop de',f'call __gfx_{row_name}',
-           'pop bc','inc iy','inc iy','inc iy','inc iy','inc b','ld a,b',f"cp (ix{r.slots['bottom']:+d})",f'jr c,{fill}','pop iy')
-    r.ret();return r.finish()
+    for point in ('top_point','bottom_point'):
+        r.expr(point);r.emit('add hl,hl','add hl,hl','ld d,h','ld e,l','add hl,hl','add hl,de','push hl');r.expr('poly');r.emit('pop de','add hl,de');r._store(point)
+    r.set('first','poly');r.set('last',add('poly',invoke('mesh_imul',sub('count',1),12)));r.set('chain',0)
+    def chain():
+        r.set('p','top_point');r.set('delta',12)
+        r.if_(('ne','chain',0),lambda:r.set('delta',-12))
+        def edge():
+            r.set('next',add('p','delta'))
+            r.if_(('ult','next','first'),lambda:r.set('next','last'))
+            r.if_(('ult','last','next'),lambda:r.set('next','first'))
+            r.set('ya',word(add('p',8)));r.set('yb',word(add('next',8)))
+            def active():
+                for n,point in (('x0','p'),('x1','next')):
+                    r.expr(word(add(point,6)));r.emit('ld h,l','ld l,0');r._store(n)
+                r.set('negative',0)
+                r.if_(('ult','x1','x0'),lambda:(r.set('negative',1),r.set('step',sub('x0','x1'))),lambda:r.set('step',sub('x1','x0')))
+                r.expr(sub('yb','ya'));r.emit('ld b,h','ld c,l');r.expr('step');r.emit('ld de,0','call __gfx_wf_udiv');r._store('step')
+                r.if_(('ne','negative',0),lambda:r.set('step',sub(0,'step')))
+                r.expr('ya');r.emit('add hl,hl','ld de,__gfx_solid_chain_x','add hl,de','push iy','push hl','pop iy')
+                r.expr('step');r.emit('sra h','rr l','push hl');r.expr('x0');r.emit('pop de','add hl,de','push hl')
+                r.expr(sub('yb','ya'));r.emit('ld b,l');r.expr('ya');r.emit('ld c,l');r.expr('step');r.emit('ld d,h','ld e,l','pop hl')
+                store,fill,swap,ordered,done=(r.label() for _ in range(5))
+                r.emit(f"ld a,(ix{r.slots['chain']:+d})",'or a',f'jr nz,{fill}')
+                r.mark(store);r.emit('ld (iy+0),l','ld (iy+1),h','inc iy','inc iy','add hl,de',f'djnz {store}',f'jr {done}')
+                r.mark(fill);r.emit('push bc','push de','push hl','ld a,c',"ex af,af'",'ld e,(iy+0)','ld d,(iy+1)',
+                    'ld a,h','cp d',f'jr c,{ordered}',f'jr nz,{swap}','ld a,l','cp e',f'jr c,{ordered}')
+                r.mark(swap);r.emit('ex de,hl');r.mark(ordered)
+                r.emit('ld a,l','add a,127','ld a,h','adc a,0','ld b,a','ld a,e','add a,127','ld a,d','adc a,0','ld c,a',
+                    "ex af,af'",'ld d,a',f"ld e,(ix{r.slots['shade']:+d})",f'call __gfx_{row_name}',
+                    'pop hl','pop de','pop bc','add hl,de','inc c','inc iy','inc iy',f'djnz {fill}')
+                r.mark(done);r.emit('pop iy')
+            r.if_(('ult','ya','yb'),active);r.set('p','next')
+        r.while_(('ne','p','bottom_point'),edge);r.set('chain',add('chain',1))
+    r.while_(('ult','chain',2),chain);r.ret();return r.finish()
 
 
 def _draw(extended,culling,depth_enabled=True,dynamic_depth=False,quads=False):
@@ -412,7 +414,12 @@ def _draw(extended,culling,depth_enabled=True,dynamic_depth=False,quads=False):
             r.set('n',invoke('solid_clip','poly','n','other',axis,bound,keep));r.if_(('ult','n',3),lambda:r.emit(f'jp {skip}'))
             r.set('v','poly');r.set('poly','other');r.set('other','v')
         def depth_clip():
-            clip(4,word('@__gfx_mesh_near'),1);clip(4,word('@__gfx_mesh_far'),0)
+            # A plane whose outcode bit is clear cannot cut this convex face.
+            # Frustum/outcode guidance: cubic.org/docs/3dclip.htm
+            r.set('common','flags')
+            for bound,keep,bit in (('@__gfx_mesh_near',1,0),('@__gfx_mesh_far',0,1)):
+                clean=r.label();r.expr('common');r.emit(f'bit {bit},l',f'jp z,{clean}')
+                clip(4,word(bound),keep);r.mark(clean)
             r.set('j',0);r.set('p','poly');r.set('flags',0)
             def project():
                 r.set('v',invoke('solid_project','p'));r.expr('flags');r.emit('ld b,l');r.expr('v');r.emit('ld a,l','or b','ld l,a','ld h,0');r._store('flags')

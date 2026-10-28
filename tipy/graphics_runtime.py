@@ -339,7 +339,8 @@ def graphics_assembly(used):
         no_depth='solid_no_depth' in used
         dynamic_depth='solid_dynamic_depth' in used
         quads='solid_quads' in used
-        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity)+mesh_routines(capacity,solid,extended,'solid_only' not in used,dynamic_depth)+solid_routines(extended,'solid_no_cull' not in used,not no_depth,dynamic_depth,quads)+light_routines('solid_point_light' in used,quads)
+        outlines='mesh_outlines' in used
+        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity,outlines)+mesh_routines(capacity,solid,extended,'solid_only' not in used,dynamic_depth,no_depth,outlines)+solid_routines(extended,'solid_no_cull' not in used,not no_depth,dynamic_depth,quads)+light_routines('solid_point_light' in used,quads)
         roots={'__gfx_'+name for name in camera_entries}
         native=link(groups,roots)
         routines.append(native)

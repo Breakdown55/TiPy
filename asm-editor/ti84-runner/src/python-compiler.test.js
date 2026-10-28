@@ -478,7 +478,7 @@ test('LUMEN RUN held turning follows elapsed calculator time',()=>{
     assert.ok(Math.abs(values.yaw-(3+seconds*128/3))<=2)
     assert.equal(m.yaws[1],3,'A newly held direction must respond immediately')
     const movingFrames=m.frameTimes.slice(1).map((t,i)=>t-m.frameTimes[i])
-    assert.ok(Math.max(...movingFrames)<2_000_000,'Moving-frame CPU cost must stay below the previous outlined renderer')
+    assert.ok(Math.max(...movingFrames)<1_500_000,'Moving frames must remain below the measured 100 ms budget')
 })
 
 test('Single-pass mesh outlines match separate filled and wire draws',()=>{
@@ -554,6 +554,21 @@ test('Convex depth-free scan conversion preserves clipped polygon coverage',()=>
         }
         const difference=images[0].reduce((n,p,i)=>n+(p!==images[1][i]),0)
         assert.ok(difference<=61,`Coverage differs by ${difference}/6144 pixels`)
+    }
+})
+
+test('Two-chain rasterization handles both windings, horizontal edges and 3D clipping',()=>{
+    const poses=[[0,0,0,0,0,20],[33,0,0,0,0,20],[0,35,0,0,0,20],
+        [25,38,18,0,0,20],[0,0,64,0,0,20],[64,0,0,0,0,20],
+        [27,19,12,0,0,5],[88,57,12,8,4,12]]
+    for(const [i,[yaw,pitch,roll,ex,ey,ez]] of poses.entries()){
+        const faces=i%2?'[(2,1,0,7),(3,2,0,7)]':'[(0,1,2,7),(0,2,3,7)]'
+        const source=`set_render_quality("aggressive")\nint m=mesh([(-12,-10,0),(12,-10,0),(12,10,0),(-12,10,0)],faces=${faces})\ninit_camera(75,2,120)\ncamera(${ex},${ey},${ez},0,0,0)\n`
+        const draw=depth=>`clear()\ndraw_mesh(m,yaw=${yaw},pitch=${pitch},roll=${roll},cull=False,shaded=False,depth_test=${depth})\nrender()\n`
+        const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000}
+        execute(source+draw('True')+draw('False'),m)
+        const changed=m.frames[0].reduce((n,p,j)=>n+(p!==m.frames[1][j]),0)
+        assert.ok(changed<=61,`${i}: coverage differs at ${changed}/6144 pixels`)
     }
 })
 
@@ -668,6 +683,40 @@ test('Mesh coefficient products match rounded signed Q8 arithmetic across signs 
     for(const [i,[a,b]] of pairs.entries()) {
         const product=a*b,rounded=Math.floor(Math.abs(product)/256+0.5)
         assert.equal(values[`v${i}`],rounded===0?0:product<0?-rounded:rounded,`${a} * ${b}`)
+    }
+})
+
+test('Unrolled unsigned kernels preserve full results, remainders and BC',()=>{
+    const kernel=spawnSync(process.env.TIPY_PYTHON||'python',['-c','from tipy.wireframe_runtime import routines; print(next(s for s in routines(1) if s.startswith("__gfx_wf_umul:")))'],
+        {cwd:resolve('../..'),encoding:'utf8'})
+    assert.equal(kernel.status,0,kernel.stderr)
+    const divisions=[]
+    for(const n of [0,1,127,128,255,256,257,32767,32768,65535,65536,1048575,16777215,4294901759])
+        for(const d of [1,2,3,7,63,64,127,128,255,256,1024,65535])
+            if(Math.floor(n/d)<=65535)divisions.push([n,d])
+    const products=[[0,65535],[65535,0],[1,65535],[255,256],[256,255],[32768,32768],[65535,65535],[49153,20387]]
+    const code=['org 0x9d95'],data=[]
+    for(const [i,[n,d]] of divisions.entries()){
+        code.push(`ld hl,${n&65535}`,`ld de,${Math.floor(n/65536)}`,`ld bc,${d}`,'call __gfx_wf_udiv',`ld (div_q_${i}),hl`,`ld (div_r_${i}),de`,`ld (div_bc_${i}),bc`)
+        data.push(`div_q_${i}: dw 0`,`div_r_${i}: dw 0`,`div_bc_${i}: dw 0`)
+    }
+    for(const [i,[a,b]] of products.entries()){
+        code.push(`ld de,${a}`,`ld bc,${b}`,'call __gfx_wf_umul',`ld (mul_lo_${i}),hl`,`ld (mul_hi_${i}),de`,`ld (mul_bc_${i}),bc`)
+        data.push(`mul_lo_${i}: dw 0`,`mul_hi_${i}: dw 0`,`mul_bc_${i}: dw 0`)
+    }
+    const runner=new Ti84Runner([...code.map(line=>'        '+line),'        ret',...data,kernel.stdout].join('\n'))
+    for(let i=0;i<400&&!runner.done;i++)runner.runSlice()
+    assert.ok(runner.done)
+    const word=name=>{const a=runner.assembly.asm.scopes[0].symbols.get(name).value;return runner.machine.memory[a]|runner.machine.memory[a+1]<<8}
+    for(const [i,[n,d]] of divisions.entries()){
+        assert.equal(word(`div_q_${i}`),Math.floor(n/d),`${n}/${d}`)
+        assert.equal(word(`div_r_${i}`),n%d)
+        assert.equal(word(`div_bc_${i}`),d)
+    }
+    for(const [i,[a,b]] of products.entries()){
+        assert.equal(word(`mul_lo_${i}`),(a*b)%65536)
+        assert.equal(word(`mul_hi_${i}`),Math.floor(a*b/65536))
+        assert.equal(word(`mul_bc_${i}`),b)
     }
 })
 
