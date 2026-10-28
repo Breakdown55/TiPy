@@ -1359,11 +1359,12 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             if a.get('kind')=='name':
                 a=next((e['value'] for e in n.get('evaluations',[]) if e['slot']['label']==a.get('label')),a)
             return a.get('kind')=='boolean' and a['value']==v
-        if mesh_calls and packets and all(p.get('face_count',0)>0 for p in packets) and all(flag(n,8,True) for n in mesh_calls):pixels_used.add('solid_only')
+        if mesh_calls and packets and all(p.get('face_count',0)>0 for p in packets) and all(flag(n,8,True) and flag(n,12,False) for n in mesh_calls):pixels_used.add('solid_only')
         if mesh_calls and all(flag(n,9,False) for n in mesh_calls):pixels_used.add('solid_no_cull')
         if mesh_calls and all(flag(n,11,False) for n in mesh_calls):pixels_used.add('solid_no_depth')
         elif mesh_calls and not all(flag(n,11,True) for n in mesh_calls):pixels_used.add('solid_dynamic_depth')
-        code.append(graphics_assembly(pixels_used))
+        from .render_quality import apply as apply_render_quality
+        code.append(apply_render_quality(graphics_assembly(pixels_used),tree.get('render_quality','exact')))
     required = set(RUNTIME_TARGET.findall("\n".join(code)))
     if required:
         object_types={t for node in walk(tree) if isinstance(node.get("type"),str) for t in all_types(node["type"])}

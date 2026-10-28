@@ -5,6 +5,7 @@
 # a depth buffer. Arbitrary overlapping scenes should keep depth_test=True.
 # A carried point light illuminates the room; faces use native 1-bit shading.
 import time
+set_render_quality("aggressive")
 int room=mesh([
     (-18,-8,-18),(18,-8,-18),(18,10,-18),(-18,10,-18),
     (-18,-8,18),(18,-8,18),(18,10,18),(-18,10,18)
@@ -97,11 +98,9 @@ while not key_down("clear"):
             ambient_light(14)
             directional_light(-1,2,1,intensity=1)
             point_light(x,3,z,radius=36,intensity=1)
-            draw_mesh(room,cull=False,depth_test=False)
             # Draw only physical room edges, never the faces' triangle diagonals.
-            draw_mesh(room,filled=False,cull=False,depth_test=False)
-            draw_mesh(beacon,x=tx,y=-8,z=tz,cull=False,shaded=False,depth_test=False)
-            draw_mesh(beacon,x=tx,y=-8,z=tz,filled=False,cull=False,depth_test=False)
+            draw_mesh(room,cull=False,depth_test=False,outline=True)
+            draw_mesh(beacon,x=tx,y=-8,z=tz,cull=False,shaded=False,depth_test=False,outline=True)
             for header_y in range(9):
                 for header_x in range(96):
                     pixel_off(header_x,header_y)

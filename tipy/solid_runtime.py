@@ -63,7 +63,10 @@ __gfx_solid_pattern: db 0''']
     r.set('x',word(add('outside','axis')));r.set('y',word(add('inside','axis')))
     r.if_(('slt','x','y'),lambda:(r.set('n',sub('bound','x')),r.set('d',sub('y','x'))),lambda:(r.set('n',sub('x','bound')),r.set('d',sub('x','y'))))
     def interpolate(offset,q=False):r.write(add('out',offset),invoke('solid_lerpq' if q else 'wf_lerp',word(add('outside',offset)),word(add('inside',offset)),'n','d'))
-    r.if_(('eq','axis',4),lambda:(interpolate(0),interpolate(2)),lambda:(r.set('other',sub(14,'axis')),interpolate('other'),interpolate(10,True)))
+    def screen_cut():
+        r.set('other',sub(14,'axis'));interpolate('other')
+        if depth_enabled:interpolate(10,True)
+    r.if_(('eq','axis',4),lambda:(interpolate(0),interpolate(2)),screen_cut)
     r.write(add('out','axis'),'bound');r.ret();out.append(r.finish())
 
     r=NativeRoutine('solid_clip',('src','count','dst','axis','bound','keep'),('prev','cur','ip','ic','i','n','out','outside','inside'))
@@ -90,7 +93,7 @@ __gfx_solid_pattern: db 0''']
     r.expr('flags');r.emit('ld a,l','and 3','ld l,a','ld h,0');r._store('v')
     def depth():
         r.expr(word('@__gfx_mesh_near'));r.emit('ex de,hl','ld bc,65280','call __gfx_wf_umul','push hl','push de');r.expr(word(add('p',4)));r.emit('ld b,h','ld c,l','pop de','pop hl','call __gfx_wf_udiv');r._store('v');r.write(add('p',10),'v')
-    r.if_(('eq','v',0),depth)
+    if depth_enabled:r.if_(('eq','v',0),depth)
     r.ret('flags');out.append(r.finish())
     r=NativeRoutine('solid_prepare',('count',),('i','p'))
     r.set('i',0);r.set('p','@__gfx_wf_records')
@@ -117,7 +120,7 @@ __gfx_solid_pattern: db 0''']
         r.if_(('eq','n',2),span);r.set('y',add('y',1))
     r.while_(('ult','y','end'),row);r.ret();out.append(r.finish())
     if not depth_enabled or dynamic_depth:
-        out.extend(['__gfx_solid_bounds: defs 256,0',_flat_polygon()])
+        out.extend(['__gfx_solid_bounds: defs 256,0',_flat_polygon('solid_flat_span_row' if depth_enabled else 'solid_span_row')])
     out.append(_draw(extended,culling,depth_enabled,dynamic_depth))
     if not depth_enabled:
         out[0]=''
@@ -129,25 +132,109 @@ __gfx_solid_pattern: db 0''']
 
 
 def _flat_span():
-    """Opaque ordered drawing for explicitly depth-free convex scenes."""
-    r=NativeRoutine('solid_span',('lx','lq','rx','rq','y','shade'),('start','end','pattern'))
-    for name,x in (('start','lx'),('end','rx')):
-        r.expr(add(x,127));r.emit('ld l,h','ld h,0');r._store(name)
-    r.if_(('uge','start','end'),lambda:r.ret())
-    r.expr('y');r.emit('ld a,l','and 3','ld c,a','ld b,0');r.expr('shade');r.emit('add hl,hl','add hl,hl','add hl,bc','ld de,__gfx_solid_patterns','add hl,de','ld l,(hl)','ld h,0');r._store('pattern')
-    r.expr('y');r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','push hl');r.expr('start');r.emit('srl l','srl l','srl l','pop de','add hl,de','ld de,0x9340','add hl,de','push hl')
-    r.expr('start');r.emit('ld a,l','and 7','ld b,a','ld a,128','inc b')
-    shift,ready,loop,black,store,step=(r.label() for _ in range(6))
-    r.emit(f'jr {ready}');r.mark(shift);r.emit('rrca');r.mark(ready);r.emit(f'djnz {shift}','ld c,a')
-    r.expr(sub('end','start'));r.emit('ld b,l');r.expr('pattern');r.emit('ld d,l','pop hl')
-    aligned,whole=(r.label() for _ in range(2))
-    r.emit('ld a,c','cp 128',f'jr z,{aligned}')
-    r.mark(loop);r.emit('ld a,d','and c',f'jr nz,{black}','ld a,c','cpl','and (hl)',f'jr {store}');r.mark(black);r.emit('ld a,(hl)','or c');r.mark(store);r.emit('ld (hl),a','rrc c',f'jr nc,{step}','inc hl','dec b',f'jp z,{r.name}_return',f'jr {aligned}');r.mark(step);r.emit(f'djnz {loop}',f'jp {r.name}_return')
-    # Whole covered bytes have the same screen-anchored Bayer pattern. Write
-    # them directly, reserving read/modify/write for the two boundary bytes.
-    r.mark(aligned);r.emit('ld a,b','cp 8',f'jr c,{loop}')
-    r.mark(whole);r.emit('ld (hl),d','inc hl','sub 8','ld b,a',f'jp z,{r.name}_return','cp 8',f'jr nc,{whole}',f'jr {loop}')
-    return r.finish()
+    """Stack ABI wrapper plus a register-only opaque scanline kernel."""
+    r=NativeRoutine('solid_span',('lx','lq','rx','rq','y','shade'))
+    for value,register in (('lx','b'),('rx','c')):
+        r.expr(add(value,127));r.emit(f'ld {register},h')
+    r.expr('y');r.emit('ld d,l');r.expr('shade');r.emit('ld e,l','call __gfx_solid_span_row')
+    r.ret()
+    return r.finish()+"""
+; B=start, C=end (exclusive), D=y, E=shade. IX/IY preserved.
+__gfx_solid_span_row:
+        ld a,c
+        sub b
+        ret z
+        ret c
+        push bc
+        push de
+        ld a,d
+        and 3
+        ld l,a
+        ld h,0
+        ld a,e
+        add a,a
+        add a,a
+        ld e,a
+        ld d,0
+        add hl,de
+        ld de,__gfx_solid_patterns
+        add hl,de
+        ld a,(hl)
+        ld (__gfx_solid_pattern),a
+        pop de
+        pop bc
+        ld l,d
+        ld h,0
+        add hl,hl
+        add hl,hl
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,de
+        ld a,b
+        srl a
+        srl a
+        srl a
+        ld e,a
+        ld d,0
+        add hl,de
+        ld de,0x9340
+        add hl,de
+        push hl
+        ld a,c
+        sub b
+        ld e,a
+        ld a,b
+        and 7
+        ld l,a
+        ld h,0
+        ld bc,__gfx_solid_span_masks
+        add hl,bc
+        ld c,(hl)
+        ld b,e
+        ld a,(__gfx_solid_pattern)
+        ld d,a
+        pop hl
+        ld a,c
+        cp 128
+        jr z,__gfx_solid_span_aligned
+__gfx_solid_span_pixel:
+        ld a,d
+        and c
+        jr nz,__gfx_solid_span_black
+        ld a,c
+        cpl
+        and (hl)
+        jr __gfx_solid_span_store
+__gfx_solid_span_black:
+        ld a,(hl)
+        or c
+__gfx_solid_span_store:
+        ld (hl),a
+        rrc c
+        jr nc,__gfx_solid_span_partial
+        inc hl
+        dec b
+        ret z
+        jr __gfx_solid_span_aligned
+__gfx_solid_span_partial:
+        djnz __gfx_solid_span_pixel
+        ret
+__gfx_solid_span_aligned:
+        ld a,b
+        cp 8
+        jr c,__gfx_solid_span_pixel
+__gfx_solid_span_whole:
+        ld (hl),d
+        inc hl
+        sub 8
+        ld b,a
+        ret z
+        cp 8
+        jr nc,__gfx_solid_span_whole
+        jr __gfx_solid_span_pixel
+__gfx_solid_span_masks: db 128,64,32,16,8,4,2,1
+"""
 
 
 def _edge_dda():
@@ -213,15 +300,13 @@ def _span_setup(r):
     return t.code
 
 
-def _flat_polygon():
+def _flat_polygon(row_name='solid_span_row'):
     """Scan each convex clipped boundary once, without fan diagonals or depth."""
     r=NativeRoutine('solid_flat_polygon',('poly','count','shade'),('i','a','b','v','ya','yb','y','end','x','step','negative','left','right'))
-    r.set('i',0)
-    def initialize():
-        r.write(add('@__gfx_solid_bounds','i'),32767)
-        r.write(add('@__gfx_solid_bounds+128','i'),0)
-        r.set('i',add('i',2))
-    r.while_(('ult','i',128),initialize)
+    # Interleaved min/max bounds let one index register address both sides.
+    initialize=r.label()
+    r.emit('ld hl,__gfx_solid_bounds','ld b,64');r.mark(initialize)
+    r.emit('ld (hl),255','inc hl','ld (hl),127','inc hl','ld (hl),0','inc hl','ld (hl),0','inc hl',f'djnz {initialize}')
     r.set('a',add('poly',invoke('mesh_imul',sub('count',1),12)))
     r.set('b','poly');r.set('i',0)
     def edge():
@@ -232,27 +317,29 @@ def _flat_polygon():
             r.set('end',sub('yb','ya'))
             for n,p in (('x','left'),('step','right')):
                 r.expr(word(add(p,6)));r.emit('ld h,l','ld l,0');r._store(n)
-            r.set('v',invoke('wf_lerp','x','step',1,add('end','end')))
             r.set('negative',0)
             r.if_(('ult','step','x'),lambda:(r.set('negative',1),r.set('step',sub('x','step'))),lambda:r.set('step',sub('step','x')))
             r.expr('end');r.emit('ld b,h','ld c,l');r.expr('step');r.emit('ld de,0','call __gfx_wf_udiv');r._store('step')
             r.if_(('ne','negative',0),lambda:r.set('step',sub(0,'step')))
-            r.set('x','v');r.set('y','ya')
-            r.set('left',add('@__gfx_solid_bounds',add('y','y')))
-            r.set('right',add('left',128))
-            def scan():
-                r.if_(('ult','x',word('left')),lambda:r.write('left','x'))
-                r.if_(('ult',word('right'),'x'),lambda:r.write('right','x'))
-                r.set('x',add('x','step'));r.set('left',add('left',2));r.set('right',add('right',2));r.set('y',add('y',1))
-            r.while_(('ult','y','yb'),scan)
+            r.expr('ya');r.emit('add hl,hl','add hl,hl','ld de,__gfx_solid_bounds','add hl,de','push iy','push hl','pop iy')
+            r.expr('end');r.emit('ld b,l');r.expr('step');r.emit('ld d,h','ld e,l','sra h','rr l','push hl');r.expr('x');r.emit('pop bc','add hl,bc','push hl');r.expr('end');r.emit('ld b,l','pop hl')
+            scan,minimum,maximum,next_min,next_max=(r.label() for _ in range(5))
+            r.mark(scan)
+            r.emit('ld a,h','cp (iy+1)',f'jr c,{minimum}',f'jr nz,{next_min}','ld a,l','cp (iy+0)',f'jr nc,{next_min}')
+            r.mark(minimum);r.emit('ld (iy+0),l','ld (iy+1),h');r.mark(next_min)
+            r.emit('ld a,(iy+3)','cp h',f'jr c,{maximum}',f'jr nz,{next_max}','ld a,(iy+2)','cp l',f'jr nc,{next_max}')
+            r.mark(maximum);r.emit('ld (iy+2),l','ld (iy+3),h');r.mark(next_max)
+            r.emit('add hl,de','inc iy','inc iy','inc iy','inc iy',f'djnz {scan}','pop iy')
         r.if_(('ne','ya','yb'),active)
         r.set('a','b');r.set('b',add('b',12));r.set('i',add('i',1))
     r.while_(('ult','i','count'),edge)
-    r.set('y',0);r.set('left','@__gfx_solid_bounds');r.set('right','@__gfx_solid_bounds+128')
-    def fill():
-        r.if_(('ult',word('left'),word('right')),lambda:r.expr(invoke('solid_span',word('left'),0,word('right'),0,'y','shade')))
-        r.set('left',add('left',2));r.set('right',add('right',2));r.set('y',add('y',1))
-    r.while_(('ult','y',64),fill);r.ret();return r.finish()
+    r.expr('shade');r.emit('ld c,l','ld b,0','push iy','ld iy,__gfx_solid_bounds')
+    fill=r.label();r.mark(fill)
+    r.emit('push bc','push bc','ld l,(iy+0)','ld h,(iy+1)','ld e,(iy+2)','ld d,(iy+3)',
+           'ld a,l','add a,127','ld a,h','adc a,0','ld b,a',
+           'ld a,e','add a,127','ld a,d','adc a,0','ld c,a','pop de',f'call __gfx_{row_name}',
+           'pop bc','inc iy','inc iy','inc iy','inc iy','inc b','ld a,b','cp 64',f'jr c,{fill}','pop iy')
+    r.ret();return r.finish()
 
 
 def _draw(extended,culling,depth_enabled=True,dynamic_depth=False):

@@ -6,7 +6,7 @@ INTRINSICS={
     'mesh_init':(['fov','near','far'],['i16']*3,'void',[75,2,120]),
     'mesh_fov':(['fov'],['i16'],'void',None),
     'mesh_look':(['eye_x','eye_y','eye_z','target_x','target_y','target_z'],['i16']*6,'void',[0,0,80,0,0,0]),
-    'mesh_draw':(['model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded','depth_test'],['i16']*8+['bool']*4,'void',{'x':0,'y':0,'z':0,'yaw':0,'pitch':0,'roll':0,'size':256,'filled':True,'cull':True,'shaded':True,'depth_test':True}),
+    'mesh_draw':(['model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded','depth_test','outline'],['i16']*8+['bool']*5,'void',{'x':0,'y':0,'z':0,'yaw':0,'pitch':0,'roll':0,'size':256,'filled':True,'cull':True,'shaded':True,'depth_test':True,'outline':False}),
     'solid_light':(['x','y','z','ambient'],['i16']*4,'void',[-1,2,3,3]),
     'solid_no_lights':([],[],'void',None),
     'solid_ambient_light':(['level'],['i16'],'void',None),

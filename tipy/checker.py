@@ -8,12 +8,14 @@ PIXEL_BUILTINS = {"flip_pixel", "pixel_on", "pixel_off"}
 SHAPE_BUILTINS = {"circle","ellipse","triangle","polygon","polyline"}
 from .graphics_library import PUBLIC as PY5_BUILTINS
 from .camera_api import INTRINSICS as CAMERA_INTRINSICS
-GRAPHICS_BUILTINS = PIXEL_BUILTINS | SHAPE_BUILTINS | PY5_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input", "key_down", "set_cpu_speed"}
+GRAPHICS_BUILTINS = PIXEL_BUILTINS | SHAPE_BUILTINS | PY5_BUILTINS | {"clear", "render", "v_line", "h_line", "line", "rectangle", "print", "input", "key_down", "set_cpu_speed", "set_render_quality"}
 PYTHON_BUILTINS = {"range", "list", "abs", "sum", "min", "max", "any", "all", "enumerate", "zip"}
 
 
 def check(tree):
     checked = deepcopy(tree)
+    from .render_quality import prepare as prepare_render_quality
+    prepare_render_quality(checked)
     from .graphics_library import install as install_graphics
     install_graphics(checked)
     from .classes import prepare as lower_classes

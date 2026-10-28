@@ -98,7 +98,7 @@ __gfx_mesh_gain: defs 512,0''']
     no_high=r.label();r.emit(f'jr z,{no_high}','add hl,de');r.mark(no_high);r._store('result')
     r.mark(done);r.if_(('ne','negative',0),lambda:r.ret(sub(0,'result')));r.ret('result');out.append(r.finish())
 
-    r=NativeRoutine('mesh_draw',('model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded','depth_test'),
+    r=NativeRoutine('mesh_draw',('model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded','depth_test','outline'),
                     ('sx','cx','sy','cy','sz','cz','a','b','i','j','p','record','vertices','edges','count','radius'))
     r.if_(('eq',word('@__gfx_mesh_ready'),0),lambda:r.expr(invoke('mesh_init',75,2,120)))
     if dynamic_depth:r.write('@__gfx_solid_depth_enabled','depth_test')
@@ -129,6 +129,14 @@ __gfx_mesh_gain: defs 512,0''']
     r.set('a',word(add('@__gfx_mesh_center',4)))
     r.if_(('slt','a',word('@__gfx_mesh_near')),lambda:r.if_(('ult','radius',sub(word('@__gfx_mesh_near'),'a')),lambda:r.ret()))
     r.if_(('slt',word('@__gfx_mesh_far'),'a'),lambda:r.if_(('ult','radius',sub('a',word('@__gfx_mesh_far'))),lambda:r.ret()))
+    general,transformed=r.label(),r.label()
+    # Unrotated unit-scale instances can reuse the camera matrix exactly.
+    # This includes the common static level + translated pickup case.
+    r.expr('yaw');r.emit('ld b,l');r.expr('pitch');r.emit('ld a,l','or b','ld b,a');r.expr('roll');r.emit('ld a,l','or b',f'jp nz,{general}')
+    r.if_(('ne','size',256),lambda:r.emit(f'jp {general}'))
+    for source,target in (('__gfx_mesh_identity','__gfx_mesh_rotation'),('__gfx_mesh_basis','__gfx_mesh_view'))+((('__gfx_mesh_basis','__gfx_mesh_norm_view'),) if solid else ()):
+        r.emit(f'ld hl,{source}',f'ld de,{target}','ld bc,18','ldir')
+    r.emit(f'jp {transformed}');r.mark(general)
     for angle,axis in (('pitch','x'),('yaw','y'),('roll','z')):
         r.expr(angle);r.emit('ld h,0','add hl,hl','ld de,__gfx_mesh_sine','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','ex de,hl');r._store('s'+axis)
         r.expr(angle);r.emit('ld a,l','add a,64','ld l,a','ld h,0','add hl,hl','ld de,__gfx_mesh_sine','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','ex de,hl');r._store('c'+axis)
@@ -148,6 +156,7 @@ __gfx_mesh_gain: defs 512,0''']
             r.write(add('@__gfx_mesh_view',add('i','j')),mul('a','size'));r.set('j',add('j',2))
         r.while_(('ult','j',6),matrix_col);r.set('i',add('i',6))
     r.while_(('ult','i',18),matrix_row)
+    r.mark(transformed)
     r.set('p',add('model',10));r.set('record','@__gfx_wf_records');r.set('count',0)
     def vertex():
         for i in range(3):
@@ -162,18 +171,19 @@ __gfx_mesh_gain: defs 512,0''']
     r.write('@__gfx_wf_near',word('@__gfx_mesh_near'));r.write('@__gfx_wf_far',word('@__gfx_mesh_far'));r.write('@__gfx_wf_gain','@__gfx_mesh_gain')
     r.emit('ld a,1','ld (__gfx_ink),a')
     if solid:
-        r.if_(('ne','filled',0),lambda:r.if_(('ne',word(add('model',8)),0),lambda:(r.expr(invoke('solid_prepare','vertices')),r.expr(invoke('solid_draw',add('p',add('edges','edges')),word(add('model',8)),'cull','shaded')),r.ret())))
+        r.if_(('ne','filled',0),lambda:r.if_(('ne',word(add('model',8)),0),lambda:(r.expr(invoke('solid_prepare','vertices')),r.expr(invoke('solid_draw',add('p',add('edges','edges')),word(add('model',8)),'cull','shaded')),r.if_(('eq','outline',0),lambda:r.ret()))))
     if wire:r.expr(invoke('wf_draw','vertices','edges','p'))
     r.ret();out.append(r.finish())
+    out.append('__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256')
     if extended:out.append('__gfx_mesh_instance: defs 8,0\n__gfx_mesh_source: dw 0')
     out.append(_normalize())
     return out
 
 
 def _normalize():
-    """Camera/light changes are rare: integer square root saves the 1.5KB LUT."""
+    """Bounded unit vectors use an allocation-free 24-bit restoring square root."""
     from .shape_runtime import words
-    r=NativeRoutine('mesh_normalize',('x','y','z','out'),('sx','sy','sz','max','lo','hi','mid','v','shift')+words('sum',2)+words('p',2))
+    r=NativeRoutine('mesh_normalize',('x','y','z','out'),('sx','sy','sz','max','lo','v','shift')+words('sum',2)+words('p',2))
     r.set('max',0);r.set('shift',0)
     for n in 'xyz':
         r.set('s'+n,0);r.if_(('negative',n),lambda n=n:(r.set(n,sub(0,n)),r.set('s'+n,1)))
@@ -186,20 +196,56 @@ def _normalize():
     r.while_(('ult','max',1024),enlarge);r.zero('sum')
     for n in 'xyz':
         r.expr(n);r.emit('ld d,h','ld e,l','ld b,h','ld c,l','call __gfx_wf_umul');r._store('p0');r.emit('ex de,hl');r._store('p1');r.binary('sum','sum','p')
-    r.set('lo',0);r.set('hi',4096)
-    def root():
-        r.expr(add(add('lo','hi'),1));r.emit('srl h','rr l');r._store('mid')
-        r.emit('ld d,h','ld e,l','ld b,h','ld c,l','call __gfx_wf_umul');r._store('p0');r.emit('ex de,hl');r._store('p1')
-        higher,lower,done=r.label(),r.label(),r.label()
-        r.if_(('ult','sum1','p1'),lambda:r.emit(f'jp {higher}'))
-        r.if_(('ult','p1','sum1'),lambda:r.emit(f'jp {lower}'))
-        r.if_(('ult','sum0','p0'),lambda:r.emit(f'jp {higher}'))
-        r.mark(lower);r.set('lo','mid');r.emit(f'jp {done}');r.mark(higher);r.set('hi',sub('mid',1));r.mark(done)
-    r.while_(('ult','lo','hi'),root)
+    r.expr('sum0');r.emit('push hl');r.expr('sum1');r.emit('ex de,hl','pop hl','call __gfx_mesh_sqrt24');r._store('lo')
     for i,n in enumerate('xyz'):
         r.expr(n);r.emit('ld d,0','ld e,h','ld h,l','ld l,0','push hl');r.expr('lo');r.emit('srl h','rr l','ld b,h','ld c,l','pop hl','add hl,bc')
         carry=r.label();r.emit(f'jr nc,{carry}','inc de');r.mark(carry);r.emit('push hl');r.expr('lo');r.emit('ld b,h','ld c,l','pop hl','call __gfx_wf_udiv');r._store('v')
         r.if_(('ne','s'+n,0),lambda:r.set('v',sub(0,'v')));r.write(add('out',i*2),'v')
     r.expr('shift');r.emit('ld b,l');r.expr('lo');r.emit('inc b')
     loop,ready=r.label(),r.label();r.emit(f'jr {ready}');r.mark(loop);r.emit('srl h','rr l');r.mark(ready);r.emit(f'djnz {loop}',f'jp {r.name}_return')
-    return r.finish()
+    return r.finish()+'''
+; Exact restoring square root for the bounded 24-bit squared vector length.
+; DE:HL input (< 3*2048^2), HL output. No multiply or divide in the loop.
+; Main/alternate BC, DE, HL are scratch; IX/IY are preserved.
+__gfx_mesh_sqrt24:
+        ld d,e
+        ld e,h
+        ld h,l
+        ld l,0
+        exx
+        ld hl,0
+        ld bc,0
+        ld a,12
+__gfx_mesh_sqrt24_loop:
+        exx
+        add hl,hl
+        rl e
+        rl d
+        exx
+        adc hl,hl
+        exx
+        add hl,hl
+        rl e
+        rl d
+        exx
+        adc hl,hl
+        sla c
+        rl b
+        ld d,b
+        ld e,c
+        sla e
+        rl d
+        inc de
+        or a
+        sbc hl,de
+        jr nc,__gfx_mesh_sqrt24_accept
+        add hl,de
+        jr __gfx_mesh_sqrt24_next
+__gfx_mesh_sqrt24_accept:
+        inc bc
+__gfx_mesh_sqrt24_next:
+        dec a
+        jr nz,__gfx_mesh_sqrt24_loop
+        ld h,b
+        ld l,c
+        ret'''

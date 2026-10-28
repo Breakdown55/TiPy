@@ -473,6 +473,43 @@ test('LUMEN RUN held turning follows elapsed calculator time',()=>{
     const seconds=(m.frameTimes[4]-m.frameTimes[0])/15_000_000
     assert.ok(Math.abs(values.yaw-(3+seconds*128/3))<=2)
     assert.ok(values.yaw>30,'Turning must not remain limited to three phases/frame')
+    const movingFrames=m.frameTimes.slice(1).map((t,i)=>t-m.frameTimes[i])
+    assert.ok(Math.max(...movingFrames)<4_000_000,'Moving-frame CPU cost must stay below the previous outlined renderer')
+})
+
+test('Single-pass mesh outlines match separate filled and wire draws',()=>{
+    const model='int m=mesh([(-12,-10,0),(12,-10,0),(0,12,0)],faces=[(0,1,2,12)])\n'
+    for(const depth of ['True','False']){
+        const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000}
+        execute(model+`clear()\ndraw_mesh(m,cull=False,shaded=False,depth_test=${depth})\ndraw_mesh(m,filled=False,cull=False,depth_test=${depth})\nrender()\nclear()\ndraw_mesh(m,cull=False,shaded=False,depth_test=${depth},outline=True)\nrender()`,m)
+        assert.deepEqual(m.frames[1],m.frames[0])
+    }
+})
+
+test('Restoring mesh square root preserves exact bounded normalization',()=>{
+    const vectors=[[1,0,0],[1,1,1],[-3,7,-11],[120,-120,13],[2047,2047,-2047],[0,0,-2047],[1023,2,-17],[17,29,-31]]
+    const m={project:true,optimization:'aggressive',guardGraph:true,
+        onFrame(r,result,count){
+            const input=vectors[count-1],scaled=input.map(Math.abs)
+            while(Math.max(...scaled)<1024)for(let i=0;i<3;i++)scaled[i]*=2
+            const length=Math.floor(Math.sqrt(scaled.reduce((n,v)=>n+v*v,0)))
+            const expected=scaled.map((v,i)=>Math.floor((v*256+(length>>1))/length)*(input[i]<0?-1:1))
+            const base=r.assembly.asm.scopes[0].symbols.get('__gfx_light_records').value+2
+            const actual=[0,2,4].map(o=>{const value=r.machine.memory[base+o]|r.machine.memory[base+o+1]<<8;return value>32767?value-65536:value})
+            assert.deepEqual(actual,expected,`normalize ${input}`)
+        }}
+    execute(vectors.map(v=>`no_lights()\ndirectional_light(${v.join(',')})\nclear()\nrender()`).join('\n'),m)
+    assert.equal(m.frames.length,vectors.length)
+})
+
+test('Aggressive lighting cache keeps separate instances distinct',()=>{
+    const source='set_render_quality("aggressive")\nint m=mesh([(-5,-5,0),(5,-5,0),(0,5,0)],faces=[(0,1,2)])\ninit_camera(75,2,120)\n'
+    const draw='clear()\nno_lights()\npoint_light(-8,0,12,radius=24,intensity=16)\ndraw_mesh(m,x=-8,cull=False,depth_test=False,outline=True)\ndraw_mesh(m,x=8,cull=False,depth_test=False,outline=True)\nrender()\n'
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000}
+    execute(source+draw.repeat(5),m)
+    for(const frame of m.frames)assert.deepEqual(frame,m.frames[0])
+    assert.ok(m.assembly.includes('__gfx_quality_light_instance:'))
+    assert.ok(m.stackBytes<1024)
 })
 
 test('Convex depth-free scan conversion preserves clipped polygon coverage',()=>{
@@ -480,6 +517,7 @@ test('Convex depth-free scan conversion preserves clipped polygon coverage',()=>
         [[-12,-10,0],[12,-10,0],[0,12,0]],
         [[-30,-25,0],[30,-25,0],[0,50,0]],
         [[-30,-5,8],[6,-25,-5],[12,35,5]],
+        [[-20,-5,19],[6,-25,-5],[12,35,5]],
     ]
     for(const vertices of models){
         const model=`int m=mesh([${vertices.map(v=>`(${v.join(',')})`).join(',')}],faces=[(0,1,2,7)])\n`
