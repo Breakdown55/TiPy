@@ -4,6 +4,7 @@
 # The convex room and uniformly colored pickup use ordered drawing without
 # a depth buffer. Arbitrary overlapping scenes should keep depth_test=True.
 # A point light orbits above the room; faces use native 1-bit shading.
+# Draw the projected floor shadow after the room and before its beacon.
 import time
 set_render_quality("aggressive")
 int room=mesh([
@@ -111,6 +112,7 @@ while not key_down("clear"):
             point_light(sun_x,24,sun_z,radius=96,intensity=8)
             # Draw only physical room edges, never the faces' triangle diagonals.
             draw_mesh(room,cull=False,depth_test=False,outline=True)
+            draw_shadow(beacon,sun_x,24,sun_z,floor_y=-8,x=tx,y=-8,z=tz)
             draw_mesh(beacon,x=tx,y=-8,z=tz,cull=False,shaded=False,depth_test=False,outline=True)
             for header_y in range(9):
                 for header_x in range(96):

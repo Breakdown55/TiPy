@@ -2964,3 +2964,62 @@ test('LUMEN sunlight orbits above the room without input and changes its shading
     for(let i=1;i<captured.length;i++)assert.notDeepEqual(captured[i].pixels,captured[0].pixels)
     assert.ok(m.bytes<=24169)
 })
+
+
+test('Projected floor shadows match explicitly projected geometry and preserve graphics memory',()=>{
+    const vertices=[[-2,0,-2],[2,0,-2],[2,0,2],[-2,0,2],[0,6,0]]
+    const faces=[[0,1,4,0],[1,2,4,0],[2,3,4,0],[3,0,4,0]]
+    const model=(name,points)=>{const valid=faces.filter(f=>{const [a,b,c]=f.map(i=>points[i]);return [0,1,2].some(i=>(b[(i+1)%3]-a[(i+1)%3])*(c[(i+2)%3]-a[(i+2)%3])!==(b[(i+2)%3]-a[(i+2)%3])*(c[(i+1)%3]-a[(i+1)%3]))});return `int ${name}=mesh([${points.map(v=>'('+v.join(',')+')').join(',')}],faces=[${valid.map(f=>'('+f.join(',')+')').join(',')}])\n`}
+    const setup='init_camera(75,2,90)\ncamera(16,14,24,0,0,0)\nclear()\n'
+    for(const light of [[10,24,6],[-18,24,-12],[0,30,0]]){
+        const projected=vertices.map(([x,y,z])=>[light[0]+Math.trunc((x-light[0])*light[1]/(light[1]-y)),0,light[2]+Math.trunc((z-light[2])*light[1]/(light[1]-y))])
+        const actual={project:true,guardGraph:true,trackStack:true},reference={project:true,guardGraph:true}
+        execute(model('m',vertices)+setup+`draw_shadow(m,${light.join(',')})\nrender()`,actual)
+        execute(model('m',projected)+setup+'draw_mesh(m,filled=True,cull=False,shaded=False,depth_test=False,outline=False)\nrender()',reference)
+        assert.ok(actual.screen.some(Boolean),'Shadow must draw visible pixels')
+        assert.deepEqual(actual.screen,reference.screen,`Projection for ${light}`)
+    }
+})
+
+test('Shadows are omitted for lights at/below the receiver or below the caster',()=>{
+    for(const height of [-2,0,3,6]){
+        const m={project:true,guardGraph:true,trackStack:true}
+        execute(`int m=mesh([(-2,0,-2),(2,0,-2),(0,6,0)],faces=[(0,1,2)])
+init_camera(75,2,90)
+camera(16,14,24,0,0,0)
+clear()
+draw_shadow(m,10,${height},6)
+render()`,m)
+        assert.equal(m.screen.some(Boolean),false)
+    }
+})
+
+test('LUMEN moving sunlight and shadows average at least 20 FPS at native 15 MHz',()=>{
+    const source=readFileSync(resolve('../../examples/lumen_run.tip'),'utf8').replace('int yaw=0','int yaw=3').replace('yaw=(yaw+turn*(turn_remainder//3))&127','yaw=(yaw+turn*2)&127')
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000,afterFrameKeys:Array.from({length:8},(_,i)=>i===7?[15]:[3])}
+    execute(source,m)
+    const frames=m.frameTimes.slice(1).map((time,i)=>time-m.frameTimes[i])
+    assert.equal(frames.length,7)
+    const mean=frames.reduce((a,b)=>a+b,0)/frames.length
+    assert.ok(mean<=750000,`Mean ${mean} T-states exceeds 20 FPS at 15 MHz`)
+    assert.ok(m.assembly.includes('__gfx_mesh_shadow:'))
+    assert.ok(m.bytes<=24169)
+    assert.ok(m.stackBytes<1024)
+})
+
+
+test('Prepared shadow vertices agree with the generic path across light positions and receiver heights',()=>{
+    for(const floor of [0,-8])for(const light of [-16,0,18]){
+        const source=`int m=mesh([(-2,0,-2),(2,0,-2),(2,0,2),(-2,0,2),(0,6,0)],faces=[(0,1,4,0),(1,2,4,0),(2,3,4,0),(3,0,4,0)])
+init_camera(75,2,90)
+camera(16,14,24,0,0,0)
+clear()
+draw_shadow(m,${light},24,10,floor_y=${floor},x=2,y=${floor},z=-2)
+draw_mesh(m,x=2,y=${floor},z=-2,filled=True,cull=False,shaded=False,depth_test=False,outline=False)
+render()`
+        const fast={project:true,guardGraph:true,trackStack:true},generic={project:true,genericVertices:true,guardGraph:true,trackStack:true}
+        execute(source,fast);execute(source,generic)
+        assert.ok(fast.assembly.includes('__gfx_mesh_prepare_only:'))
+        assert.deepEqual(fast.screen,generic.screen,`Light ${light}, floor ${floor}`)
+    }
+})

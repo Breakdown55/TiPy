@@ -20,6 +20,8 @@ def routines(
     compiled_vertices=False,
     blank_spans=False,
     approximate=False,
+    unit_transform=False,
+    prepare_only=False,
 ):
     out = ["""__gfx_mesh_ready: dw 0
 __gfx_mesh_near: dw 512
@@ -32,6 +34,12 @@ __gfx_mesh_norm_view: defs 18,0
 __gfx_mesh_center: defs 6,0
 __gfx_mesh_vertex: defs 6,0
 __gfx_mesh_gain: defs 512,0"""]
+    if unit_transform:
+        # No draw can rotate or scale the model, so this matrix is immutable.
+        out[0] = out[0].replace(
+            "__gfx_mesh_rotation: defs 18,0",
+            "__gfx_mesh_rotation: dw 256,0,0,0,256,0,0,0,256",
+        )
     out.append(
         "__gfx_mesh_sine: dw "
         + ",".join(str(round(math.sin(i * math.tau / 256) * 256)) for i in range(256))
@@ -394,6 +402,8 @@ __gfx_mesh_gain: defs 512,0"""]
         ("eq", word("@__gfx_mesh_ready"), 0),
         lambda: routine.expr(invoke("mesh_init", 75, 2, 120)),
     )
+    if prepare_only:
+        routine.emit("xor a", "ld (__gfx_mesh_prepared),a")
     if dynamic_depth:
         routine.write("@__gfx_solid_depth_enabled", "depth_test")
     if blank_spans:
@@ -425,21 +435,21 @@ __gfx_mesh_gain: defs 512,0"""]
         routine.if_(("negative", "b"), lambda: routine.set("b", sub(0, "b")))
         routine.set("a", add("a", "b"))
     routine.if_(("slt", 120, "a"), lambda: routine.ret())
-    routine.set("i", 0)
-
-    def center():
+    for axis in range(3):
         routine.write(
-            add("@__gfx_mesh_center", "i"),
+            add("@__gfx_mesh_center", axis * 2),
             invoke(
                 "mesh_vertex_dot",
-                add("@__gfx_mesh_basis", add("i", add("i", "i"))),
+                add("@__gfx_mesh_basis", axis * 6),
                 "@__gfx_mesh_vertex",
             ),
         )
-        routine.set("i", add("i", 2))
-
-    routine.while_(("ult", "i", 6), center)
-    routine.set("radius", invoke("mesh_imul", word(add("model", 6)), "size"))
+    if unit_transform:
+        routine.expr(word(add("model", 6)))
+        routine.emit("ld h,l", "ld l,0")
+        routine._store("radius")
+    else:
+        routine.set("radius", invoke("mesh_imul", word(add("model", 6)), "size"))
     routine.set("a", word(add("@__gfx_mesh_center", 4)))
     routine.if_(
         ("slt", "a", word("@__gfx_mesh_near")),
@@ -456,95 +466,99 @@ __gfx_mesh_gain: defs 512,0"""]
     general, transformed = routine.label(), routine.label()
     # Unrotated unit-scale instances can reuse the camera matrix exactly.
     # This includes the common static level + translated pickup case.
-    routine.expr("yaw")
-    routine.emit("ld b,l")
-    routine.expr("pitch")
-    routine.emit("ld a,l", "or b", "ld b,a")
-    routine.expr("roll")
-    routine.emit("ld a,l", "or b", f"jp nz,{general}")
-    routine.if_(("ne", "size", 256), lambda: routine.emit(f"jp {general}"))
+    if not unit_transform:
+        routine.expr("yaw")
+        routine.emit("ld b,l")
+        routine.expr("pitch")
+        routine.emit("ld a,l", "or b", "ld b,a")
+        routine.expr("roll")
+        routine.emit("ld a,l", "or b", f"jp nz,{general}")
+        routine.if_(("ne", "size", 256), lambda: routine.emit(f"jp {general}"))
     routine.write("@__gfx_mesh_identity_active", 1)
-    for source, target in (
-        ("__gfx_mesh_identity", "__gfx_mesh_rotation"),
-        ("__gfx_mesh_basis", "__gfx_mesh_view"),
-    ) + ((("__gfx_mesh_basis", "__gfx_mesh_norm_view"),) if solid else ()):
+    matrix_copies = [("__gfx_mesh_basis", "__gfx_mesh_view")]
+    if not unit_transform:
+        matrix_copies.append(("__gfx_mesh_identity", "__gfx_mesh_rotation"))
+    if solid:
+        matrix_copies.append(("__gfx_mesh_basis", "__gfx_mesh_norm_view"))
+    for source, target in matrix_copies:
         routine.emit(f"ld hl,{source}", f"ld de,{target}", "ld bc,18", "ldir")
-    routine.emit(f"jp {transformed}")
-    routine.mark(general)
-    routine.write("@__gfx_mesh_identity_active", 0)
-    for angle, axis in (("pitch", "x"), ("yaw", "y"), ("roll", "z")):
-        routine.expr(angle)
-        routine.emit(
-            "ld h,0",
-            "add hl,hl",
-            "ld de,__gfx_mesh_sine",
-            "add hl,de",
-            "ld e,(hl)",
-            "inc hl",
-            "ld d,(hl)",
-            "ex de,hl",
-        )
-        routine._store("s" + axis)
-        routine.expr(angle)
-        routine.emit(
-            "ld a,l",
-            "add a,64",
-            "ld l,a",
-            "ld h,0",
-            "add hl,hl",
-            "ld de,__gfx_mesh_sine",
-            "add hl,de",
-            "ld e,(hl)",
-            "inc hl",
-            "ld d,(hl)",
-            "ex de,hl",
-        )
-        routine._store("c" + axis)
-
-    def mul(a, b):
-        return invoke("mesh_mul", a, b)
-
-    coefficients = [
-        mul("cz", "cy"),
-        sub(mul(mul("cz", "sy"), "sx"), mul("sz", "cx")),
-        add(mul(mul("cz", "sy"), "cx"), mul("sz", "sx")),
-        mul("sz", "cy"),
-        add(mul(mul("sz", "sy"), "sx"), mul("cz", "cx")),
-        sub(mul(mul("sz", "sy"), "cx"), mul("cz", "sx")),
-        sub(0, "sy"),
-        mul("cy", "sx"),
-        mul("cy", "cx"),
-    ]
-    for i, value in enumerate(coefficients):
-        routine.write(add("@__gfx_mesh_rotation", i * 2), value)
-    routine.set("i", 0)
-
-    def matrix_row():
-        routine.set("j", 0)
-
-        def matrix_col():
-            routine.set(
-                "a",
-                invoke(
-                    "mesh_dot",
-                    add("@__gfx_mesh_basis", "i"),
-                    add("@__gfx_mesh_rotation", "j"),
-                    6,
-                ),
+    if not unit_transform:
+        routine.emit(f"jp {transformed}")
+        routine.mark(general)
+        routine.write("@__gfx_mesh_identity_active", 0)
+        for angle, axis in (("pitch", "x"), ("yaw", "y"), ("roll", "z")):
+            routine.expr(angle)
+            routine.emit(
+                "ld h,0",
+                "add hl,hl",
+                "ld de,__gfx_mesh_sine",
+                "add hl,de",
+                "ld e,(hl)",
+                "inc hl",
+                "ld d,(hl)",
+                "ex de,hl",
             )
-            # Unit basis rounding may exceed one by a few Q8 increments.
-            routine.if_(("slt", 256, "a"), lambda: routine.set("a", 256))
-            routine.if_(("slt", "a", -256), lambda: routine.set("a", -256))
-            if solid:
-                routine.write(add("@__gfx_mesh_norm_view", add("i", "j")), "a")
-            routine.write(add("@__gfx_mesh_view", add("i", "j")), mul("a", "size"))
-            routine.set("j", add("j", 2))
+            routine._store("s" + axis)
+            routine.expr(angle)
+            routine.emit(
+                "ld a,l",
+                "add a,64",
+                "ld l,a",
+                "ld h,0",
+                "add hl,hl",
+                "ld de,__gfx_mesh_sine",
+                "add hl,de",
+                "ld e,(hl)",
+                "inc hl",
+                "ld d,(hl)",
+                "ex de,hl",
+            )
+            routine._store("c" + axis)
 
-        routine.while_(("ult", "j", 6), matrix_col)
-        routine.set("i", add("i", 6))
+        def mul(a, b):
+            return invoke("mesh_mul", a, b)
 
-    routine.while_(("ult", "i", 18), matrix_row)
-    routine.mark(transformed)
+        coefficients = [
+            mul("cz", "cy"),
+            sub(mul(mul("cz", "sy"), "sx"), mul("sz", "cx")),
+            add(mul(mul("cz", "sy"), "cx"), mul("sz", "sx")),
+            mul("sz", "cy"),
+            add(mul(mul("sz", "sy"), "sx"), mul("cz", "cx")),
+            sub(mul(mul("sz", "sy"), "cx"), mul("cz", "sx")),
+            sub(0, "sy"),
+            mul("cy", "sx"),
+            mul("cy", "cx"),
+        ]
+        for i, value in enumerate(coefficients):
+            routine.write(add("@__gfx_mesh_rotation", i * 2), value)
+        routine.set("i", 0)
+
+        def matrix_row():
+            routine.set("j", 0)
+
+            def matrix_col():
+                routine.set(
+                    "a",
+                    invoke(
+                        "mesh_dot",
+                        add("@__gfx_mesh_basis", "i"),
+                        add("@__gfx_mesh_rotation", "j"),
+                        6,
+                    ),
+                )
+                # Unit basis rounding may exceed one by a few Q8 increments.
+                routine.if_(("slt", 256, "a"), lambda: routine.set("a", 256))
+                routine.if_(("slt", "a", -256), lambda: routine.set("a", -256))
+                if solid:
+                    routine.write(add("@__gfx_mesh_norm_view", add("i", "j")), "a")
+                routine.write(add("@__gfx_mesh_view", add("i", "j")), mul("a", "size"))
+                routine.set("j", add("j", 2))
+
+            routine.while_(("ult", "j", 6), matrix_col)
+            routine.set("i", add("i", 6))
+
+        routine.while_(("ult", "i", 18), matrix_row)
+        routine.mark(transformed)
     if compiled_vertices:
         # Specialized coordinate products are shared across every vertex of a
         # small static model, using the same general model/view matrix.
@@ -632,6 +646,14 @@ __gfx_mesh_gain: defs 512,0"""]
     routine.write("@__gfx_wf_near", word("@__gfx_mesh_near"))
     routine.write("@__gfx_wf_far", word("@__gfx_mesh_far"))
     routine.write("@__gfx_wf_gain", "@__gfx_mesh_gain")
+    if prepare_only:
+        routine.emit(
+            "ld a,1",
+            "ld (__gfx_mesh_prepared),a",
+            "ld a,(__gfx_mesh_prepare_only)",
+            "or a",
+            f"jp nz,{routine.name}_return",
+        )
     routine.emit("ld a,1", "ld (__gfx_ink),a")
     if solid:
 
@@ -699,6 +721,8 @@ __gfx_mesh_gain: defs 512,0"""]
         ] += "\n__gfx_mesh_blank: db 0\n__gfx_solid_transparent_white: db 0\n__gfx_mesh_relative: defs 6,0"
     if approximate:
         out.append(_level_fast())
+    if prepare_only:
+        out[0] += "\n__gfx_mesh_prepare_only: db 0\n__gfx_mesh_prepared: db 0"
     if compiled_vertices:
         out.append(_vertex_plan())
     out.append(_normalize())

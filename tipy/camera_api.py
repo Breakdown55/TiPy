@@ -56,6 +56,12 @@ INTRINSICS = {
             "outline": False,
         },
     ),
+    "mesh_shadow": (
+        ["model", "light_x", "light_y", "light_z", "floor_y", "x", "y", "z"],
+        ["i16"] * 8,
+        "void",
+        {"floor_y": 0, "x": 0, "y": 0, "z": 0},
+    ),
     "solid_light": (["x", "y", "z", "ambient"], ["i16"] * 4, "void", [-1, 2, 3, 3]),
     "solid_no_lights": ([], [], "void", None),
     "solid_ambient_light": (["level"], ["i16"], "void", None),

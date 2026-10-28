@@ -17,7 +17,7 @@ if(argsStart<0||argsEnd<0)throw Error('Native compiler entry changed')
 harness=harness.slice(0,argsStart)+`  const args=[resolve2('../../experiments/graphics_quality.py'),String(measurements.quality)];\n`+harness.slice(argsEnd)
 harness+=String.raw`
 const {writeFileSync:savePreview}=await import('node:fs');
-const game=readFileSync(resolve2('../../experiments/fixtures/lumen_static.tip'),'utf8');
+const game=readFileSync(resolve2(process.env.TIPY_BENCH_SCENE||'../../experiments/fixtures/lumen_static.tip'),'utf8');
 // Fix the angular increment only for this comparison, so faster variants
 // render the same camera poses. HUD, drawing, lighting and input stay active.
 const source=game.replace('set_render_quality("aggressive")','')
@@ -28,7 +28,7 @@ const results=[];
 for(let quality=0;quality<5;quality++){
     if(process.env.TIPY_BENCH_QUALITY!==undefined&&quality!==Number(process.env.TIPY_BENCH_QUALITY))continue;
     const m={project:true,quality,optimization:'aggressive',maxSlices:20000,guardGraph:true,trackStack:true,
-      afterFrameKeys:Array.from({length:8},(_,i)=>i===7?[15]:[3])};
+      afterFrameKeys:Array.from({length:Number(process.env.TIPY_BENCH_FRAMES||8)},(_,i)=>i===Number(process.env.TIPY_BENCH_FRAMES||8)-1?[15]:[3])};
     execute(source,m);
     const times=m.frameTimes.slice(1).map((t,i)=>(t-m.frameTimes[i])/15_000);
     const ms=times.reduce((a,b)=>a+b,0)/times.length;

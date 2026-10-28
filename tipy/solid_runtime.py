@@ -24,6 +24,9 @@ def routines(
     quads=False,
     blank_spans=False,
     fast_spans=True,
+    centroids=False,
+    shadows=False,
+    legacy_light=True,
 ):
     out = [
         "__gfx_solid_guard_before: db 165\n__gfx_solid_depth: defs 6144,0\n__gfx_solid_guard_after: db 90",
@@ -364,7 +367,17 @@ __gfx_solid_pattern: db 0""",
             ]
         )
     out.append(
-        _draw(extended, culling, depth_enabled, dynamic_depth, quads, blank_spans)
+        _draw(
+            extended,
+            culling,
+            depth_enabled,
+            dynamic_depth,
+            quads,
+            blank_spans,
+            centroids,
+            shadows,
+            legacy_light,
+        )
     )
     if not depth_enabled:
         out[0] = ""
@@ -1343,6 +1356,9 @@ def _draw(
     dynamic_depth=False,
     quads=False,
     blank_spans=False,
+    centroids=False,
+    shadows=False,
+    legacy_light=True,
 ):
     normal_offset = 6 if quads else 4
     routine = NativeRoutine(
@@ -1364,12 +1380,13 @@ def _draw(
                 ),
             )
 
-    routine.if_(
-        ("ne", "shaded", 0),
-        lambda: routine.if_(
-            ("ne", word("@__gfx_solid_direction_enabled"), 0), local_light
-        ),
-    )
+    if legacy_light:
+        routine.if_(
+            ("ne", "shaded", 0),
+            lambda: routine.if_(
+                ("ne", word("@__gfx_solid_direction_enabled"), 0), local_light
+            ),
+        )
     routine.set("face", "faces")
     routine.set("i", 0)
 
@@ -1463,6 +1480,11 @@ def _draw(
         if culling:
             routine.if_(("ne", "cull", 0), cull)
         routine.set("shade", byte(add("face", 4 if quads else 3)))
+        if shadows:
+            ordinary = routine.label()
+            routine.emit("ld a,(__gfx_shadow_active)", "or a", f"jr z,{ordinary}")
+            routine.set("shade", 0)
+            routine.mark(ordinary)
 
         def light():
             routine.set("v", word("@__gfx_solid_ambient"))
@@ -1487,7 +1509,8 @@ def _draw(
                     ),
                 )
 
-            routine.if_(("ne", word("@__gfx_solid_direction_enabled"), 0), legacy)
+            if legacy_light:
+                routine.if_(("ne", word("@__gfx_solid_direction_enabled"), 0), legacy)
             if extended:
                 routine.set("v", add("v", invoke("light_faces", "face")))
             routine.if_(("slt", 16, "v"), lambda: routine.set("v", 16))
@@ -1551,23 +1574,22 @@ def _draw(
 
             routine.while_(("ult", "j", "n"), project)
 
+        depth_clean = routine.label()
         routine.expr("flags")
-        routine.emit("ld a,l", "and 3", "ld l,a", "ld h,0")
-        routine._store("v")
-        routine.if_(("ne", "v", 0), depth_clip)
+        routine.emit("ld a,l", "and 3", f"jp z,{depth_clean}")
+        depth_clip()
+        routine.mark(depth_clean)
         for axis, bound, keep, bit in (
             (6, 0, 1, 4),
             (6, 96, 0, 8),
             (8, 0, 1, 16),
             (8, 64, 0, 32),
         ):
+            clean = routine.label()
             routine.expr("flags")
-            routine.emit("ld a,l", f"and {bit}", "ld l,a", "ld h,0")
-            routine._store("v")
-            routine.if_(
-                ("ne", "v", 0),
-                lambda axis=axis, bound=bound, keep=keep: clip(axis, bound, keep),
-            )
+            routine.emit(f"bit {bit.bit_length() - 1},l", f"jp z,{clean}")
+            clip(axis, bound, keep)
+            routine.mark(clean)
         routine.set("j", 1)
         routine.set("p", add("poly", 12))
 
@@ -1589,7 +1611,7 @@ def _draw(
         else:
             fan()
         routine.mark(skip)
-        routine.set("face", add("face", 12 if quads else 10))
+        routine.set("face", add("face", 15 if centroids else 12 if quads else 10))
         routine.set("i", add("i", 1))
 
     routine.while_(("ult", "i", "count"), face)

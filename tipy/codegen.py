@@ -175,9 +175,10 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
         <= MAX_SPECIALIZED_SCENE_VERTICES
     )
     mesh_programs = {}
-    from .drawing_optimizer import annotate_blank_meshes
+    from .drawing_optimizer import annotate_blank_meshes, annotate_legacy_lighting
 
     annotate_blank_meshes(tree)
+    annotate_legacy_lighting(tree)
     blank_mesh_spans = compiled_mesh_vertices and any(
         n.get("hull_bounds") for n in mesh_geometry
     )
@@ -1191,6 +1192,8 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                 pixels_used.add("mesh_faces")
             if item.get("face_count") and item.get("quad_format"):
                 pixels_used.add("solid_quads")
+            if item.get("face_centroids"):
+                pixels_used.add("solid_centroids")
             data = tuple(item["data"])
             if item.get("compact"):
                 if data not in geometry_packets:
@@ -2913,6 +2916,14 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             if n.get("kind") == "native_graphics" and n.get("name") == "mesh_draw"
         ]
         packets = [n for n in walk(tree) if n.get("kind") == "geometry_data"]
+        shadow_calls = [
+            node
+            for node in walk(tree)
+            if node.get("kind") == "native_graphics"
+            and node.get("name") == "mesh_shadow"
+        ]
+        if shadow_calls and not mesh_calls:
+            pixels_used.update({"solid_no_depth", "solid_no_cull", "solid_only"})
 
         def flag(n, i, v):
             a = n["arguments"][i]
@@ -2927,6 +2938,69 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                 )
             return a.get("kind") == "boolean" and a["value"] == v
 
+        def fixed_argument(node, index):
+            argument = node["arguments"][index]
+            if argument.get("kind") == "name":
+                argument = next(
+                    (
+                        evaluation["value"]
+                        for evaluation in node.get("evaluations", [])
+                        if evaluation["slot"]["label"] == argument.get("label")
+                    ),
+                    argument,
+                )
+            if argument.get("kind") == "number":
+                return argument["value"]
+            if (
+                argument.get("kind") == "negate"
+                and argument["value"].get("kind") == "number"
+            ):
+                return -argument["value"]["value"]
+            return None
+
+        shadow_coordinates = ("light_x", "light_y", "light_z", "floor_y", "x", "y", "z")
+        for index, name in enumerate(shadow_coordinates, start=1):
+            if shadow_calls and all(
+                fixed_argument(node, index) is not None
+                and -120 <= fixed_argument(node, index) <= 120
+                for node in shadow_calls
+            ):
+                pixels_used.add("shadow_checked_" + name)
+        if shadow_calls and all(
+            fixed_argument(node, 2) is not None
+            and fixed_argument(node, 4) is not None
+            and fixed_argument(node, 2) > fixed_argument(node, 4)
+            for node in shadow_calls
+        ):
+            pixels_used.add("shadow_above_floor")
+
+        if shadow_calls:
+            scales = {
+                fixed_argument(node, 2) - fixed_argument(node, 4)
+                for node in shadow_calls
+                if fixed_argument(node, 2) is not None
+                and fixed_argument(node, 4) is not None
+            }
+            if len(scales) == 1 and all(
+                fixed_argument(node, 2) is not None
+                and fixed_argument(node, 4) is not None
+                for node in shadow_calls
+            ):
+                pixels_used.add("shadow_scale_" + str(scales.pop()))
+            if all(
+                fixed_argument(node, 6) is not None
+                and fixed_argument(node, 6) == fixed_argument(node, 4)
+                for node in shadow_calls
+            ):
+                pixels_used.add("shadow_grounded")
+
+        if mesh_calls and all(
+            all(fixed_argument(node, index) == 0 for index in (4, 5, 6))
+            and fixed_argument(node, 7) == 256
+            for node in mesh_calls
+        ):
+            pixels_used.add("mesh_unit_transform")
+
         if (
             mesh_calls
             and packets
@@ -2934,6 +3008,10 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             and all(flag(n, 8, True) and flag(n, 12, False) for n in mesh_calls)
         ):
             pixels_used.add("solid_only")
+        if mesh_calls and all(
+            node.get("legacy_lighting") is False for node in mesh_calls
+        ):
+            pixels_used.add("solid_no_legacy_light")
         if mesh_calls and not all(flag(n, 12, False) for n in mesh_calls):
             pixels_used.add("mesh_outlines")
         if mesh_calls and all(flag(n, 9, False) for n in mesh_calls):
@@ -3070,7 +3148,11 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             offset += estimate(line)
         assembly = "\n".join(lines) + "\n"
 
-    if not lists_used and "mesh_faces" in pixels_used and "mesh_draw" in pixels_used:
+    if (
+        not lists_used
+        and "mesh_faces" in pixels_used
+        and pixels_used & {"mesh_draw", "mesh_shadow"}
+    ):
         from .assembly_size import estimate
         from .errors import CompileError
 

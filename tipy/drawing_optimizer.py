@@ -270,6 +270,8 @@ def annotate_blank_meshes(tree):
                 return is_blank
             return False
         if kind == "native_graphics":
+            if node["name"] == "mesh_shadow":
+                return False
             if node["name"] == "mesh_draw":
                 arg = node["arguments"][12]
                 if arg.get("kind") == "name":
@@ -321,3 +323,69 @@ def annotate_blank_meshes(tree):
         return is_blank
 
     visit_statements(tree["body"], False)
+
+
+def annotate_legacy_lighting(tree):
+    """Track whether the implicit default directional light can reach a draw."""
+    pure_functions = {
+        node["label"]
+        for node in tree["body"]
+        if node.get("kind") == "function" and "finite_table" in node
+    }
+
+    def expression(node, enabled):
+        if isinstance(node, list):
+            for child in node:
+                enabled = expression(child, enabled)
+            return enabled
+        if not isinstance(node, dict):
+            return enabled
+        if node.get("kind") == "conditional":
+            state = expression(node["condition"], enabled)
+            yes = expression(node["body"], state)
+            no = expression(node["alternative"], state)
+            return yes or no
+        for key, child in node.items():
+            if key not in {"body", "alternative", "final", "legacy_lighting"}:
+                enabled = expression(child, enabled)
+        if (
+            node.get("kind") in {"call", "closure_call"}
+            and node.get("symbol") not in pure_functions
+        ):
+            return True
+        if node.get("kind") == "native_graphics":
+            name = node["name"]
+            if name in {
+                "solid_no_lights",
+                "solid_directional_light",
+                "solid_point_light",
+            }:
+                return False
+            if name == "solid_light":
+                return True
+            if name == "mesh_draw":
+                node["legacy_lighting"] = enabled
+        return enabled
+
+    def statements(body, enabled):
+        for node in body:
+            if node.get("unreachable"):
+                continue
+            kind = node.get("kind")
+            if kind == "function":
+                statements(node["body"], True)
+            elif kind == "if":
+                enabled = expression(node["condition"], enabled)
+                yes = statements(node["body"], enabled)
+                no = statements(node["alternative"], enabled)
+                enabled = yes or no
+            elif isinstance(node.get("body"), list):
+                statements(node["body"], True)
+                enabled = True
+            elif kind in {"return", "break", "continue", "raise"}:
+                return True
+            else:
+                enabled = expression(node, enabled)
+        return enabled
+
+    statements(tree["body"], True)

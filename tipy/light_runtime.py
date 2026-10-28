@@ -4,7 +4,7 @@ from .camera_math import NativeRoutine, invoke
 from .list_runtime import add, sub, word, byte
 
 
-def routines(points=True, quads=False):
+def routines(points=True, quads=False, centroids=False, unit_transform=False):
     normal_offset = 6 if quads else 4
     out = [
         "__gfx_light_count: dw 0\n__gfx_light_points: dw 0",
@@ -83,37 +83,75 @@ def routines(points=True, quads=False):
     r.ret("v")
     out.append(r.finish())
     r = NativeRoutine("light_centroid", ("face",), ("i", "p", "v", "sum", "axis"))
-    for axis in range(3):
-        r.set("sum", 0)
-        for i in range(3):
-            r.expr(byte(add("face", i)))
-            r.emit(
-                "add hl,hl", "push hl", "add hl,hl", "pop de", "add hl,de", "push hl"
+    if centroids:
+        for axis in range(3):
+            r.expr(byte(add("face", 12 + axis)))
+            positive = r.label()
+            r.emit("bit 7,l", f"jr z,{positive}", "ld h,255")
+            r.mark(positive)
+            r.emit(f"ld (__gfx_mesh_vertex+{axis*2}),hl")
+    else:
+        for axis in range(3):
+            r.set("sum", 0)
+            for i in range(3):
+                r.expr(byte(add("face", i)))
+                r.emit(
+                    "add hl,hl",
+                    "push hl",
+                    "add hl,hl",
+                    "pop de",
+                    "add hl,de",
+                    "push hl",
+                )
+                r.expr(word("@__gfx_mesh_source"))
+                r.emit("pop de", "add hl,de")
+                r._store("p")
+                r.set("sum", add("sum", word(add("p", axis * 2))))
+            r.write(add("@__gfx_mesh_vertex", axis * 2), invoke("light_div3", "sum"))
+    if unit_transform:
+        for axis in range(3):
+            r.write(
+                add("@__gfx_light_center", axis * 2),
+                add(
+                    word(add("@__gfx_mesh_vertex", axis * 2)),
+                    word(add("@__gfx_mesh_instance", axis * 2)),
+                ),
             )
-            r.expr(word("@__gfx_mesh_source"))
-            r.emit("pop de", "add hl,de")
-            r._store("p")
-            r.set("sum", add("sum", word(add("p", axis * 2))))
-        r.write(add("@__gfx_mesh_vertex", axis * 2), invoke("light_div3", "sum"))
-    for axis in range(3):
-        r.set(
-            "v",
-            invoke(
-                "mesh_vertex_dot",
-                add("@__gfx_mesh_rotation", axis * 6),
-                "@__gfx_mesh_vertex",
-            ),
-        )
-        r.expr(invoke("mesh_mul", "v", word("@__gfx_mesh_instance+6")))
-        r.emit("ld l,h", "ld h,0", "bit 7,l")
-        positive = r.label()
-        r.emit(f"jr z,{positive}", "ld h,255")
-        r.mark(positive)
-        r._store("v")
-        r.write(
-            add("@__gfx_light_center", axis * 2),
-            add("v", word(add("@__gfx_mesh_instance", axis * 2))),
-        )
+    else:
+        identity_done = r.label()
+        identity_general = r.label()
+        r.expr(word("@__gfx_mesh_identity_active"))
+        r.emit("ld a,h", "or l", f"jr z,{identity_general}")
+        for axis in range(3):
+            r.write(
+                add("@__gfx_light_center", axis * 2),
+                add(
+                    word(add("@__gfx_mesh_vertex", axis * 2)),
+                    word(add("@__gfx_mesh_instance", axis * 2)),
+                ),
+            )
+        r.emit(f"jp {identity_done}")
+        r.mark(identity_general)
+        for axis in range(3):
+            r.set(
+                "v",
+                invoke(
+                    "mesh_vertex_dot",
+                    add("@__gfx_mesh_rotation", axis * 6),
+                    "@__gfx_mesh_vertex",
+                ),
+            )
+            r.expr(invoke("mesh_mul", "v", word("@__gfx_mesh_instance+6")))
+            r.emit("ld l,h", "ld h,0", "bit 7,l")
+            positive = r.label()
+            r.emit(f"jr z,{positive}", "ld h,255")
+            r.mark(positive)
+            r._store("v")
+            r.write(
+                add("@__gfx_light_center", axis * 2),
+                add("v", word(add("@__gfx_mesh_instance", axis * 2))),
+            )
+        r.mark(identity_done)
     r.ret()
     out.append(r.finish())
     r = NativeRoutine(
@@ -176,7 +214,10 @@ def routines(points=True, quads=False):
         r.expr(add("face", normal_offset))
         r.emit("ld de,__gfx_light_normal", "ld bc,6", "ldir")
 
-    r.if_(("ne", word("@__gfx_mesh_identity_active"), 0), identity_normal, normal)
+    if unit_transform:
+        identity_normal()
+    else:
+        r.if_(("ne", word("@__gfx_mesh_identity_active"), 0), identity_normal, normal)
     if points:
         r.if_(
             ("ne", word("@__gfx_light_points"), 0),

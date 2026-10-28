@@ -5,6 +5,7 @@ from .errors import CompileError
 PUBLIC = {
     "mesh",
     "draw_mesh",
+    "draw_shadow",
     "load_obj",
     "mesh_light",
     "no_lights",
@@ -36,7 +37,8 @@ def install(tree):
             if n.get("kind") in {"call", "name"}
         )
     mesh_active = any(
-        n.get("kind") == "call" and n.get("name") == "draw_mesh" for n in walk(active)
+        n.get("kind") == "call" and n.get("name") in {"draw_mesh", "draw_shadow"}
+        for n in walk(active)
     )
     # This camera has a deliberately bounded coordinate range. Mixing it with
     # the general XYZ path would silently select two different camera states.
@@ -91,7 +93,8 @@ def install(tree):
             )
             if intensity is None or integer(intensity) not in {0, 1}:
                 effective_points = True
-    quad_format = tree.get("render_quality") == "aggressive" and not effective_points
+    quad_format = tree.get("render_quality") == "aggressive"
+    face_centroids = quad_format and effective_points
     for n in nodes:
         if n.get("kind") != "call":
             continue
@@ -221,6 +224,13 @@ def install(tree):
                     )
                     + [byte for x in normal for byte in (x & 255, (x >> 8) & 255)]
                 )
+                if face_centroids:
+                    for axis in range(3):
+                        total = sum(vertices[index][axis] for index in indices)
+                        center = (abs(total) + len(indices) // 2) // len(indices)
+                        if total < 0:
+                            center = -center
+                        face_data.append(center & 255)
             if faces and not edges:
                 seen_edges = set()
                 for f in faces:
@@ -256,6 +266,7 @@ def install(tree):
                 vertex_count=len(vertices),
                 face_count=len(records),
                 quad_format=quad_format,
+                face_centroids=face_centroids,
                 hull_bounds=hull_bounds,
                 **location,
             )
@@ -263,6 +274,7 @@ def install(tree):
             name
             in {
                 "draw_mesh",
+                "draw_shadow",
                 "mesh_light",
                 "no_lights",
                 "ambient_light",
@@ -276,6 +288,7 @@ def install(tree):
                 "__tipy_native_"
                 + {
                     "draw_mesh": "mesh_draw",
+                    "draw_shadow": "mesh_shadow",
                     "mesh_light": "solid_light",
                     "no_lights": "solid_no_lights",
                     "ambient_light": "solid_ambient_light",

@@ -508,7 +508,7 @@ def graphics_assembly(used):
         for name in used
         if name.startswith(("cam_", "mat_", "model_", "mesh_", "solid_"))
     }
-    solid = "mesh_faces" in used and "mesh_draw" in used
+    solid = "mesh_faces" in used and bool(used & {"mesh_draw", "mesh_shadow"})
     if solid:
         camera_entries.add("solid_clear")
     if any(name.startswith("mesh_") for name in used):
@@ -541,8 +541,7 @@ def graphics_assembly(used):
         dynamic_depth = "solid_dynamic_depth" in used
         quads = "solid_quads" in used
         outlines = "mesh_outlines" in used
-        # Quad packets are emitted only when every point-light intensity is
-        # proven <=1, whose native attenuated contribution is always zero.
+        centroids = "solid_centroids" in used
         groups = (
             math_routines()
             + matrix_routines()
@@ -561,6 +560,8 @@ def graphics_assembly(used):
                 "compiled_mesh_vertices" in used,
                 "mesh_blank_spans" in used,
                 quads,
+                "mesh_unit_transform" in used,
+                "mesh_shadow" in used and "compiled_mesh_vertices" in used,
             )
             + solid_routines(
                 extended,
@@ -570,9 +571,42 @@ def graphics_assembly(used):
                 quads,
                 "mesh_blank_spans" in used,
                 "mesh_basic_spans" not in used,
+                centroids,
+                "mesh_shadow" in used,
+                "solid_no_legacy_light" not in used,
             )
-            + light_routines("solid_point_light" in used and not quads, quads)
+            + light_routines(
+                "solid_point_light" in used and (not quads or centroids),
+                quads,
+                centroids,
+                "mesh_unit_transform" in used,
+            )
         )
+        if "mesh_shadow" in used:
+            from .shadow_runtime import routines as shadow_routines
+
+            checked = {
+                name.removeprefix("shadow_checked_")
+                for name in used
+                if name.startswith("shadow_checked_")
+            }
+            groups += shadow_routines(
+                capacity,
+                dynamic_depth,
+                "mesh_blank_spans" in used,
+                checked,
+                "shadow_above_floor" in used,
+                "compiled_mesh_vertices" in used,
+                next(
+                    (
+                        int(name.removeprefix("shadow_scale_"))
+                        for name in used
+                        if name.startswith("shadow_scale_")
+                    ),
+                    None,
+                ),
+                "shadow_grounded" in used,
+            )
         roots = {"__gfx_" + name for name in camera_entries}
         if "compiled_mesh_vertices" in used:
             roots.add("__gfx_mesh_vertex_plan")
