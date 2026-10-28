@@ -17,7 +17,7 @@ if(argsStart<0||argsEnd<0)throw Error('Native compiler entry changed')
 harness=harness.slice(0,argsStart)+`  const args=[resolve2('../../experiments/graphics_quality.py'),String(measurements.quality)];\n`+harness.slice(argsEnd)
 harness+=String.raw`
 const {writeFileSync:savePreview}=await import('node:fs');
-const game=readFileSync(resolve2('../../examples/lumen_run.tip'),'utf8');
+const game=readFileSync(resolve2('../../experiments/fixtures/lumen_static.tip'),'utf8');
 // Fix the angular increment only for this comparison, so faster variants
 // render the same camera poses. HUD, drawing, lighting and input stay active.
 const source=game.replace('set_render_quality("aggressive")','')

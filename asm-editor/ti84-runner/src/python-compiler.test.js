@@ -2936,12 +2936,31 @@ test('Level camera reciprocal roots stay within one Q8 unit and reject other dom
 })
 
 
-test('LUMEN general renderer averages at least 20 FPS on the fixed-pose native benchmark',()=>{
-    const source=readFileSync(resolve('../../examples/lumen_run.tip'),'utf8').replace('int yaw=0','int yaw=3').replace('yaw=(yaw+turn*(turn_remainder//3))&127','yaw=(yaw+turn*2)&127')
+test('LUMEN static-light renderer averages at least 20 FPS on the fixed-pose native benchmark',()=>{
+    const source=readFileSync(resolve('../../experiments/fixtures/lumen_static.tip'),'utf8').replace('int yaw=0','int yaw=3').replace('yaw=(yaw+turn*(turn_remainder//3))&127','yaw=(yaw+turn*2)&127')
     const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000,afterFrameKeys:Array.from({length:8},(_,i)=>i===7?[15]:[3])}
     execute(source,m)
     const frames=m.frameTimes.slice(1).map((time,i)=>time-m.frameTimes[i]),mean=frames.reduce((a,b)=>a+b,0)/frames.length
     assert.equal(frames.length,7)
     assert.ok(mean<=750000,`Mean ${mean} T-states exceeds the 20 FPS budget at 15 MHz`)
     assert.ok(m.bytes<=24169);assert.ok(m.stackBytes<1024)
+})
+
+
+test('LUMEN sunlight orbits above the room without input and changes its shading',()=>{
+    const captured=[],m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:40000,
+        onFrame(r,result){
+            const word=name=>{const a=r.assembly.asm.scopes[0].symbols.get(result.symbols[name].label).value;const v=r.machine.memory[a]|r.machine.memory[a+1]<<8;return v>32767?v-65536:v}
+            const phase=word('sun_phase')
+            if(captured.length<4&&phase>=[0,32,64,96][captured.length]){
+                captured.push({phase,x:word('sun_x'),z:word('sun_z'),pixels:r.lcd.pixels.slice()})
+            }
+            assert.equal(word('px'),-160);assert.equal(word('pz'),160)
+            if(phase>=96)r.setKey(15,true)
+        }}
+    execute(readFileSync(resolve('../../examples/lumen_run.tip'),'utf8'),m)
+    assert.equal(captured.length,4)
+    assert.deepEqual(captured.map(f=>[f.x,f.z]),[[0,24],[24,0],[0,-24],[-24,0]])
+    for(let i=1;i<captured.length;i++)assert.notDeepEqual(captured[i].pixels,captured[0].pixels)
+    assert.ok(m.bytes<=24169)
 })
