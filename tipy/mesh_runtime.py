@@ -8,7 +8,7 @@ from .camera_math import NativeRoutine,invoke
 from .list_runtime import add,sub,word
 
 
-def routines(capacity=64,solid=False,extended=False,wire=True,dynamic_depth=False,no_depth=False,outlines=True):
+def routines(capacity=64,solid=False,extended=False,wire=True,dynamic_depth=False,no_depth=False,outlines=True,compiled_vertices=False,blank_spans=False,approximate=False):
     out=['''__gfx_mesh_ready: dw 0
 __gfx_mesh_near: dw 512
 __gfx_mesh_far: dw 30720
@@ -47,7 +47,20 @@ __gfx_mesh_gain: defs 512,0''']
             r.if_(('slt',prefix+axis,-120),lambda:r.fail(14));r.if_(('slt',120,prefix+axis),lambda:r.fail(14))
         r.set(axis,sub('t'+axis,'e'+axis));r.write(add('@__gfx_mesh_eye','xyz'.index(axis)*2),'e'+axis)
     r.if_(('eq','x',0),lambda:r.if_(('eq','z',0),lambda:r.fail(14)))
+    if approximate:
+        general_camera=r.label();r.expr('y');r.emit('ld a,h','or l',f'jr nz,{general_camera}')
+        r.expr(invoke('mesh_level_fast','x','z'));r.emit('ld a,h','or l',f'jr z,{general_camera}');r.ret();r.mark(general_camera)
     r.expr(invoke('mesh_normalize',sub(0,'z'),0,'x','@__gfx_mesh_basis'))
+    tilted=r.label();r.expr('y');r.emit('ld a,h','or l',f'jp nz,{tilted}')
+    # For a level camera the forward vector is a permutation of the right
+    # vector. Its length and rounding are identical; normalize only once.
+    r.write('@__gfx_mesh_basis+12',word('@__gfx_mesh_basis+4'))
+    r.write('@__gfx_mesh_basis+14',0)
+    r.write('@__gfx_mesh_basis+16',sub(0,word('@__gfx_mesh_basis')))
+    r.write('@__gfx_mesh_basis+6',0);r.write('@__gfx_mesh_basis+10',0)
+    r.set('a',invoke('wf_qmul',word('@__gfx_mesh_basis+4'),word('@__gfx_mesh_basis+4')))
+    r.set('b',invoke('wf_qmul',word('@__gfx_mesh_basis'),word('@__gfx_mesh_basis')))
+    r.write('@__gfx_mesh_basis+8',add('a','b'));r.ret();r.mark(tilted)
     r.expr(invoke('mesh_normalize','x','y','z',add('@__gfx_mesh_basis',12)))
     for axis,(j,k) in enumerate(((1,2),(2,0),(0,1))):
         r.set('a',invoke('wf_qmul',word(add('@__gfx_mesh_basis',j*2)),word(add('@__gfx_mesh_basis',12+k*2))))
@@ -63,20 +76,16 @@ __gfx_mesh_gain: defs 512,0''']
         if i!=2:r.set('a',add('a',2));r.set('b',add('b','step'))
     r.ret('sum');out.append(r.finish())
 
-    r=NativeRoutine('mesh_vertex_dot',('a','b'),('sum',))
-    r.set('sum',0)
+    code=['__gfx_mesh_vertex_dot:','push ix','push iy','ld hl,8','add hl,sp','ld e,(hl)','inc hl','ld d,(hl)','push de','pop iy',
+          'ld hl,6','add hl,sp','ld e,(hl)','inc hl','ld d,(hl)','push de','pop ix','exx','ld hl,0','exx']
     for i in range(3):
-        zero=r.label()
-        r.expr(word(add('a',i*2)));r.emit('ld a,h','or l',f'jr z,{zero}','ld b,h','ld c,l')
-        r.expr(('byte',add('b',i*2)));r.emit('ld d,b','ld e,c','ld a,l','or a')
-        positive,ready,loop,skip,done=(r.label() for _ in range(5))
-        r.emit(f'jp p,{positive}','neg','ld c,a','xor a','sub e','ld e,a','sbc a,a','sub d','ld d,a','ld a,c',f'jr {ready}')
-        r.mark(positive);r.mark(ready);r.emit('ld hl,0','or a',f'jr z,{done}')
-        r.mark(loop);r.emit('srl a',f'jr nc,{skip}','add hl,de');r.mark(skip)
-        r.emit('sla e','rl d','or a',f'jr nz,{loop}');r.mark(done)
-        offset=r.slots['sum'];r.emit(f'ld e,(ix{offset:+d})',f'ld d,(ix{offset+1:+d})','add hl,de');r._store('sum')
-        r.mark(zero)
-    r.ret('sum');out.append(r.finish())
+        n=f'__gfx_mesh_vertex_dot_{i}'
+        code += [f'ld e,(iy+{i*2})',f'ld d,(iy+{i*2+1})','ld a,d','or e',f'jr z,{n}_zero',f'ld a,(ix+{i*2})','or a',f'jr z,{n}_zero',f'jp p,{n}_positive',
+                 'neg','ld c,a','xor a','sub e','ld e,a','sbc a,a','sub d','ld d,a','ld a,c',n+'_positive:','ld hl,0',
+                 n+'_loop:','srl a',f'jr nc,{n}_skip','add hl,de',n+'_skip:','sla e','rl d','or a',f'jr nz,{n}_loop',
+                 'push hl','exx','pop de','add hl,de','exx',n+'_zero:']
+    code+=['exx','pop iy','pop ix','ret']
+    out.append('\n'.join(line if line.endswith(':') else '        '+line for line in code))
 
     r=NativeRoutine('mesh_imul',('a','b'))
     r.expr('a');r.emit('ld a,l','or a')
@@ -118,6 +127,7 @@ __gfx_mesh_gain: defs 512,0''']
                     ('sx','cx','sy','cy','sz','cz','a','b','i','j','p','record','vertices','edges','count','radius'))
     r.if_(('eq',word('@__gfx_mesh_ready'),0),lambda:r.expr(invoke('mesh_init',75,2,120)))
     if dynamic_depth:r.write('@__gfx_solid_depth_enabled','depth_test')
+    if blank_spans:r.emit('xor a','ld (__gfx_solid_transparent_white),a')
     if extended:
         for i,n in enumerate(('x','y','z','size')):r.write(add('@__gfx_mesh_instance',i*2),n)
         r.write('@__gfx_mesh_source',add('model',10))
@@ -174,17 +184,31 @@ __gfx_mesh_gain: defs 512,0''']
         r.while_(('ult','j',6),matrix_col);r.set('i',add('i',6))
     r.while_(('ult','i',18),matrix_row)
     r.mark(transformed)
-    r.set('p',add('model',10));r.set('record','@__gfx_wf_records');r.set('count',0)
-    def vertex():
-        for i in range(3):
-            r.expr(word(add('p',i*2)));r.emit(f'ld (__gfx_mesh_vertex+{i*2}),hl')
-        r.set('i',0)
-        def axis():
-            r.set('a',invoke('mesh_vertex_dot',add('@__gfx_mesh_view',add('i',add('i','i'))),'@__gfx_mesh_vertex'))
-            r.expr(word(add('@__gfx_mesh_center','i')));r.emit('push hl');r.expr('a');r.emit('pop de','or a','adc hl,de',f'jp pe,{r.name}_return');r._store('a')
-            r.write(add('record','i'),'a');r.set('i',add('i',2))
-        r.while_(('ult','i',6),axis);r.set('p',add('p',6));r.set('record',add('record',12));r.set('count',add('count',1))
-    r.while_(('ult','count','vertices'),vertex)
+    if compiled_vertices:
+        # Specialized coordinate products are shared across every vertex of a
+        # small static model, using the same general model/view matrix.
+        if blank_spans:
+            for i,axis in enumerate('xyz'):r.expr(axis);r.emit(f'ld (__gfx_mesh_relative+{i*2}),hl')
+        r.emit('ld hl,__gfx_wf_records')
+        r.expr('model');r.emit('ld b,h','ld c,l','ld hl,__gfx_mesh_programs')
+        find,next_,found,returned=(r.label() for _ in range(4))
+        r.mark(find);r.emit('ld e,(hl)','inc hl','ld d,(hl)','inc hl','ld a,d','or e',f'jp z,{r.name}_invalid_model','ld a,d','xor b',f'jr nz,{next_}','ld a,e','xor c',f'jr z,{found}')
+        r.mark(next_);r.emit('inc hl','inc hl',f'jr {find}')
+        r.mark(found);r.emit('ld e,(hl)','inc hl','ld d,(hl)',f'ld hl,{returned}','push hl','ex de,hl','jp (hl)');r.mark(returned)
+        r.emit('ld a,h','or l',f'jp z,{r.name}_return')
+        r.expr('vertices');r.emit('add hl,hl','ld d,h','ld e,l','add hl,hl','add hl,de','push hl');r.expr(add('model',10));r.emit('pop de','add hl,de');r._store('p')
+    else:
+        r.set('p',add('model',10));r.set('record','@__gfx_wf_records');r.set('count',0)
+        def vertex():
+            for i in range(3):
+                r.expr(word(add('p',i*2)));r.emit(f'ld (__gfx_mesh_vertex+{i*2}),hl')
+            r.set('i',0)
+            def axis():
+                r.set('a',invoke('mesh_vertex_dot',add('@__gfx_mesh_view',add('i',add('i','i'))),'@__gfx_mesh_vertex'))
+                r.expr(word(add('@__gfx_mesh_center','i')));r.emit('push hl');r.expr('a');r.emit('pop de','or a','adc hl,de',f'jp pe,{r.name}_return');r._store('a')
+                r.write(add('record','i'),'a');r.set('i',add('i',2))
+            r.while_(('ult','i',6),axis);r.set('p',add('p',6));r.set('record',add('record',12));r.set('count',add('count',1))
+        r.while_(('ult','count','vertices'),vertex)
     r.write('@__gfx_wf_near',word('@__gfx_mesh_near'));r.write('@__gfx_wf_far',word('@__gfx_mesh_far'));r.write('@__gfx_wf_gain','@__gfx_mesh_gain')
     r.emit('ld a,1','ld (__gfx_ink),a')
     if solid:
@@ -198,7 +222,9 @@ __gfx_mesh_gain: defs 512,0''']
                 r.expr(invoke('wf_draw_prepared','vertices','edges','p'));r.ret()
         r.if_(('ne','filled',0),lambda:r.if_(('ne',word(add('model',8)),0),filled_mesh))
     if wire:r.expr(invoke('wf_draw','vertices','edges','p'))
-    r.ret();out.append(r.finish())
+    r.ret()
+    if compiled_vertices:r.mark(r.name+'_invalid_model');r.fail(14)
+    out.append(r.finish())
     out.append('__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256\n__gfx_mesh_identity_active: dw 0')
     if solid and wire and outlines and not no_depth:
         r=NativeRoutine('mesh_restore_flags',('count',))
@@ -207,6 +233,9 @@ __gfx_mesh_gain: defs 512,0''']
         r.mark(loop);r.emit('ld a,(de)','ld (hl),a','inc hl','ld (hl),0','ld a,l','add a,11','ld l,a',f'jr nc,{advance}','inc h')
         r.mark(advance);r.emit('inc de',f'djnz {loop}');r.ret();out.append(r.finish())
     if extended:out.append('__gfx_mesh_instance: defs 8,0\n__gfx_mesh_source: dw 0')
+    if blank_spans:out[0]+='\n__gfx_mesh_blank: db 0\n__gfx_solid_transparent_white: db 0\n__gfx_mesh_relative: defs 6,0'
+    if approximate:out.append(_level_fast())
+    if compiled_vertices:out.append(_vertex_plan())
     out.append(_normalize())
     return out
 
@@ -280,3 +309,43 @@ __gfx_mesh_sqrt24_next:
         ld h,b
         ld l,c
         ret'''
+
+
+def _vertex_plan():
+    code=['__gfx_mesh_vertex_plan:','ld (__gfx_mesh_plan_terms),hl','push ix','push iy','push de','pop iy','ld ix,__gfx_wf_records','ld b,a',
+          '__gfx_mesh_vertex_plan_loop:']
+    for row in range(3):
+        code+=['exx','ld hl,0','exx']
+        for axis in range(3):
+            code+=['ld l,(iy+0)','inc iy','ld h,0','add hl,hl','ld de,(__gfx_mesh_plan_terms)','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','push de','exx','pop de','add hl,de','exx']
+        code+=['exx',f'ld de,(__gfx_mesh_center+{row*2})','or a','adc hl,de','jp pe,__gfx_mesh_vertex_plan_overflow',f'ld (ix+{row*2}),l',f'ld (ix+{row*2+1}),h','exx']
+    code+=['ld de,12','add ix,de','dec b','jp nz,__gfx_mesh_vertex_plan_loop','ld hl,1','jr __gfx_mesh_vertex_plan_done',
+           '__gfx_mesh_vertex_plan_overflow:','ld hl,0','__gfx_mesh_vertex_plan_done:','pop iy','pop ix','ret','__gfx_mesh_plan_terms: dw 0']
+    return '\n'.join(line if line.endswith(':') or ': dw ' in line else '        '+line for line in code)
+
+
+def _level_fast():
+    """Small level-camera vectors use a bounded Q15 reciprocal-root table.
+
+    Max reciprocal rounding error is under 0.07 Q8 units; arbitrary direction
+    magnitudes and tilted cameras retain the full normalizer.
+    """
+    r=NativeRoutine('mesh_level_fast',('x','z'),('sum','gain'))
+    for value in ('x','z'):
+        valid=r.label();r.expr(value);r.emit('ld de,20','add hl,de','ld de,41','or a','sbc hl,de',f'jr c,{valid}');r.ret(0);r.mark(valid)
+    r.set('sum',0)
+    for value in ('x','z'):
+        positive=r.label();r.expr(value);r.emit('bit 7,h',f'jr z,{positive}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(positive)
+        r.emit('add hl,hl','ld de,__gfx_mesh_level_squares','add hl,de','ld e,(hl)','inc hl','ld d,(hl)');r.expr('sum');r.emit('add hl,de');r._store('sum')
+    r.expr('sum');r.emit('ld de,192','or a','sbc hl,de','ld a,h','or a');valid=r.label();r.emit(f'jr nz,{valid}','ld a,l','cp 128',f'jr c,{valid}_sum');r.mark(valid);r.ret(0);r.mark(valid+'_sum')
+    r.emit('add hl,hl','ld de,__gfx_mesh_level_roots','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','ex de,hl');r._store('gain')
+    for value,forward,right in (('x',12,4),('z',16,0)):
+        positive,signed=r.label(),r.label();r.expr(value);r.emit('ld a,h','or a','push af',f'jp p,{positive}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(positive)
+        r.emit('ex de,hl',f"ld c,(ix{r.slots['gain']:+d})",f"ld b,(ix{r.slots['gain']+1:+d})",'call __gfx_wf_umul','ld de,64','add hl,de','add hl,hl','ld l,h','ld h,0','rl h','pop af',f'jp p,{signed}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(signed)
+        r.emit(f'ld (__gfx_mesh_basis+{forward}),hl')
+        if value=='z':r.emit('xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
+        r.emit(f'ld (__gfx_mesh_basis+{right}),hl')
+    r.emit('ld hl,0')
+    for offset in (2,6,10,14):r.emit(f'ld (__gfx_mesh_basis+{offset}),hl')
+    r.emit('ld hl,256','ld (__gfx_mesh_basis+8),hl');r.ret(1)
+    return r.finish()+'\n__gfx_mesh_level_squares: dw '+','.join(str(i*i) for i in range(21))+'\n__gfx_mesh_level_roots: dw '+','.join(str(round(32768/math.sqrt(i))) for i in range(192,320))

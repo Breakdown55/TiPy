@@ -12,7 +12,7 @@ class WireframeTests(unittest.TestCase):
         self.assertIn('__gfx_cam_fast_look:',a)
         self.assertNotIn('__gfx_cam_normalize:',a)
         self.assertNotIn('__gfx_cam_project:',a)
-        self.assertIn('__gfx_wf_octant_111:',a)
+        self.assertIn('__gfx_wf_octant_1111:',a)
 
     def test_reference_keeps_exact_shared_vertex_pipeline(self):
         a=compile_source(SCENE,optimization='reference')['assembly']

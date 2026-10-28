@@ -8,7 +8,7 @@ from .shape_runtime import slot,words
 from .list_runtime import add,sub,word,byte
 
 
-def routines(capacity,prepared_draw=False):
+def routines(capacity,prepared_draw=False,black_only=False):
     out=['__gfx_wf_records: defs '+str(capacity*12)+',0\n__gfx_wf_basis: defs 18,0\n__gfx_wf_near: dw 0\n__gfx_wf_far: dw 0\n__gfx_wf_gain: dw 0']
     import math
     table=[round(128*4096/math.sqrt(n)) for n in range(256,1024)]
@@ -39,6 +39,60 @@ __gfx_wf_umul_zero:
         ret
 __gfx_wf_umul_general:
         ld hl,0
+        ld a,d
+        or a
+        jr nz,__gfx_wf_umul_high
+        ld d,e
+        ld e,0
+        ld a,d
+        cp 16
+        jr c,__gfx_wf_umul_four
+        ld a,2
+        jr __gfx_wf_umul_loop
+__gfx_wf_umul_four:
+        sla d
+        sla d
+        sla d
+        sla d
+        ld a,1
+        jr __gfx_wf_umul_loop
+__gfx_wf_umul_high:
+        ld a,e
+        or a
+        jr nz,__gfx_wf_umul_full
+        ld a,d
+        cp 16
+        jr nc,__gfx_wf_umul_high_eight
+        sla d
+        sla d
+        sla d
+        sla d
+        ld a,1
+        jr __gfx_wf_umul_high_product
+__gfx_wf_umul_high_eight:
+        ld a,2
+__gfx_wf_umul_high_product:
+        call __gfx_wf_umul_loop
+        ld d,e
+        ld e,h
+        ld h,l
+        ld l,0
+        ret
+__gfx_wf_umul_full:
+        ld a,d
+        cp 16
+        jr nc,__gfx_wf_umul_sixteen
+        sla e
+        rl d
+        sla e
+        rl d
+        sla e
+        rl d
+        sla e
+        rl d
+        ld a,3
+        jr __gfx_wf_umul_loop
+__gfx_wf_umul_sixteen:
         ld a,4
 __gfx_wf_umul_loop:
         add hl,hl
@@ -87,6 +141,8 @@ __gfx_wf_udiv:
         or a
         jr nz,__gfx_wf_udiv_general
         ld a,c
+        cp 1
+        ret z
         or a
         jr z,__gfx_wf_udiv_general
         bit 7,a
@@ -131,6 +187,34 @@ __gfx_wf_udiv_small_next3:
         ld d,0
         ret
 __gfx_wf_udiv_general:
+        ld a,d
+        or a
+        jr nz,__gfx_wf_udiv_full
+        ld a,e
+        cp b
+        jr c,__gfx_wf_udiv_eight
+        or a
+        jr nz,__gfx_wf_udiv_full
+        ld a,b
+        or a
+        jr nz,__gfx_wf_udiv_full
+        ld d,0
+        ld e,h
+        ld h,l
+        ld l,0
+        srl e
+        rr h
+        rr l
+        ld a,9
+        jr __gfx_wf_udiv_loop
+__gfx_wf_udiv_eight:
+        ld d,e
+        ld e,h
+        ld h,l
+        ld l,0
+        ld a,8
+        jr __gfx_wf_udiv_loop
+__gfx_wf_udiv_full:
         ld a,16
 __gfx_wf_udiv_loop:
         add hl,hl
@@ -244,7 +328,12 @@ __gfx_wf_udiv_next:
     r.if_(('eq',word(add('point','axis')),'bound'),lambda:r.ret(1));r.ret('keep');out.append(r.finish())
 
     r=NativeRoutine('wf_clip',('a','b','axis','bound','keep'),('ia','ib','outside','inside','n','d','x','y','other'))
-    for value in ('a','b'):r.set('i'+value,invoke('wf_inside',value,'axis','bound','keep'))
+    for value in ('a','b'):
+        r.expr(value);r.emit(f"ld e,(ix{r.slots['axis']:+d})",f"ld d,(ix{r.slots['axis']+1:+d})",'add hl,de','ld e,(hl)','inc hl','ld h,(hl)','ld l,e',
+            f"ld e,(ix{r.slots['bound']:+d})",f"ld d,(ix{r.slots['bound']+1:+d})",'ld a,h','xor 128','ld h,a','ld a,d','xor 128','ld d,a','or a','sbc hl,de')
+        equal,done=r.label(),r.label();r.emit(f'jr z,{equal}','ld a,0','adc a,0','ld c,a',f"ld a,(ix{r.slots['keep']:+d})",'xor c','ld l,a','ld h,0',f'jr {done}')
+        r.mark(equal);r.emit('ld hl,1');r.mark(done);r._store('i'+value)
+
     r.if_(('eq',add('ia','ib'),0),lambda:r.ret(0));r.if_(('eq',add('ia','ib'),2),lambda:r.ret(1))
     r.set('outside','a');r.set('inside','b');r.if_(('ne','ia',0),lambda:(r.set('outside','b'),r.set('inside','a')))
     r.set('x',word(add('outside','axis')));r.set('y',word(add('inside','axis')))
@@ -255,7 +344,7 @@ __gfx_wf_udiv_next:
     r.if_(('eq','axis',4),depth_clip,lambda:(r.set('other',sub(14,'axis')),interpolate('other')))
     r.write(add('outside','axis'),'bound');r.ret(1);out.append(r.finish())
 
-    out.extend(_raster())
+    out.extend(_raster(black_only))
     out.append('__gfx_wf_ink_ref: dw __gfx_ink')
     r=NativeRoutine('cam_fast_batch',('data',),('count','i','edges','record','index','pa','pb','flags')+words('a',6)+words('b',6))
     r.set('record',word('data'));r.set('data',add('data',2))
@@ -277,6 +366,11 @@ __gfx_wf_udiv_next:
             r.set('p'+target,'record');r.set('edges',add('edges',1))
         skip=r.label()
         r.expr(word(add('pa',10)));r.emit('ld b,l');r.expr(word(add('pb',10)));r.emit('ld a,l','and b',f'jp nz,{skip}','ld a,l','or b','ld l,a','ld h,0');r._store('flags')
+        clipped=r.label();r.emit('ld a,l','or a',f'jp nz,{clipped}')
+        for pointer in ('pa','pb'):
+            r.expr(add(pointer,6))
+            for _ in range(2):r.emit('ld e,(hl)','inc hl','ld d,(hl)','inc hl','push de')
+        r.emit('call __gfx_wf_raster',*(['pop bc']*4),f'jp {skip}');r.mark(clipped)
         r.load('a','pa',6);r.load('b','pb',6)
         for bound,keep,bit in (('@__gfx_wf_near',1,0),('@__gfx_wf_far',0,1)):
             clean=r.label();r.expr('flags');r.emit(f'bit {bit},l',f'jp z,{clean}')
@@ -312,38 +406,141 @@ def _project():
     return '\n'.join(line if line.endswith(':') else '        '+line for line in code)
 
 
-def _raster():
+def _raster(black_only=False):
     r=NativeRoutine('wf_raster',('x1','y1','x2','y2'),('dx','dy','sx','sy','major'))
+    r.emit('ld a,(ix+10)','cp (ix+6)','jp z,__gfx_wf_axis_v','ld a,(ix+8)','cp (ix+4)','jp z,__gfx_wf_axis_h')
     r.set('sx',1);r.set('sy',1);r.set('dx',sub('x2','x1'));r.set('dy',sub('y2','y1'))
     r.if_(('negative','dx'),lambda:(r.set('dx',sub(0,'dx')),r.set('sx',0)))
     r.if_(('negative','dy'),lambda:(r.set('dy',sub(0,'dy')),r.set('sy',0)))
     r.set('major',0);r.if_(('ult','dx','dy'),lambda:r.set('major',1))
-    # One byte pointer and rotating bit mask replace per-pixel address lookup.
+    # Dispatch through a small table once, including the ink mode. The hot
+    # loop never tests orientation or the global drawing mode.
+    r.expr('sx');r.emit('ld a,l','add a,a','ld c,a');r.expr('sy');r.emit('ld a,l','or c','ld c,a');r.expr('major');r.emit('ld a,l','add a,a','add a,a','or c','ld c,a','ld a,(__gfx_ink)','or a')
+    erase=r.label();r.emit(f'jr z,{erase}','ld a,c','or 8','ld c,a');r.mark(erase)
+    r.emit('ld l,c','ld h,0','add hl,hl','ld de,__gfx_wf_octants','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','push de')
     r.expr('y1');r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','ld de,0x9340','add hl,de','push hl')
     r.expr('x1');r.emit('ld a,l','and 7','ld b,a','ld a,128')
     shift,ready=r.label(),r.label();r.emit('inc b',f'jr {ready}');r.mark(shift);r.emit('rrca');r.mark(ready);r.emit(f'djnz {shift}','ld d,a')
     r.expr('x1');r.emit('srl l','srl l','srl l','pop bc','add hl,bc','push hl','push de')
     r.if_(('eq','major',0),lambda:(r.expr('dy'),r.emit('ld c,l'),r.expr('dx')),lambda:(r.expr('dx'),r.emit('ld c,l'),r.expr('dy')))
-    r.emit('ld e,l','ld a,l','srl a','ld b,a','ld a,l','inc a',"ex af,af'",'pop hl','ld d,h','pop hl')
-    # Dispatch once; no orientation tests or calls remain inside the pixel loop.
-    for major in range(2):
-        for sx in range(2):
-            for sy in range(2):
-                next_=r.label();r.expr('major');r.emit('ld a,l',f'cp {major}',f'jp nz,{next_}');r.expr('sx');r.emit('ld a,l',f'cp {sx}',f'jp nz,{next_}');r.expr('sy');r.emit('ld a,l',f'cp {sy}',f'jp nz,{next_}')
-                # Dispatch expressions clobber HL; reconstruct the pointer only
-                # here while leaving the prepared BC/DE registers untouched.
-                r.emit('push bc','push de');r.expr('y1');r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','ld de,0x9340','add hl,de','push hl');r.expr('x1');r.emit('srl l','srl l','srl l','pop de','add hl,de','pop de','pop bc',f'jp __gfx_wf_octant_{major}{sx}{sy}');r.mark(next_)
-    result=[r.finish()]
+    r.emit('ld e,l','ld a,l','srl a','ld b,a','ld a,l','inc a',"ex af,af'",'pop hl','ld d,h','pop hl','ret')
+    result=[r.finish(),_axis_raster(black_only)]
     def xstep(sx,name):return [f'{"rrc" if sx else "rlc"} d',f'jr nc,{name}',f'{"inc" if sx else "dec"} hl',name+':']
     def ystep(sy,name):return ['ld a,l',('add a,12' if sy else 'sub 12'),'ld l,a',f'jr nc,{name}',f'{"inc" if sy else "dec"} h',name+':']
-    for major in range(2):
-        for sx in range(2):
-            for sy in range(2):
-                n=f'__gfx_wf_octant_{major}{sx}{sy}'
-                code=[n+':','ld a,(__gfx_ink)','or a','ld a,d',f'jr z,{n}_erase','or (hl)',f'jr {n}_store',n+'_erase:','cpl','and (hl)',n+'_store:','ld (hl),a',"ex af,af'",'dec a',f'jp z,{n}_done',"ex af,af'",'ld a,b','add a,c','cp e',f'jr c,{n}_straight','sub e','ld b,a']
-                code+=(xstep(sx,n+'_minor') if major else ystep(sy,n+'_minor'))
-                code+=[f'jr {n}_major',n+'_straight:','ld b,a',n+'_major:']
-                code+=(ystep(sy,n+'_step') if major else xstep(sx,n+'_step'))
-                code+=[f'jp {n}',n+'_done:',"ex af,af'",'jp __gfx_wf_raster_return']
-                result.append('\n'.join(line if line.endswith(':') else '        '+line for line in code))
+    table=[]
+    for ink in ([1] if black_only else range(2)):
+        for major in range(2):
+            for sx in range(2):
+                for sy in range(2):
+                    n=f'__gfx_wf_octant_{ink}{major}{sx}{sy}';table.append(n)
+                    code=[n+':','ld a,d']+(['or (hl)'] if ink else ['cpl','and (hl)'])+['ld (hl),a',"ex af,af'",'dec a',f'jp z,{n}_done',"ex af,af'",'ld a,b','add a,c','cp e',f'jr c,{n}_straight','sub e','ld b,a']
+                    code+=(xstep(sx,n+'_minor') if major else ystep(sy,n+'_minor'))
+                    code+=[f'jr {n}_major',n+'_straight:','ld b,a',n+'_major:']
+                    code+=(ystep(sy,n+'_step') if major else xstep(sx,n+'_step'))
+                    code+=[f'jp {n}',n+'_done:',"ex af,af'",'jp __gfx_wf_raster_return']
+                    result.append('\n'.join(line if line.endswith(':') else '        '+line for line in code))
+    if black_only:
+        import re
+        result[0]=re.sub(r'        ld a,\(__gfx_ink\)\n        or a\n        jr z,(__gfx_wf_raster_L[0-9]+)\n        ld a,c\n        or 8\n        ld c,a\n\1:\n','',result[0])
+    result.append('__gfx_wf_octants: dw '+','.join(table))
     return result
+
+
+def _axis_raster(black_only=False):
+    from .solid_runtime import _basic_span
+    code="""__gfx_wf_axis_h:
+        ld b,(ix+10)
+        ld c,(ix+6)
+        ld a,b
+        cp c
+        jr c,__gfx_wf_axis_h_ordered
+        ld b,c
+        ld c,a
+__gfx_wf_axis_h_ordered:
+        inc c
+        ld l,(ix+8)
+        ld h,0
+        add hl,hl
+        add hl,hl
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,de
+        ld de,0x9340
+        add hl,de
+        ld a,(__gfx_ink)
+        neg
+        ld d,a
+        call __gfx_wf_axis_span
+        jp __gfx_wf_raster_return
+__gfx_wf_axis_v:
+        ld b,(ix+8)
+        ld c,(ix+4)
+        ld a,b
+        cp c
+        jr c,__gfx_wf_axis_v_ordered
+        ld b,c
+        ld c,a
+__gfx_wf_axis_v_ordered:
+        ld a,c
+        sub b
+        inc a
+        push af
+        ld l,b
+        ld h,0
+        add hl,hl
+        add hl,hl
+        ld d,h
+        ld e,l
+        add hl,hl
+        add hl,de
+        ld a,(ix+10)
+        srl a
+        srl a
+        srl a
+        ld e,a
+        ld d,0
+        add hl,de
+        ld de,0x9340
+        add hl,de
+        push hl
+        ld a,(ix+10)
+        and 7
+        ld b,a
+        inc b
+        ld a,128
+__gfx_wf_axis_v_mask:
+        dec b
+        jr z,__gfx_wf_axis_v_ready
+        rrca
+        jr __gfx_wf_axis_v_mask
+__gfx_wf_axis_v_ready:
+        ld c,a
+        pop hl
+        pop af
+        ld b,a
+        ld de,12
+        ld a,(__gfx_ink)
+        or a
+        jr z,__gfx_wf_axis_v_off
+__gfx_wf_axis_v_on:
+        ld a,c
+        or (hl)
+        ld (hl),a
+        add hl,de
+        djnz __gfx_wf_axis_v_on
+        jp __gfx_wf_raster_return
+__gfx_wf_axis_v_off:
+        ld a,c
+        cpl
+        and (hl)
+        ld (hl),a
+        add hl,de
+        djnz __gfx_wf_axis_v_off
+        jp __gfx_wf_raster_return
+"""
+    if black_only:
+        code=code.replace('        ld a,(__gfx_ink)\n        neg','        ld a,255')
+        code=code.replace('        ld a,(__gfx_ink)\n        or a\n        jr z,__gfx_wf_axis_v_off','')
+        code=code[:code.index('__gfx_wf_axis_v_off:')]
+    return code+_basic_span().replace('__gfx_solid_fast_span','__gfx_wf_axis_span')

@@ -5,6 +5,23 @@ from .list_runtime import add,sub,word
 def invoke(name,*args):return ('call','__gfx_'+name,*args)
 
 class NativeRoutine(ShapeRoutine):
+    def expr(self,value):
+        # Native geometry uses many pointer fields and scalar temporaries.
+        # Load the second operand directly instead of routing it through HL
+        # and spilling the first operand to the hardware stack.
+        if isinstance(value,tuple) and value[0]=='word' and isinstance(value[1],str) and value[1].startswith('@'):
+            self.emit(f'ld hl,({value[1][1:]})');return
+        if isinstance(value,tuple) and value[0] in {'+','-'}:
+            left,right=value[1:]
+            if isinstance(right,int) and not (value[0]=='+' and 0<=right<=3):
+                self.expr(left);self.emit(f'ld de,{right&65535}')
+                self.emit(*(['add hl,de'] if value[0]=='+' else ['or a','sbc hl,de']));return
+            if isinstance(right,str) and right in self.slots and left!=right:
+                self.expr(left);offset=self.slots[right]
+                self.emit(f'ld e,(ix{offset:+d})',f'ld d,(ix{offset+1:+d})')
+                self.emit(*(['add hl,de'] if value[0]=='+' else ['or a','sbc hl,de']));return
+        super().expr(value)
+
     def load(self,name,pointer,count=2):
         # Multiword locals use contiguous little-endian slots. Copy the block
         # once instead of rebuilding both addresses for every word.

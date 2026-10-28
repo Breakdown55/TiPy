@@ -74,15 +74,16 @@ def batch_lines(tree):
             if n.get('kind')=='call' and n['name']=='camera':n['name']='__tipy_native_cam_fast_look'
 
 
-def vertex_program(vertices,label):
+def vertex_program(vertices,label,*,basis="__gfx_wf_basis",center=None,bounds=None):
     """Specialize constant coordinate products and share them across vertices."""
+    if center:return mesh_vertex_program(vertices,label,basis,bounds)
     terms={};code=[label+':']
     def emit(*lines):code.extend('        '+line for line in lines)
     for row in range(3):
         for axis in range(3):
             for magnitude in sorted({abs(v[axis]) for v in vertices if v[axis]}):
                 index=len(terms);terms[row,axis,magnitude]=index
-                emit(f'ld hl,(__gfx_wf_basis+{row*6+axis*2})')
+                emit(f'ld hl,({basis}+{row*6+axis*2})')
                 if magnitude!=1:
                     emit('ld d,h','ld e,l')
                     for bit in bin(magnitude)[3:]:
@@ -100,3 +101,55 @@ def vertex_program(vertices,label):
             emit(f'ld (__gfx_wf_records+{i*12+row*2}),hl')
     emit('ret');code.append(label+'_terms: defs '+str(len(terms)*2)+',0')
     return '\n'.join(code)
+
+
+def mesh_vertex_program(vertices,label,basis,bounds=None):
+    """Share constant products; a compact plan reuses one native sum kernel."""
+    terms={};code=[label+':'];plan=[]
+    def emit(*lines):code.extend('        '+line for line in lines)
+    if bounds:
+        emit('ld a,(__gfx_mesh_blank)','or a',f'jp z,{label}_opaque','ld a,(__gfx_mesh_identity_active)','or a',f'jp z,{label}_opaque')
+        for axis,(lo,hi) in enumerate(bounds):
+            emit(f'ld hl,(__gfx_mesh_relative+{axis*2})',f'ld de,{(hi-1)&65535}','add hl,de',f'ld de,{hi-lo-1}','or a','sbc hl,de',f'jp nc,{label}_opaque')
+        emit('ld a,1','ld (__gfx_solid_transparent_white),a');code.append(label+'_opaque:')
+    # Index zero is a shared zero product for absent coordinate components.
+    for row in range(3):
+        for axis in range(3):
+            for value in sorted({v[axis] for v in vertices if v[axis]}):
+                terms[row,axis,value]=len(terms)+1
+                emit(f'ld hl,({basis}+{row*6+axis*2})')
+                magnitude=abs(value)
+                if magnitude!=1:
+                    emit('ld d,h','ld e,l')
+                    for bit in bin(magnitude)[3:]:
+                        emit('add hl,hl')
+                        if bit=='1':emit('add hl,de')
+                if value<0:emit('xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
+                emit(f'ld ({label}_terms+{terms[row,axis,value]*2}),hl')
+    for vertex in vertices:
+        for row in range(3):plan.extend(terms[row,axis,value] if value else 0 for axis,value in enumerate(vertex))
+    emit(f'ld hl,{label}_terms',f'ld de,{label}_plan',f'ld a,{len(vertices)}','jp __gfx_mesh_vertex_plan')
+    code += [label+'_terms: defs '+str((len(terms)+1)*2)+',0',label+'_plan: db '+','.join(map(str,plan))]
+    return '\n'.join(code)
+
+
+def box_surface_bounds(vertices,records,edges):
+    """Prove that patches are disjoint subsets of a box boundary."""
+    bounds=[(min(v[a] for v in vertices),max(v[a] for v in vertices)) for a in range(3)]
+    if any(lo==hi for lo,hi in bounds):return None
+    if any(any(v[a] not in bounds[a] for a in range(3)) for v in vertices):return None
+    planes={};outline={tuple(sorted(e)) for e in edges}
+    for ids,shade,normal in records:
+        plane=next(((a,value) for a in range(3) for value in bounds[a] if all(vertices[i][a]==value for i in ids)),None)
+        if plane is None:return None
+        # Every patch boundary remains explicitly inked over rounding seams.
+        if any(tuple(sorted((ids[j-1],i))) not in outline for j,i in enumerate(ids)):return None
+        existing=planes.setdefault(plane,[])
+        if existing:
+            if len(existing)>1 or len(ids)!=3 or len(existing[0])!=3:return None
+            shared=set(ids)&set(existing[0]);combined=set(ids)|set(existing[0])
+            if len(shared)!=2 or len(combined)!=4 or len({tuple(vertices[i]) for i in combined})!=4:return None
+            u,v=[vertices[i] for i in shared]
+            if sum(x!=y for x,y in zip(u,v))!=2:return None
+        existing.append(ids)
+    return bounds

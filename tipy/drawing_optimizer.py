@@ -114,3 +114,52 @@ def optimize_drawing(tree):
 
     tree["body"] = transform(tree["body"])
     return tree
+
+
+def annotate_blank_meshes(tree):
+    """A clear reaches a draw only through operations proven not to draw."""
+    from .optimization_pipeline import walk
+    pure={f['label'] for f in tree['body'] if f.get('kind')=='function' and 'finite_table' in f}
+    harmless={'expression_statement','assign','declare','collect','number','boolean','string','name','geometry_data','address','global_value','void_constant','constant_list','add','subtract','multiply','floor_divide','modulo','compare','and','or','not','negate','invert','bit_and','bit_or','bit_xor','shift_left','shift_right','power','list','tuple','dict','set','index','length','key_down','native','builtin'}
+    for node in walk(tree):
+        if node.get('kind')=='native_graphics' and node.get('name')=='mesh_draw':node['blank_framebuffer']=False
+    def expr(node,blank):
+        if isinstance(node,list):
+            for value in node:blank=expr(value,blank)
+            return blank
+        if not isinstance(node,dict):return blank
+        if node.get('kind')=='conditional':
+            state=expr(node['condition'],blank)
+            yes=expr(node['body'],state);no=expr(node['alternative'],state)
+            return yes and no
+        for key,value in node.items():
+            if key not in {'blank_framebuffer','body','alternative','final'}:blank=expr(value,blank)
+        kind=node.get('kind')
+        if kind=='call' and node.get('symbol') not in pure:return False
+        if kind in {'closure_call','text_print','text_input','pixel_batch','native_matrix'}:return False
+        if kind=='graphics':return True if node['name']=='clear' else blank if node['name']=='render' else False
+        if kind=='native_graphics':
+            if node['name']=='mesh_draw':
+                arg=node['arguments'][12]
+                if arg.get('kind')=='name':arg=next((e['value'] for e in node.get('evaluations',[]) if e['slot']['label']==arg.get('label')),arg)
+                node['blank_framebuffer']=bool(blank and arg.get('kind')=='boolean' and arg['value'])
+                return False
+            if not node['name'].startswith(('mesh_','solid_')):return False
+        if kind is not None and kind not in harmless|{'call','native_graphics','graphics'}:return False
+        return blank
+    def block(body,blank):
+        for node in body:
+            if node.get('unreachable'):continue
+            kind=node.get('kind')
+            if kind=='function':block(node['body'],False);continue
+            if kind=='if':
+                blank=expr(node['condition'],blank)
+                yes=block(node['body'],blank);no=block(node['alternative'],blank);blank=yes and no
+            elif kind in {'while','for'}:
+                block(node['body'],False);blank=False
+            elif isinstance(node.get('body'),list):
+                block(node['body'],False);blank=False
+            elif kind in {'return','break','continue','raise'}:return False
+            else:blank=expr(node,blank)
+        return blank
+    block(tree['body'],False)

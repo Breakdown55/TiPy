@@ -12,7 +12,7 @@ def _copy(r,src,dst,count=12):
     r.expr(src);r.emit('push hl');r.expr(dst);r.emit('ex de,hl','pop hl',f'ld bc,{count}','ldir')
 
 
-def routines(extended=False,culling=True,depth_enabled=True,dynamic_depth=False,quads=False):
+def routines(extended=False,culling=True,depth_enabled=True,dynamic_depth=False,quads=False,blank_spans=False,fast_spans=True):
     out=['__gfx_solid_guard_before: db 165\n__gfx_solid_depth: defs 6144,0\n__gfx_solid_guard_after: db 90','__gfx_solid_flags: defs 64,0',
          '__gfx_solid_light_vector: dw -68,137,205\n__gfx_solid_ambient: dw 3\n__gfx_solid_direction_enabled: dw 1',
          '''__gfx_solid_poly_a: defs 144,0
@@ -59,6 +59,17 @@ __gfx_solid_pattern: db 0''']
     r.if_(('ne','negative',0),lambda:r.ret(sub('a','b')));r.ret(add('a','b'));out.append(r.finish())
 
     r=NativeRoutine('solid_cut',('outside','inside','out','axis','bound'),('x','y','n','d','other'))
+    if not depth_enabled:
+        wide,positive,forward,denominator=r.label(),r.label(),r.label(),r.label()
+        r.expr('axis');r.emit('ld a,l','cp 4',f'jp z,{wide}')
+        r.expr(word(add('outside','axis')));r._store('x')
+        r.emit(f"ld e,(ix{r.slots['bound']:+d})",f"ld d,(ix{r.slots['bound']+1:+d})",'ld a,h','xor 128','ld h,a','ld a,d','xor 128','ld d,a','or a','sbc hl,de','push af',f'jr nc,{positive}',
+            'xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(positive);r._store('n')
+        r.expr(word(add('inside','axis')));r.emit(f"ld e,(ix{r.slots['x']:+d})",f"ld d,(ix{r.slots['x']+1:+d})",'or a','sbc hl,de','pop af',f'jr c,{forward}',
+            'xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(forward);r._store('d')
+        r.set('other',sub(14,'axis'))
+        r.write(add('out','other'),invoke('wf_lerp',word(add('outside','other')),word(add('inside','other')),'n','d'))
+        r.write(add('out','axis'),'bound');r.ret();r.mark(wide)
     _copy(r,'outside','out')
     r.set('x',word(add('outside','axis')));r.set('y',word(add('inside','axis')))
     r.if_(('slt','x','y'),lambda:(r.set('n',sub('bound','x')),r.set('d',sub('y','x'))),lambda:(r.set('n',sub('x','bound')),r.set('d',sub('x','y'))))
@@ -104,8 +115,8 @@ __gfx_solid_pattern: db 0''']
         r.if_(('eq','n',2),span);r.set('y',add('y',1))
     r.while_(('ult','y','end'),row);r.ret();out.append(r.finish())
     if not depth_enabled or dynamic_depth:
-        out.extend(['__gfx_solid_chain_x: defs 128,0',_flat_polygon('solid_flat_span_row' if depth_enabled else 'solid_span_row')])
-    out.append(_draw(extended,culling,depth_enabled,dynamic_depth,quads))
+        out.extend(['__gfx_solid_chain_x: defs 64,0',_fast_span() if fast_spans else _basic_span(),_flat_polygon(blank_spans=blank_spans)])
+    out.append(_draw(extended,culling,depth_enabled,dynamic_depth,quads,blank_spans))
     if not depth_enabled:
         out[0]=''
         out=[('__gfx_solid_clear:\n        ret' if s.startswith('__gfx_solid_clear:') else s) for s in out]
@@ -273,6 +284,76 @@ __gfx_solid_span_last_masks: db 128,192,224,240,248,252,254,255
 """
 
 
+def _basic_span():
+    source=_flat_span()
+    start=source.index('        push hl\n        ld a,c\n        dec a')
+    end=source.index('        ld a,(__gfx_solid_pattern)',start)
+    tail=source[end:].replace('        ld a,(__gfx_solid_pattern)','        ex af,af\'')
+    prefix="""__gfx_solid_fast_span:
+        ld a,c
+        sub b
+        ret z
+        ret c
+        ld a,d
+        ex af,af'
+        ld a,b
+        srl a
+        srl a
+        srl a
+        ld e,a
+        ld d,0
+        add hl,de
+"""
+    return (prefix+source[start:end]+tail).replace('__gfx_solid_span_','__gfx_solid_fast_span_')
+
+
+def _fast_span():
+    # Two aligned pages map x directly to (mask, byte index), removing all
+    # per-row shifts and variable pointer arithmetic from span setup.
+    source=_basic_span();tail=source[source.index('        ld a,b\n        or a'):source.index('__gfx_solid_fast_span_first_masks:')]
+    prefix="""__gfx_solid_fast_span:
+        ld a,c
+        sub b
+        ret z
+        ret c
+        ld a,d
+        ex af,af'
+        push hl
+        ld a,b
+        add a,a
+        ld l,a
+        ld h,__gfx_solid_fast_span_tables >> 8
+        ld d,(hl)
+        inc hl
+        ld b,(hl)
+        ld a,c
+        add a,a
+        ld l,a
+        inc h
+        ld e,(hl)
+        inc hl
+        ld c,(hl)
+        ld a,c
+        sub b
+        ld c,a
+        pop hl
+        ld a,l
+        add a,b
+        ld l,a
+        jr nc,__gfx_solid_fast_span_address
+        inc h
+__gfx_solid_fast_span_address:
+        ld b,c
+        ex af,af'
+        ld c,a
+"""
+    first=[];last=[]
+    for x in range(128):
+        first.extend((255>>(x&7),x>>3))
+        last.extend(((255<<(7-((x-1)&7)))&255,((x-1)&255)>>3))
+    return prefix+tail+'__gfx_solid_fast_span_tables: db '+','.join(map(str,first+last))
+
+
 def _edge_dda():
     r=NativeRoutine('solid_edge_setup',('a','b','out'),('ya','yb','d','v','x0','x1','q0','q1','negative'))
     r.set('ya',word(add('a',8)));r.set('yb',word(add('b',8)))
@@ -336,7 +417,7 @@ def _span_setup(r):
     return t.code
 
 
-def _flat_polygon(row_name='solid_span_row'):
+def _flat_polygon(row_name='solid_span_row',blank_spans=False):
     """Walk the two monotone chains of a convex clipped polygon.
 
     The first chain stores one intersection per row; the second emits spans
@@ -344,7 +425,13 @@ def _flat_polygon(row_name='solid_span_row'):
     Scanline coherence: graphics.stanford.edu/courses/cs248-08/scan/scan1.html
     """
     r=NativeRoutine('solid_flat_polygon',('poly','count','shade'),
-                    ('first','last','top_point','bottom_point','top','bottom','p','next','chain','delta','ya','yb','x0','x1','step','negative'))
+                    ('first','last','top_point','bottom_point','top','bottom','p','next','stride','stride_mask'))
+    r.set('stride',1)
+    if blank_spans:
+        ordinary,twice=r.label(),r.label();r.emit('ld a,(__gfx_solid_transparent_white)','or a',f'jr z,{ordinary}')
+        r.expr('shade');r.emit('ld a,l','cp 12',f'jr c,{ordinary}','cp 15',f'jr c,{twice}')
+        r.set('stride',4);r.emit(f'jr {ordinary}');r.mark(twice);r.set('stride',2);r.mark(ordinary)
+    r.expr(sub('stride',1));r._store('stride_mask')
     r.set('top_point',0);r.set('bottom_point',0)
     extent,next_top,next_bottom,advance=(r.label() for _ in range(4))
     r.expr('count');r.emit('ld b,l','ld c,0');r.expr('poly');r.emit('ld de,8','add hl,de','ld d,64','ld e,0')
@@ -355,41 +442,75 @@ def _flat_polygon(row_name='solid_span_row'):
     r.if_(('uge','top','bottom'),lambda:r.ret())
     for point in ('top_point','bottom_point'):
         r.expr(point);r.emit('add hl,hl','add hl,hl','ld d,h','ld e,l','add hl,hl','add hl,de','push hl');r.expr('poly');r.emit('pop de','add hl,de');r._store(point)
-    r.set('first','poly');r.set('last',add('poly',invoke('mesh_imul',sub('count',1),12)));r.set('chain',0)
-    def chain():
-        r.set('p','top_point');r.set('delta',12)
-        r.if_(('ne','chain',0),lambda:r.set('delta',-12))
-        def edge():
-            r.set('next',add('p','delta'))
-            r.if_(('ult','next','first'),lambda:r.set('next','last'))
-            r.if_(('ult','last','next'),lambda:r.set('next','first'))
-            r.set('ya',word(add('p',8)));r.set('yb',word(add('next',8)))
-            def active():
-                for n,point in (('x0','p'),('x1','next')):
-                    r.expr(word(add(point,6)));r.emit('ld h,l','ld l,0');r._store(n)
-                r.set('negative',0)
-                r.if_(('ult','x1','x0'),lambda:(r.set('negative',1),r.set('step',sub('x0','x1'))),lambda:r.set('step',sub('x1','x0')))
-                r.expr(sub('yb','ya'));r.emit('ld b,h','ld c,l');r.expr('step');r.emit('ld de,0','call __gfx_wf_udiv');r._store('step')
-                r.if_(('ne','negative',0),lambda:r.set('step',sub(0,'step')))
-                r.expr('ya');r.emit('add hl,hl','ld de,__gfx_solid_chain_x','add hl,de','push iy','push hl','pop iy')
-                r.expr('step');r.emit('sra h','rr l','push hl');r.expr('x0');r.emit('pop de','add hl,de','push hl')
-                r.expr(sub('yb','ya'));r.emit('ld b,l');r.expr('ya');r.emit('ld c,l');r.expr('step');r.emit('ld d,h','ld e,l','pop hl')
-                store,fill,swap,ordered,done=(r.label() for _ in range(5))
-                r.emit(f"ld a,(ix{r.slots['chain']:+d})",'or a',f'jr nz,{fill}')
-                r.mark(store);r.emit('ld (iy+0),l','ld (iy+1),h','inc iy','inc iy','add hl,de',f'djnz {store}',f'jr {done}')
-                r.mark(fill);r.emit('push bc','push de','push hl','ld a,c',"ex af,af'",'ld e,(iy+0)','ld d,(iy+1)',
-                    'ld a,h','cp d',f'jr c,{ordered}',f'jr nz,{swap}','ld a,l','cp e',f'jr c,{ordered}')
-                r.mark(swap);r.emit('ex de,hl');r.mark(ordered)
-                r.emit('ld a,l','add a,127','ld a,h','adc a,0','ld b,a','ld a,e','add a,127','ld a,d','adc a,0','ld c,a',
-                    "ex af,af'",'ld d,a',f"ld e,(ix{r.slots['shade']:+d})",f'call __gfx_{row_name}',
-                    'pop hl','pop de','pop bc','add hl,de','inc c','inc iy','inc iy',f'djnz {fill}')
-                r.mark(done);r.emit('pop iy')
-            r.if_(('ult','ya','yb'),active);r.set('p','next')
-        r.while_(('ne','p','bottom_point'),edge);r.set('chain',add('chain',1))
-    r.while_(('ult','chain',2),chain);r.ret();return r.finish()
+    r.set('first','poly')
+    r.expr('count');r.emit('dec hl','add hl,hl','add hl,hl','ld d,h','ld e,l','add hl,hl','add hl,de','push hl');r.expr('poly');r.emit('pop de','add hl,de');r._store('last')
+    # Both chains are monotone after viewport clipping: y and x endpoints
+    # fit in bytes. Only the interpolated x coordinate needs Q8 precision.
+    for chain in range(2):
+        r.set('p','top_point')
+        edge,wrap,selected,horizontal,nonzero,positive,stepped,done=(r.label() for _ in range(8))
+        r.mark(edge)
+        r.expr('p');r.emit('push hl');r.expr('first' if chain else 'last');r.emit('pop de','or a','sbc hl,de',f'jr z,{wrap}',
+            'ex de,hl',f'ld de,{-12 if chain else 12}','add hl,de',f'jr {selected}')
+        r.mark(wrap);r.expr('last' if chain else 'first');r.mark(selected);r._store('next')
+        r.emit('push iy');r.expr('p');r.emit('push hl','pop iy')
+        r.expr('next');r.emit('ld de,8','add hl,de','ld a,(hl)','ld c,a','ld a,(iy+8)','ld b,a','ld a,c','sub b',f'jp z,{horizontal}')
+        r.emit('ld b,0','ld c,a')
+        r.expr('next');r.emit('ld de,6','add hl,de','ld a,(hl)','sub (iy+6)','push af','push bc')
+        # Preserve the slope sign while dividing its unsigned magnitude.
+        r.emit(f'jr nc,{positive}','neg');r.mark(positive)
+        r.emit('ld h,a','ld l,0','ld de,0','pop bc','ld a,h','or a',f'jr z,{stepped}','call __gfx_wf_udiv')
+        r.mark(stepped);r.emit('pop af',f'jr nc,{nonzero}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(nonzero)
+        r.emit('ld d,h','ld e,l','sra h','rr l','ld a,(iy+6)','add a,h','ld h,a','push hl','push de',
+            'ld c,(iy+8)')
+        r.expr('next');r.emit('ld de,8','add hl,de','ld a,(hl)','sub c','ld b,a','ld l,c','ld h,0','ld de,__gfx_solid_chain_x','add hl,de','push hl','pop iy','pop de','pop hl')
+        if blank_spans:
+            aligned,align,ready=r.label(),r.label(),r.label()
+            r.mark(align);r.emit('ld a,c',f"and (ix{r.slots['stride_mask']:+d})",f"cp (ix{r.slots['stride_mask']:+d})",f'jr z,{aligned}',
+                'add hl,de','inc c','inc iy','dec b',f'jp z,{horizontal}',f'jr {align}')
+            r.mark(aligned);r.emit(f"ld a,(ix{r.slots['stride']:+d})",'cp 1',f'jr z,{ready}','sla e','rl d','cp 2')
+            four=r.label();r.emit(f'jr nz,{four}','inc b','srl b',f'jr {ready}');r.mark(four)
+            r.emit('sla e','rl d','ld a,b','add a,3','srl a','srl a','ld b,a');r.mark(ready)
+        store,fill,swap,ordered,finish=(r.label() for _ in range(5))
+        if chain==0:
+            if blank_spans:
+                r.emit('push hl','push de','push bc');r.expr('stride');r.emit('push hl','exx','pop de','exx','pop bc','pop de','pop hl')
+            r.mark(store);r.emit('ld a,l','add a,127','ld a,h','adc a,0','ld (iy+0),a')
+            if blank_spans:r.emit('exx','add iy,de','exx')
+            else:r.emit('inc iy')
+            r.emit('add hl,de',f'djnz {store}')
+        else:
+            # Keep the framebuffer row in the alternate register bank and
+            # pin four Bayer rows in IX for this edge. No per-row address or
+            # shade lookup remains in the scanline kernel.
+            r.emit('push ix','push hl','push de','push bc','ld l,c','ld h,0','add hl,hl','add hl,hl','ld d,h','ld e,l','add hl,hl','add hl,de','ld de,0x9340','add hl,de','exx')
+            r.expr('shade');r.emit('add hl,hl','add hl,hl','ld de,__gfx_solid_patterns','add hl,de','push hl','pop ix','pop bc','pop de','pop hl')
+            phases=[r.label() for _ in range(4)];two=[r.label(),r.label()];four=r.label();finish=r.label()
+            if blank_spans:
+                # IX now addresses patterns. Read the saved stride from the
+                # frame pointer held on the stack, before selecting row loops.
+                r.emit('push hl','push de','push ix','ld hl,6','add hl,sp','ld e,(hl)','inc hl','ld d,(hl)','push de','pop ix',f"ld a,(ix{r.slots['stride']:+d})",'pop ix','pop de','pop hl','cp 4',f'jp z,{four}','cp 2')
+                choose=r.label();r.emit(f'jr nz,{choose}','ld a,c','and 2',f'jp z,{two[0]}',f'jp {two[1]}');r.mark(choose)
+            r.emit('ld a,c','and 3',f'jp z,{phases[0]}','dec a',f'jp z,{phases[1]}','dec a',f'jp z,{phases[2]}',f'jp {phases[3]}')
+            variants=[(phases,list(range(4)),1)]
+            if blank_spans:variants.extend([(two,[1,3],2),([four],[3],4)])
+            for labels,patterns,stride in variants:
+                for phase,(label,pattern) in enumerate(zip(labels,patterns)):
+                    r.mark(label)
+                    r.emit('ld a,l','add a,127','ld a,h','adc a,0','exx','ld c,a','ld b,(iy+0)','ld a,b','cp c')
+                    ordered=r.label();r.emit(f'jr c,{ordered}',f'jr z,{ordered}','ld a,b','ld b,c','ld c,a');r.mark(ordered)
+                    r.emit(f'ld d,(ix+{pattern})','push hl','call __gfx_solid_fast_span','pop hl',f'ld de,{12*stride}','add hl,de','exx','add hl,de')
+                    for _ in range(stride):r.emit('inc iy')
+                    r.emit('dec b',f'jp z,{finish}')
+                    if phase==len(labels)-1:r.emit(f'jp {labels[0]}')
+            r.mark(finish);r.emit('pop ix')
+        r.mark(horizontal);r.emit('pop iy');r.set('p','next')
+        r.expr('bottom_point');r.emit('push hl');r.expr('p');r.emit('pop de','or a','sbc hl,de',f'jp nz,{edge}')
+    r.ret();return r.finish()
 
 
-def _draw(extended,culling,depth_enabled=True,dynamic_depth=False,quads=False):
+
+def _draw(extended,culling,depth_enabled=True,dynamic_depth=False,quads=False,blank_spans=False):
     normal_offset=6 if quads else 4
     r=NativeRoutine('solid_draw',('faces','count','cull','shaded'),('i','face','j','p','n','flags','common','v','shade','poly','other'))
     r.if_(('uge','count',129),lambda:r.fail(14))
@@ -399,16 +520,22 @@ def _draw(extended,culling,depth_enabled=True,dynamic_depth=False,quads=False):
     r.set('face','faces');r.set('i',0)
     def face():
         skip=r.label()
-        r.set('flags',0);r.set('common',63);r.set('n',3)
+        r.set('n',3)
+        r.emit('push iy');r.expr('face');r.emit('push hl','pop iy','ld b,63','ld c,0')
+        def flags(j):
+            r.emit(f'ld l,(iy+{j})','ld h,0','ld de,__gfx_solid_flags','add hl,de','ld a,(hl)','or c','ld c,a','ld a,(hl)','and b','ld b,a')
+        for j in range(3):flags(j)
+        if quads:
+            triangle=r.label();r.emit('ld a,(iy+3)','cp 255',f'jr z,{triangle}');flags(3);r.emit(f"inc (ix{r.slots['n']:+d})");r.mark(triangle)
+        r.emit(f"ld (ix{r.slots['flags']:+d}),c",f"ld (ix{r.slots['flags']+1:+d}),0",'ld a,b','or a')
+        visible=r.label();r.emit(f'jr z,{visible}','pop iy',f'jp {skip}');r.mark(visible)
         def vertex(j):
-            r.set('v',byte(add('@__gfx_solid_flags',byte(add('face',j)))))
-            for name,op in (('flags','or'),('common','and')):
-                r.expr(name);r.emit('ld b,l');r.expr('v');r.emit('ld a,l',op+' b','ld l,a','ld h,0');r._store(name)
-            r.expr(byte(add('face',j)));r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','ld de,__gfx_wf_records','add hl,de');r._store('p')
-            _copy(r,'p',add('@__gfx_solid_poly_a',j*12))
+            r.emit(f'ld l,(iy+{j})','ld h,0','add hl,hl','add hl,hl','ld d,h','ld e,l','add hl,hl','add hl,de','ld de,__gfx_wf_records','add hl,de',
+                f'ld de,__gfx_solid_poly_a+{j*12}','ld bc,12','ldir')
         for j in range(3):vertex(j)
-        if quads:r.if_(('ne',byte(add('face',3)),255),lambda:(vertex(3),r.set('n',4)))
-        r.if_(('ne','common',0),lambda:r.emit(f'jp {skip}'))
+        if quads:
+            triangle=r.label();r.emit('ld a,(iy+3)','cp 255',f'jr z,{triangle}');vertex(3);r.mark(triangle)
+        r.emit('pop iy')
         def cull():
             for j in range(3):r.write(add('@__gfx_solid_normal',j*2),invoke('mesh_dot',add('@__gfx_mesh_norm_view',j*6),add('face',normal_offset),2))
             r.if_(('eq',invoke('solid_facing','@__gfx_solid_normal','@__gfx_solid_poly_a'),0),lambda:r.emit(f'jp {skip}'))
@@ -425,6 +552,8 @@ def _draw(extended,culling,depth_enabled=True,dynamic_depth=False,quads=False):
             r.if_(('slt',16,'v'),lambda:r.set('v',16))
             r.expr(invoke('mesh_imul','v','shade'));r.emit('srl h','rr l','srl h','rr l','srl h','rr l','srl h','rr l');r._store('shade')
         r.if_(('ne','shaded',0),light)
+        if blank_spans:
+            colored=r.label();r.expr('shade');r.emit('ld a,l','cp 16',f'jr nz,{colored}','ld a,(__gfx_solid_transparent_white)','or a',f'jp nz,{skip}');r.mark(colored)
         r.set('poly','@__gfx_solid_poly_a');r.set('other','@__gfx_solid_poly_b')
         def clip(axis,bound,keep):
             r.set('n',invoke('solid_clip','poly','n','other',axis,bound,keep));r.if_(('ult','n',3),lambda:r.emit(f'jp {skip}'))

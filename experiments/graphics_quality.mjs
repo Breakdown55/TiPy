@@ -26,6 +26,7 @@ const source=game.replace('set_render_quality("aggressive")','')
 const names=['Exact','Conservative math','Balanced','Aggressive','Maximum'];
 const results=[];
 for(let quality=0;quality<5;quality++){
+    if(process.env.TIPY_BENCH_QUALITY!==undefined&&quality!==Number(process.env.TIPY_BENCH_QUALITY))continue;
     const m={project:true,quality,optimization:'aggressive',maxSlices:20000,guardGraph:true,trackStack:true,
       afterFrameKeys:Array.from({length:8},(_,i)=>i===7?[15]:[3])};
     execute(source,m);
@@ -34,7 +35,7 @@ for(let quality=0;quality<5;quality++){
     const pixels=m.frames[2];
     savePreview('dist/quality-'+quality+'.pgm',Buffer.concat([Buffer.from('P5\n96 64\n255\n'),Buffer.from(pixels.map(p=>p?0:255))]));
     results.push({quality,name:names[quality],ms,fps:1000/ms,bytes:m.bytes,stack:m.stackBytes,times,
-      difference:quality===0?0:pixels.reduce((n,p,i)=>n+(p!==globalThis.qualityReference[i]),0)});
+      difference:quality===0?0:!globalThis.qualityReference?null:pixels.reduce((n,p,i)=>n+(p!==globalThis.qualityReference[i]),0)});
     if(quality===0)globalThis.qualityReference=pixels;
     console.log(JSON.stringify(results.at(-1)));
 }

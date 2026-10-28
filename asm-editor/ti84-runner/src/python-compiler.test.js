@@ -12,6 +12,8 @@ function execute(source, measurements) {
         : measurements?.optimizeGraphics === false
         ? ['-c','import json,sys; from tipy import compile_source; print(json.dumps(compile_source(sys.stdin.read(), optimize_graphics=False, optimization="reference")))']
         : ['-m','tipy','-','--optimization', measurements?.optimization ?? 'reference','--show','all']
+    if(measurements?.genericVertices)args[1]='import tipy.project as _p; _original=_p.generate; _p.generate=lambda tree,symbols: _original({**tree,"mesh_vertices_disabled":True},symbols); '+args[1]
+    if(measurements?.opaqueReference)args[1]='from tipy import drawing_optimizer as _drawing; _drawing.annotate_blank_meshes=lambda tree: None; '+args[1]
     const processResult = spawnSync(python,args,{
         cwd: resolve('../..'), input: measurements?.assets?JSON.stringify({...measurements.assets,'main.tip':source}):source, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024
     })
@@ -19,8 +21,19 @@ function execute(source, measurements) {
     assert.equal(processResult.status,0,processResult.stderr)
     const result = JSON.parse(processResult.stdout)
     const runner = new Ti84Runner(result.assembly)
+    const spanTable=runner.assembly.asm.scopes[0].symbols.get("__gfx_solid_fast_span_tables")
+    if(spanTable)assert.equal(spanTable.value&255,0,"Span lookup tables must be page aligned")
     let minStack=65535
-    if(measurements?.trackStack){const step=runner.machine.step.bind(runner.machine);runner.machine.step=()=>{if(runner.machine.z80.regs.sp)minStack=Math.min(minStack,runner.machine.z80.regs.sp);return step()}}
+    if(measurements?.trackStack){
+        const step=runner.machine.step.bind(runner.machine),symbols=runner.assembly.asm.scopes[0].symbols
+        const clearStart=symbols.get('__gfx_clear_buffer_begin')?.value,clearEnd=symbols.get('__gfx_clear_buffer_end')?.value
+        runner.machine.step=()=>{
+            const {sp,pc}=runner.machine.z80.regs
+            if(clearStart!==undefined&&pc>=clearStart&&pc<=clearEnd)assert.ok(sp>=0x9340&&sp<=0x9640,'Clear scratch stack stays inside graphics RAM')
+            else if(sp)minStack=Math.min(minStack,sp)
+            return step()
+        }
+    }
     const depth=runner.assembly.asm.scopes[0].symbols.get('__gfx_solid_depth')?.value
     const depthGuards=depth===undefined?null:[runner.machine.memory[depth-1],runner.machine.memory[depth+6144]]
     if(measurements?.guardGraph){runner.machine.memory[0x933f]=0xa5;runner.machine.memory[0x9640]=0x5a}
@@ -694,7 +707,9 @@ test('Unrolled unsigned kernels preserve full results, remainders and BC',()=>{
     for(const n of [0,1,127,128,255,256,257,32767,32768,65535,65536,1048575,16777215,4294901759])
         for(const d of [1,2,3,7,63,64,127,128,255,256,1024,65535])
             if(Math.floor(n/d)<=65535)divisions.push([n,d])
+    for(const d of [127,128,255,256,257,1024,8191,32768,65535])for(const q of [0,1,15,255,256,511,512,4095,65535])divisions.push([q*d+(d>>1),d])
     const products=[[0,65535],[65535,0],[1,65535],[255,256],[256,255],[32768,32768],[65535,65535],[49153,20387]]
+    for(const a of [1,2,15,16,255,256,257,3840,4095,4096,65535])for(const b of [1,127,128,255,256,257,32768,65535])products.push([a,b])
     const code=['org 0x9d95'],data=[]
     for(const [i,[n,d]] of divisions.entries()){
         code.push(`ld hl,${n&65535}`,`ld de,${Math.floor(n/65536)}`,`ld bc,${d}`,'call __gfx_wf_udiv',`ld (div_q_${i}),hl`,`ld (div_r_${i}),de`,`ld (div_bc_${i}),bc`)
@@ -2833,4 +2848,100 @@ test('Precomputed directional lights retain registry capacity and validation',()
     assert.throws(()=>execute('directional_light(0,0,0)'),/direction cannot be zero/)
     assert.throws(()=>execute('directional_light(2048,0,0)'),/Light argument must be/)
     assert.throws(()=>execute('directional_light(1,0,0,17)'),/Light argument must be/)
+})
+
+
+test('PUSH buffer clear preserves interrupt state, stack, guards and index registers',()=>{
+    const code=spawnSync(process.env.TIPY_PYTHON||'python',['-c','from tipy.graphics_runtime import graphics_assembly; print(graphics_assembly({"clear"}))'],{cwd:resolve('../..'),encoding:'utf8'})
+    assert.equal(code.status,0,code.stderr)
+    for(const enabled of [0,1]){
+        const r=new Ti84Runner('        org 0x9d95\n        call __gfx_clear\n        ret\n'+code.stdout)
+        r.machine.memory.fill(255,0x9340,0x9640);r.machine.memory[0x933f]=165;r.machine.memory[0x9640]=90
+        r.machine.z80.regs.iff1=enabled;r.machine.z80.regs.iff2=enabled
+        for(let i=0;i<50&&!r.done;i++)r.runSlice()
+        assert.ok(r.done);assert.ok(r.machine.memory.slice(0x9340,0x9640).every(value=>value===0))
+        assert.equal(r.machine.memory[0x933f],165);assert.equal(r.machine.memory[0x9640],90)
+        assert.equal(r.machine.z80.regs.sp,0);assert.equal(r.machine.z80.regs.ix,0);assert.equal(r.machine.z80.regs.iy,0x89f0)
+        assert.equal(r.machine.z80.regs.iff1,enabled);assert.equal(r.machine.z80.regs.iff2,enabled)
+        assert.ok(r.machine.tStateCount<6000)
+    }
+})
+
+test('Compiled small-model transforms match the general vertex loop across matrices and cameras',()=>{
+    const draws=['draw_mesh(model,cull=False,depth_test=False)','draw_mesh(model,x=3,y=-2,z=4,yaw=31,pitch=17,roll=9,size=301,cull=False,depth_test=False)',
+        'camera(0,0,20,0,0,0)\ndraw_mesh(model,cull=False,depth_test=False)','camera(-10,8,25,0,0,0)\ndraw_mesh(model,yaw=91,size=512,cull=False,depth_test=False)']
+    const solidCube=meshCube.replace('])\n','],faces=[(0,1,2),(0,2,3),(4,6,5),(4,7,6),(0,4,5),(0,5,1),(3,2,6),(3,6,7),(0,3,7),(0,7,4),(1,5,6),(1,6,2)])\n')
+    const source=solidCube+'init_camera(75,2,120)\n'+draws.map(draw=>'clear()\n'+draw+'\nrender()').join('\n')
+    const fast={project:true,optimization:'aggressive',guardGraph:true,trackStack:true},reference={...fast,genericVertices:true}
+    execute(source,fast);execute(source,reference)
+    assert.deepEqual(fast.frames,reference.frames)
+    assert.ok(fast.assembly.includes('__gfx_mesh_vertex_plan:'));assert.ok(!reference.assembly.includes('__gfx_mesh_vertex_plan:'))
+    const table=fast.assembly.includes('__gfx_solid_fast_span_tables:')
+    if(table){
+        const r=new Ti84Runner(fast.assembly)
+        assert.equal(r.assembly.asm.scopes[0].symbols.get('__gfx_solid_fast_span_tables').value&255,0)
+    }
+})
+
+test('Sparse blank-box rasterization preserves opaque fills, boundaries and subsequent meshes',()=>{
+    const prefix=readFileSync(resolve('../../examples/lumen_run.tip'),'utf8').split('# Small parabolic')[0]
+    const scene='def scene(int x,int y,int z,int tx,int ty,int tz,int brightness) -> void:\n    clear()\n    camera(x,y,z,tx,ty,tz)\n    no_lights()\n    ambient_light(brightness)\n    draw_mesh(room,cull=False,depth_test=False,outline=True)\n    draw_mesh(beacon,x=2,y=-8,z=-12,cull=False,shaded=False,depth_test=False,outline=True)\n    render()\n'
+    const poses=[[0,0,0,0,0,-10],[-17,0,17,0,4,-17],[17,0,17,-17,-3,0],[0,9,0,0,0,-12],[0,-7,0,5,0,-12],[18,0,0,0,0,-10],[25,0,0,0,0,-10]]
+    const source=prefix+scene+'init_camera(75,2,90)\nfor brightness in range(12,17):\n'+poses.map(p=>'    scene('+p.join(',')+',brightness)').join('\n')
+    const fast={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:40000},reference={...fast,opaqueReference:true}
+    execute(source,fast);execute(source,reference)
+    assert.equal(fast.frames.length,35)
+    assert.ok(fast.assembly.includes('__gfx_solid_transparent_white:'))
+    assert.deepEqual(fast.frames,reference.frames)
+})
+
+
+test('Finite function tables preserve signed periodic input and the caller stack',()=>{
+    const source='def wave(int a) -> int:\n    a=a&31\n    if a>=16:\n        return -(a-16)*(a-16)\n    return a*a\nint offset=int(key_down("left"))\nint total=0\nfor a in range(-40,40):\n    total+=wave(a+offset)\npixel_on(total&63,0)\nrender()'
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true}
+    const values=execute(source,m)
+    let total=0
+    for(let i=-40;i<40;i++){const a=i&31;total+=a>=16?-(a-16)*(a-16):a*a}
+    assert.equal(values.total,((total+32768)&65535)-32768)
+    assert.ok(m.assembly.includes('__fn_0_table:'))
+    assert.ok(m.report.some(pass=>pass.pass==='finite-function-tables'&&pass.specialized===1))
+})
+
+test('Level camera reciprocal roots stay within one Q8 unit and reject other domains',()=>{
+    const kernels=spawnSync(process.env.TIPY_PYTHON||'python',['-c','from tipy.mesh_runtime import _level_fast; from tipy.wireframe_runtime import routines; print(_level_fast()); print(next(s for s in routines(1) if s.startswith("__gfx_wf_umul:")))'],{cwd:resolve('../..'),encoding:'utf8'})
+    assert.equal(kernels.status,0,kernels.stderr)
+    const cases=Array.from({length:64},(_,i)=>[Math.round(16*Math.sin(i*Math.PI/32)),Math.round(16*Math.cos(i*Math.PI/32))])
+    cases.push([0,0],[1,1],[20,20],[-20,20],[120,0],[-120,0],[32767,-32768])
+    const code=['org 0x9d95'],data=[]
+    for(const [i,[x,z]] of cases.entries()){
+        code.push(`ld hl,${x}`,'push hl',`ld hl,${z}`,'push hl','call __gfx_mesh_level_fast','pop bc','pop bc',`ld (level_ok_${i}),hl`)
+        data.push(`level_ok_${i}: dw 0`)
+        for(let j=0;j<9;j++){code.push(`ld hl,(__gfx_mesh_basis+${j*2})`,`ld (level_${i}_${j}),hl`);data.push(`level_${i}_${j}: dw 0`)}
+    }
+    const r=new Ti84Runner([...code.map(line=>'        '+line),'        ret',...data,'__gfx_mesh_basis: defs 18,0',kernels.stdout].join('\n'))
+    for(let i=0;i<1000&&!r.done;i++)r.runSlice()
+    assert.ok(r.done);assert.equal(r.machine.z80.regs.sp,0);assert.equal(r.machine.z80.regs.ix,0);assert.equal(r.machine.z80.regs.iy,0x89f0)
+    const word=name=>{const a=r.assembly.asm.scopes[0].symbols.get(name).value;const v=r.machine.memory[a]|r.machine.memory[a+1]<<8;return v>32767?v-65536:v}
+    let previous=Array(9).fill(0)
+    for(const [i,[x,z]] of cases.entries()){
+        const sum=x*x+z*z,valid=Math.abs(x)<=20&&Math.abs(z)<=20&&sum>=192&&sum<320
+        assert.equal(word(`level_ok_${i}`),Number(valid))
+        const actual=Array.from({length:9},(_,j)=>word(`level_${i}_${j}`))
+        if(valid){
+            const nx=x*256/Math.sqrt(sum),nz=z*256/Math.sqrt(sum),expected=[-nz,0,nx,0,256,0,nx,0,nz]
+            for(let j=0;j<9;j++)assert.ok(Math.abs(actual[j]-expected[j])<=1,`${x},${z}: basis ${j}`)
+        }else assert.deepEqual(actual,previous)
+        previous=actual
+    }
+})
+
+
+test('LUMEN general renderer averages at least 20 FPS on the fixed-pose native benchmark',()=>{
+    const source=readFileSync(resolve('../../examples/lumen_run.tip'),'utf8').replace('int yaw=0','int yaw=3').replace('yaw=(yaw+turn*(turn_remainder//3))&127','yaw=(yaw+turn*2)&127')
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true,maxSlices:20000,afterFrameKeys:Array.from({length:8},(_,i)=>i===7?[15]:[3])}
+    execute(source,m)
+    const frames=m.frameTimes.slice(1).map((time,i)=>time-m.frameTimes[i]),mean=frames.reduce((a,b)=>a+b,0)/frames.length
+    assert.equal(frames.length,7)
+    assert.ok(mean<=750000,`Mean ${mean} T-states exceeds the 20 FPS budget at 15 MHz`)
+    assert.ok(m.bytes<=24169);assert.ok(m.stackBytes<1024)
 })

@@ -240,14 +240,29 @@ RENDER = """__gfx_render:
         ret
 """
 
+# PUSH writes two bytes in 11 T-states. Interrupts are disabled only while
+# SP points into the display buffer, then the caller's IFF state is restored.
 CLEAR = """__gfx_clear:
-        ld hl,0x9340
-        ld de,0x9341
-        ld bc,767
-        ld (hl),0
-        ldir
+        ld a,i
+        di
+        push af
+        ld (__gfx_clear_sp),sp
+        ld sp,0x9640
+__gfx_clear_buffer_begin:
+        ld hl,0
+        ld b,24
+__gfx_clear_loop:
+"""+('        push hl\n'*16)+"""        djnz __gfx_clear_loop
+__gfx_clear_buffer_end:
+        ld sp,(__gfx_clear_sp)
+        pop af
+        jp po,__gfx_clear_done
+        ei
+__gfx_clear_done:
         ret
+__gfx_clear_sp: dw 0
 """
+
 
 
 def _build_row_mask():
@@ -340,8 +355,11 @@ def graphics_assembly(used):
         dynamic_depth='solid_dynamic_depth' in used
         quads='solid_quads' in used
         outlines='mesh_outlines' in used
-        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity,outlines)+mesh_routines(capacity,solid,extended,'solid_only' not in used,dynamic_depth,no_depth,outlines)+solid_routines(extended,'solid_no_cull' not in used,not no_depth,dynamic_depth,quads)+light_routines('solid_point_light' in used,quads)
+        # Quad packets are emitted only when every point-light intensity is
+        # proven <=1, whose native attenuated contribution is always zero.
+        groups=math_routines()+matrix_routines()+camera_routines(batch_capacity=capacity)+wireframe_routines(capacity,outlines,'mesh_draw' in used and 'cam_fast_batch' not in used)+mesh_routines(capacity,solid,extended,'solid_only' not in used,dynamic_depth,no_depth,outlines,'compiled_mesh_vertices' in used,'mesh_blank_spans' in used,quads)+solid_routines(extended,'solid_no_cull' not in used,not no_depth,dynamic_depth,quads,'mesh_blank_spans' in used,'mesh_basic_spans' not in used)+light_routines('solid_point_light' in used and not quads,quads)
         roots={'__gfx_'+name for name in camera_entries}
+        if 'compiled_mesh_vertices' in used:roots.add('__gfx_mesh_vertex_plan')
         native=link(groups,roots)
         routines.append(native)
         if '__gfx_sin_raw' in native:used.add('sin_raw')
@@ -357,7 +375,11 @@ def graphics_assembly(used):
         if used & {'circle','ellipse','polygon','styled_rectangle'}:routines.append(_axis_line(False,True).replace('__gfx_h_line','__gfx_styled_h_line'))
         if used & {'polygon','polyline','stroke','styled_line'}:routines.append(_line(True).replace('__gfx_line','__gfx_styled_line').replace('call __gfx_pixel_on','call __gfx_ink_pixel'))
     if 'styled_rectangle' in used:routines.append(_rectangle().replace('__gfx_rectangle','__gfx_styled_rectangle').replace('call __gfx_pixel_on','call __gfx_ink_pixel').replace('call __gfx_h_line','call __gfx_styled_h_line'))
-    if styled:routines.append('__gfx_ink_pixel:\n        ld a,(__gfx_ink)\n        jp __gfx_pixel\n__gfx_ink: db 1');used.add('pixel_on')
+    if styled:
+        needs_ink_pixel=any('__gfx_ink_pixel' in part for part in routines)
+        routines.append('__gfx_ink: db 1')
+        if needs_ink_pixel:
+            routines.append('__gfx_ink_pixel:\n        ld a,(__gfx_ink)\n        jp __gfx_pixel');used.add('pixel_on')
     if "build_row_mask" in used:
         routines.append(_build_row_mask())
     for name in ("or_row", "and_row", "xor_row"):

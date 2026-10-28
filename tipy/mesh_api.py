@@ -104,8 +104,10 @@ def install(tree):
                 if len(edges)>192:raise CompileError('Triangulated mesh exceeds the 192-edge limit',n)
             words=[0x4d54,len(vertices),len(edges),max(sum(abs(c) for c in v) for v in vertices)+2,len(records)]+[c for v in vertices for c in v]
             data=[b for w in words for b in (w&255,(w>>8)&255)]+[i for e in edges for i in e]+face_data
+            from .wireframe import box_surface_bounds
+            hull_bounds=box_surface_bounds(vertices,records,edges)
             location={k:n[k] for k in ('line','column','filename') if k in n}
-            n.clear();n.update(kind='geometry_data',data=data,vertex_count=len(vertices),face_count=len(records),quad_format=quad_format,**location)
+            n.clear();n.update(kind='geometry_data',data=data,vertex_count=len(vertices),face_count=len(records),quad_format=quad_format,hull_bounds=hull_bounds,**location)
         elif name in {'draw_mesh','mesh_light','no_lights','ambient_light','directional_light','point_light'} or mesh_active and name in {'init_camera','camera','set_fov'}:
             n['name']='__tipy_native_'+{'draw_mesh':'mesh_draw','mesh_light':'solid_light','no_lights':'solid_no_lights','ambient_light':'solid_ambient_light','directional_light':'solid_directional_light','point_light':'solid_point_light','init_camera':'mesh_init','camera':'mesh_look','set_fov':'mesh_fov'}[name]
 

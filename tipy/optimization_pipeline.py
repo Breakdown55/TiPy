@@ -375,6 +375,7 @@ def optimize_program(checked, symbols, mode):
         report.append({"pass": "dead-state-elimination", "removed": dead})
         report.append({"pass": "small-function-inlining", "inlined": inlined})
         if not (propagation.folded or dead or inlined): break
+    report.append({'pass':'finite-function-tables','specialized':specialize_finite_functions(tree)})
     report.append({'pass':'static-pixel-batches','loops_lowered':lower_pixel_loops(tree)})
     reachable(tree)
     report.append({"pass": "frame-compaction", "bytes_removed": compact_frames(tree)})
@@ -428,3 +429,40 @@ def lower_pixel_loops(tree):
         for value in item.values():visit(value)
     visit(tree['body'])
     return lowered
+
+
+def specialize_finite_functions(tree):
+    """Exhaustively evaluate pure scalar functions with a leading input mask.
+
+    The mask proves periodicity over all 65,536 i16 inputs. No global reads,
+    writes, calls, allocations, or partial-domain failures may enter a table.
+    """
+    allowed={'assign','declare','if','return','pass','name','number','boolean',
+             'negate','invert','not','add','subtract','multiply','floor_divide',
+             'modulo','compare','and','or','conditional','bit_and','bit_or',
+             'bit_xor','shift_left','shift_right','power'}
+    changed=0
+    for f in tree['body']:
+        if f.get('kind')!='function' or len(f['params'])!=1 or f.get('captures') or f['return_type'] not in {'i16','u8','bool'} or not f['body']:continue
+        param=f['locals'][f['params'][0]['name']]
+        if param['type'] not in {'i16','u8'} or param.get('cell'):continue
+        first=f['body'][0];value=first.get('value',{})
+        if first.get('kind')!='assign' or first.get('symbol')!=param['label'] or value.get('kind')!='bit_and':continue
+        left,right=value['left'],value['right']
+        if left.get('kind')=='number':left,right=right,left
+        if left.get('kind')!='name' or left.get('symbol')!=param['label'] or right.get('kind')!='number':continue
+        mask=right['value']
+        if not 1<=mask<=255 or mask&(mask+1):continue
+        nodes=list(walk(f['body']))
+        if any(n.get('kind') not in allowed or n.get('cell') for n in nodes):continue
+        if any(n.get('kind') in {'name','assign','declare'} and n.get('storage')!='frame' for n in nodes):continue
+        values=[]
+        try:
+            trial=Evaluator(tree,budget=50000)
+            for i in range(mask+1):
+                result=trial.expr({'kind':'call','symbol':f['label'],'arguments':[{'kind':'number','type':param['type'],'value':i}]})
+                if not isinstance(result,(int,bool)):raise NotStatic('non-scalar table value')
+                values.append(int(result))
+        except STATIC_ERRORS:continue
+        f['finite_table']={'mask':mask,'values':values};changed+=1
+    return changed
