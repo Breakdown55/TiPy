@@ -216,22 +216,28 @@ $('new-file').onclick = () => {
     persist()
 }
 $('open').onchange = async event => {
-    const file = event.target.files[0]
-    if (!file) return
-    if (file.size > 1_000_000) { status('File must be smaller than 1 MB.',true); return }
-    const name = file.name === 'main.asm' ? 'input.asm' : file.name
-    if (!/^[A-Za-z_]\w*\.(tip|asm|z80|obj)$/.test(name)) { status('Use a file name such as main.tip, model.obj, or input.asm.',true); return }
+    const selected = Array.from(event.target.files)
+    if (!selected.length) return
+    for (const file of selected) {
+        if (file.size > 1_000_000) { status('Each file must be smaller than 1 MB.',true); return }
+        if (!/^[A-Za-z_]\w*\.(tip|asm|z80|obj)$/.test(file.name)) { status('Use .tip, .obj, .asm, or .z80 file names.',true); return }
+    }
+    const contents = await Promise.all(selected.map(file => file.text()))
     save()
-    const content = await file.text()
     invalidateCompile()
-    files[name] = content
-    // Avoid saving the old editor value over a replacement of the active file.
-    if (current === name) $('source').value = content
-    select(name)
+    const names = selected.map(file => file.name === 'main.asm' ? 'input.asm' : file.name)
+    for (let i=0;i<names.length;i++) files[names[i]] = contents[i]
+    const sources = names.filter(name => name.endsWith('.tip'))
+    const active = sources[0] ?? names[0]
+    if (names.length > 1 && sources.length === 1) entry = active
+    // Do not overwrite a replacement with the old textarea value during select.
+    if (names.includes(current)) $('source').value = files[current]
+    select(active)
     persist()
-    status(`Opened ${name}`)
+    status(names.length === 1 ? `Opened ${active}` : `Opened ${names.length} files`)
     event.target.value = ''
 }
+
 function input(token,code,down) {
     if (down) inputs.set(token,code)
     else inputs.delete(token)

@@ -22,7 +22,9 @@ def routines(
     approximate=False,
     unit_transform=False,
     prepare_only=False,
+    tight_frustum=False,
 ):
+    need_instance = extended or solid and unit_transform
     out = ["""__gfx_mesh_ready: dw 0
 __gfx_mesh_near: dw 512
 __gfx_mesh_far: dw 30720
@@ -408,7 +410,7 @@ __gfx_mesh_gain: defs 512,0"""]
         routine.write("@__gfx_solid_depth_enabled", "depth_test")
     if blank_spans:
         routine.emit("xor a", "ld (__gfx_solid_transparent_white),a")
-    if extended:
+    if need_instance:
         for i, n in enumerate(("x", "y", "z", "size")):
             routine.write(add("@__gfx_mesh_instance", i * 2), n)
         routine.write("@__gfx_mesh_source", add("model", 10))
@@ -419,8 +421,9 @@ __gfx_mesh_gain: defs 512,0"""]
     routine.if_(("uge", "vertices", min(capacity, 64) + 1), lambda: routine.fail(14))
     routine.if_(("eq", "edges", 0), lambda: routine.fail(14))
     routine.if_(("uge", "edges", 193), lambda: routine.fail(14))
-    routine.if_(("slt", "size", 1), lambda: routine.fail(14))
-    routine.if_(("slt", 512, "size"), lambda: routine.fail(14))
+    if not unit_transform:
+        routine.if_(("slt", "size", 1), lambda: routine.fail(14))
+        routine.if_(("slt", 512, "size"), lambda: routine.fail(14))
     # Reject distant instances before rotating or projecting a single vertex.
     for i, axis in enumerate("xyz"):
         routine.set(axis, sub(axis, word(add("@__gfx_mesh_eye", i * 2))))
@@ -463,6 +466,55 @@ __gfx_mesh_gain: defs 512,0"""]
             ("ult", "radius", sub("a", word("@__gfx_mesh_far"))), lambda: routine.ret()
         ),
     )
+    if tight_frustum:
+        # FOV <= 75 has |x/z| < 1.25 and |y/z| < 1. The expanded
+        # sphere and six-unit padding make whole-unit tests conservative.
+        positive_z = routine.label()
+        routine.emit(
+            "ld hl,(__gfx_mesh_center+4)",
+            "ld l,h",
+            "ld h,0",
+            "bit 7,l",
+            f"jr z,{positive_z}",
+            "ld h,255",
+        )
+        routine.mark(positive_z)
+        routine.emit(
+            "push hl",
+            f"ld e,(ix{routine.slots['radius']+1:+d})",
+            "ld d,0",
+            "sla e",
+            "rl d",
+            "inc de",
+            "inc de",
+            "inc de",
+            "inc de",
+            "inc de",
+            "inc de",
+            "add hl,de",
+            "ld b,h",
+            "ld c,l",
+            "pop hl",
+            "sra h",
+            "rr l",
+            "sra h",
+            "rr l",
+            "add hl,bc",
+        )
+        for axis in (0, 2):
+            positive = routine.label()
+            if axis == 2:
+                routine.emit("ld h,b", "ld l,c")
+            routine.emit(
+                f"ld a,(__gfx_mesh_center+{axis+1})",
+                "bit 7,a",
+                f"jr z,{positive}",
+                "neg",
+            )
+            routine.mark(positive)
+            routine.emit(
+                "ld e,a", "ld d,0", "or a", "sbc hl,de", f"jp m,{routine.name}_return"
+            )
     general, transformed = routine.label(), routine.label()
     # Unrotated unit-scale instances can reuse the camera matrix exactly.
     # This includes the common static level + translated pickup case.
@@ -474,7 +526,8 @@ __gfx_mesh_gain: defs 512,0"""]
         routine.expr("roll")
         routine.emit("ld a,l", "or b", f"jp nz,{general}")
         routine.if_(("ne", "size", 256), lambda: routine.emit(f"jp {general}"))
-    routine.write("@__gfx_mesh_identity_active", 1)
+    if not unit_transform:
+        routine.write("@__gfx_mesh_identity_active", 1)
     matrix_copies = [("__gfx_mesh_basis", "__gfx_mesh_view")]
     if not unit_transform:
         matrix_copies.append(("__gfx_mesh_identity", "__gfx_mesh_rotation"))
@@ -689,9 +742,8 @@ __gfx_mesh_gain: defs 512,0"""]
         routine.mark(routine.name + "_invalid_model")
         routine.fail(14)
     out.append(routine.finish())
-    out.append(
-        "__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256\n__gfx_mesh_identity_active: dw 0"
-    )
+    out.append("__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256")
+    out.append("__gfx_mesh_identity_active: dw " + ("1" if unit_transform else "0"))
     if solid and wire and outlines and not no_depth:
         routine = NativeRoutine("mesh_restore_flags", ("count",))
         loop, advance = routine.label(), routine.label()
@@ -713,7 +765,7 @@ __gfx_mesh_gain: defs 512,0"""]
         routine.emit("inc de", f"djnz {loop}")
         routine.ret()
         out.append(routine.finish())
-    if extended:
+    if need_instance:
         out.append("__gfx_mesh_instance: defs 8,0\n__gfx_mesh_source: dw 0")
     if blank_spans:
         out[

@@ -95,3 +95,16 @@ test('Malformed requests are rejected',async () => {
         assert.equal((await post(url,{ files: [], entry: 'main.tip' })).status,422)
     })
 })
+
+
+test('HTTP compiler supports a named-object gallery and its OBJ collision map',async()=>{
+    await withServer(process.env.TIPY_PYTHON || 'python',async url=>{
+        const files={'main.tip':await readFile(new URL('../../examples/lumen_gallery.tip',import.meta.url),'utf8'),'lumen_gallery.obj':await readFile(new URL('../../examples/lumen_gallery.obj',import.meta.url),'utf8')}
+        const response=await post(url,{files,entry:'main.tip'})
+        const result=await response.json()
+        assert.equal(response.status,200,JSON.stringify(result.error))
+        assert.equal(result.ok,true)
+        assert.match(result.assembly,/__gfx_mesh_collides:/)
+        assert.doesNotMatch(result.assembly,/__heap_start:/)
+    })
+})

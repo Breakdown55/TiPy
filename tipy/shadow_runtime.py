@@ -21,7 +21,17 @@ def routines(
 ):
     routine = NativeRoutine(
         "mesh_shadow",
-        ("model", "light_x", "light_y", "light_z", "floor_y", "x", "y", "z"),
+        (
+            "model",
+            "light_x",
+            "light_y",
+            "light_z",
+            "floor_y",
+            "x",
+            "y",
+            "z",
+            "max_distance",
+        ),
         (
             "count",
             "edges",
@@ -49,6 +59,15 @@ def routines(
     for name in ("light_x", "light_y", "light_z", "floor_y", "x", "y", "z"):
         if name not in checked_coordinates:
             check_coordinate(name, invalid)
+    routine.if_(("slt", "max_distance", 0), lambda: routine.emit(f"jp {invalid}"))
+    routine.if_(("slt", 240, "max_distance"), lambda: routine.emit(f"jp {invalid}"))
+    # A conservative XZ distance bound: never discard a caster within range.
+    for offset, axis in ((0, "x"), (4, "z")):
+        routine.set("height", sub(axis, word(add("@__gfx_mesh_eye", offset))))
+        routine.if_(
+            ("negative", "height"), lambda: routine.set("height", sub(0, "height"))
+        )
+        routine.if_(("slt", "max_distance", "height"), lambda: routine.ret())
     routine.set(
         "scale", sub("light_y", "floor_y") if fixed_scale is None else fixed_scale
     )

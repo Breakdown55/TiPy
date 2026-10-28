@@ -946,11 +946,11 @@ def _masked_parameter(function):
     if (
         first.get("kind") != "assign"
         or first.get("symbol") != parameter["label"]
-        or value.get("kind") != "bit_and"
+        or value.get("kind") not in {"bit_and", "modulo"}
     ):
         return None
     left, right = value["left"], value["right"]
-    if left.get("kind") == "number":
+    if value.get("kind") == "bit_and" and left.get("kind") == "number":
         left, right = right, left
     if (
         left.get("kind") != "name"
@@ -958,7 +958,7 @@ def _masked_parameter(function):
         or right.get("kind") != "number"
     ):
         return None
-    mask = right["value"]
+    mask = right["value"] - 1 if value.get("kind") == "modulo" else right["value"]
     if not 1 <= mask <= 255 or mask & (mask + 1):
         return None
     return parameter, mask

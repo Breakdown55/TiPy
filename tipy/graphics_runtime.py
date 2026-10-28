@@ -562,6 +562,7 @@ def graphics_assembly(used):
                 quads,
                 "mesh_unit_transform" in used,
                 "mesh_shadow" in used and "compiled_mesh_vertices" in used,
+                "mesh_tight_frustum" in used,
             )
             + solid_routines(
                 extended,
@@ -574,6 +575,7 @@ def graphics_assembly(used):
                 centroids,
                 "mesh_shadow" in used,
                 "solid_no_legacy_light" not in used,
+                "mesh_unit_transform" in used,
             )
             + light_routines(
                 "solid_point_light" in used and (not quads or centroids),
@@ -610,6 +612,12 @@ def graphics_assembly(used):
         roots = {"__gfx_" + name for name in camera_entries}
         if "compiled_mesh_vertices" in used:
             roots.add("__gfx_mesh_vertex_plan")
+            if "mesh_blank_spans" in used:
+                roots.add("__gfx_mesh_identity_active")
+        if "mesh_collides" in used:
+            from .collision_runtime import routines as collision_routines
+
+            groups += collision_routines()
         native = link(groups, roots)
         routines.append(native)
         if "__gfx_sin_raw" in native:

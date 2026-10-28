@@ -27,6 +27,7 @@ def routines(
     centroids=False,
     shadows=False,
     legacy_light=True,
+    unit_transform=False,
 ):
     out = [
         "__gfx_solid_guard_before: db 165\n__gfx_solid_depth: defs 6144,0\n__gfx_solid_guard_after: db 90",
@@ -93,28 +94,7 @@ __gfx_solid_pattern: db 0""",
     routine.save("p", "out")
     routine.ret()
     out.append(routine.finish())
-    routine = NativeRoutine(
-        "solid_facing", ("normal", "point"), ("i",) + words("sum", 2) + words("p", 2)
-    )
-    routine.zero("sum")
-    routine.set("i", 0)
-
-    def facing():
-        routine.expr(
-            invoke(
-                "solid_mul32",
-                word(add("normal", "i")),
-                word(add("point", "i")),
-                slot("p0"),
-            )
-        )
-        routine.binary("sum", "sum", "p")
-        routine.set("i", add("i", 2))
-
-    routine.while_(("ult", "i", 6), facing)
-    routine.if_(("negative", "sum1"), lambda: routine.ret(1))
-    routine.ret(0)
-    out.append(routine.finish())
+    out.append(_facing())
 
     routine = NativeRoutine("solid_lerpq", ("a", "b", "n", "d"), ("negative",))
     routine.set("negative", 0)
@@ -377,6 +357,7 @@ __gfx_solid_pattern: db 0""",
             centroids,
             shadows,
             legacy_light,
+            unit_transform,
         )
     )
     if not depth_enabled:
@@ -1359,6 +1340,7 @@ def _draw(
     centroids=False,
     shadows=False,
     legacy_light=True,
+    unit_transform=False,
 ):
     normal_offset = 6 if quads else 4
     routine = NativeRoutine(
@@ -1456,24 +1438,46 @@ def _draw(
         routine.emit("pop iy")
 
         def cull():
-            for j in range(3):
-                routine.write(
-                    add("@__gfx_solid_normal", j * 2),
-                    invoke(
-                        "mesh_dot",
-                        add("@__gfx_mesh_norm_view", j * 6),
-                        add("face", normal_offset),
-                        2,
-                    ),
+            if unit_transform:
+                routine.expr(byte("face"))
+                routine.emit(
+                    "add hl,hl",
+                    "ld d,h",
+                    "ld e,l",
+                    "add hl,hl",
+                    "add hl,de",
+                    "ld de,(__gfx_mesh_source)",
+                    "add hl,de",
                 )
+                routine._store("p")
+                for axis in range(3):
+                    routine.write(
+                        add("@__gfx_solid_normal", axis * 2),
+                        sub(
+                            add(
+                                word(add("p", axis * 2)),
+                                word(add("@__gfx_mesh_instance", axis * 2)),
+                            ),
+                            word(add("@__gfx_mesh_eye", axis * 2)),
+                        ),
+                    )
+                normal = add("face", normal_offset)
+                point = "@__gfx_solid_normal"
+            else:
+                for axis in range(3):
+                    routine.write(
+                        add("@__gfx_solid_normal", axis * 2),
+                        invoke(
+                            "mesh_dot",
+                            add("@__gfx_mesh_norm_view", axis * 6),
+                            add("face", normal_offset),
+                            2,
+                        ),
+                    )
+                normal = "@__gfx_solid_normal"
+                point = "@__gfx_solid_poly_a"
             routine.if_(
-                (
-                    "eq",
-                    invoke(
-                        "solid_facing", "@__gfx_solid_normal", "@__gfx_solid_poly_a"
-                    ),
-                    0,
-                ),
+                ("eq", invoke("solid_facing", normal, point), 0),
                 lambda: routine.emit(f"jp {skip}"),
             )
 
@@ -1617,3 +1621,82 @@ def _draw(
     routine.while_(("ult", "i", "count"), face)
     routine.ret()
     return routine.finish()
+
+
+def _facing():
+    """Exact signed 32-bit dot product, with no per-component call frames."""
+    r = NativeRoutine("solid_facing", ("normal", "point"), ("count", "low", "high"))
+    r.set("count", 3)
+    r.set("low", 0)
+    r.set("high", 0)
+    r.expr("point")
+    r.emit("push iy", "push hl", "pop iy")
+    loop, next_axis, normal_positive, point_positive, product_positive = (
+        r.label() for _ in range(5)
+    )
+    r.mark(loop)
+    r.expr("normal")
+    r.emit("ld c,(hl)", "inc hl", "ld b,(hl)", "inc hl")
+    r._store("normal")
+    r.emit(
+        "ld a,b",
+        "or c",
+        f"jp z,{next_axis}",
+        "ld e,(iy+0)",
+        "ld d,(iy+1)",
+        "ld a,d",
+        "xor b",
+        "and 128",
+        "ex af,af'",
+        "bit 7,b",
+        f"jr z,{normal_positive}",
+        "xor a",
+        "sub c",
+        "ld c,a",
+        "sbc a,a",
+        "sub b",
+        "ld b,a",
+    )
+    r.mark(normal_positive)
+    r.emit(
+        "bit 7,d",
+        f"jr z,{point_positive}",
+        "xor a",
+        "sub e",
+        "ld e,a",
+        "sbc a,a",
+        "sub d",
+        "ld d,a",
+    )
+    r.mark(point_positive)
+    r.emit(
+        "call __gfx_wf_umul",
+        "ex af,af'",
+        "or a",
+        f"jr z,{product_positive}",
+        "xor a",
+        "sub l",
+        "ld l,a",
+        "ld a,0",
+        "sbc a,h",
+        "ld h,a",
+        "ld a,0",
+        "sbc a,e",
+        "ld e,a",
+        "ld a,0",
+        "sbc a,d",
+        "ld d,a",
+    )
+    r.mark(product_positive)
+    low, high = r.slots["low"], r.slots["high"]
+    r.emit(f"ld c,(ix{low:+d})", f"ld b,(ix{low+1:+d})", "add hl,bc")
+    r._store("low")
+    r.emit("ex de,hl", f"ld c,(ix{high:+d})", f"ld b,(ix{high+1:+d})", "adc hl,bc")
+    r._store("high")
+    r.mark(next_axis)
+    r.emit(
+        "inc iy", "inc iy", f"dec (ix{r.slots['count']:+d})", f"jp nz,{loop}", "pop iy"
+    )
+    r.if_(("negative", "high"), lambda: r.ret(1))
+    r.ret(0)
+    return r.finish()

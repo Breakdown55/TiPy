@@ -30,7 +30,7 @@ def apply(assembly, quality):
     assembly = assembly.replace('ld h,b\n        ld l,c\n        ret',
                                 'ld h,b\n        ld l,c\n        add hl,hl\n        add hl,hl\n        add hl,hl\n        ret')
     start = assembly.index('__gfx_mesh_draw:')
-    end = assembly.index('__gfx_mesh_identity:', start)
+    end = assembly.index('__gfx_mesh_draw_return:', start)
     draw = assembly[start:end]
     draw = draw.replace('        ld hl,__gfx_wf_records',
                         '        call __gfx_quality_quantize\n        ld hl,__gfx_wf_records')

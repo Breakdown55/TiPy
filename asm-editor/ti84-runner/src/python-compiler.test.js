@@ -13,6 +13,8 @@ function execute(source, measurements) {
         ? ['-c','import json,sys; from tipy import compile_source; print(json.dumps(compile_source(sys.stdin.read(), optimize_graphics=False, optimization="reference")))']
         : ['-m','tipy','-','--optimization', measurements?.optimization ?? 'reference','--show','all']
     if(measurements?.genericVertices)args[1]='import tipy.project as _p; _original=_p.generate; _p.generate=lambda tree,symbols: _original({**tree,"mesh_vertices_disabled":True},symbols); '+args[1]
+    if(measurements?.noFrustum)args[1]='import tipy.project as _p; _original_frustum=_p.generate; _p.generate=lambda tree,symbols: _original_frustum({**tree,"mesh_frustum_disabled":True},symbols); '+args[1]
+    if(measurements?.fullFont)args[1]='import tipy.text_runtime as _t; _full_text=_t.assembly; _t.assembly=lambda used,glyphs=None:_full_text(used,None); '+args[1]
     if(measurements?.opaqueReference)args[1]='from tipy import drawing_optimizer as _drawing; _drawing.annotate_blank_meshes=lambda tree: None; '+args[1]
     const processResult = spawnSync(python,args,{
         cwd: resolve('../..'), input: measurements?.assets?JSON.stringify({...measurements.assets,'main.tip':source}):source, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024
@@ -3022,4 +3024,93 @@ render()`
         assert.ok(fast.assembly.includes('__gfx_mesh_prepare_only:'))
         assert.deepEqual(fast.screen,generic.screen,`Light ${light}, floor ${floor}`)
     }
+})
+
+
+test('Packed collision maps handle signed bounds, touching edges, empty maps and player radius',()=>{
+    const m={project:true,guardGraph:true,trackStack:true}
+    const v=execute(`int walls=collision_map([(-2,-10,2,10),(10,10,12,12)])
+bool inside=collides(walls,0,0,radius=0)
+bool edge=collides(walls,-2,10,radius=0)
+bool outside=collides(walls,-3,0,radius=0)
+bool touching=collides(walls,-3,0,radius=1)
+bool second=collides(walls,11,11,radius=0)
+int empty=collision_map([])
+bool empty_hit=collides(empty,0,0)`,m)
+    assert.deepEqual([v.inside,v.edge,v.outside,v.touching,v.second,v.empty_hit],[1,1,0,1,1,0])
+    assert.ok(!m.assembly.includes('__heap_start:'))
+    assert.throws(()=>execute('int m=collision_map([])\nbool hit=collides(m,0,0,radius=-1)',{project:true}),/Runtime error/)
+})
+
+test('Scalar argument snapshots preserve keyword order, defaults and later argument side effects',()=>{
+    const v=execute(`int state=3
+def change() -> int:
+    print("X",0,0)
+    return 8
+def subtract(int a,int b=2) -> int:
+    return a-b
+int first=subtract(b=change(),a=state)
+int defaulted=subtract(10)
+int keyword=subtract(b=5,a=12)`,{project:true,optimization:'aggressive'})
+    assert.deepEqual([v.first,v.defaulted,v.keyword],[-5,8,7])
+})
+
+test('Gallery walks through the doorway, blocks divider walls and the imported panel',()=>{
+    const asset=readFileSync(resolve('../../examples/lumen_gallery.obj'),'utf8')
+    const original=readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8')
+    for(const pose of [{z:3,yaw:32,stop:8,blocked:false},{z:10,yaw:32,stop:-2,blocked:true},{z:0,yaw:32,stop:-12,blocked:true}]){
+        const source=original.replace('int player_z = 10 * 16',`int player_z = ${pose.z} * 16`).replace('int yaw = 16',`int yaw = ${pose.yaw}`)
+        const m={project:true,optimization:'aggressive',assets:{'lumen_gallery.obj':asset},guardGraph:true,trackStack:true,maxSlices:30000,
+            afterFrameKeys:Array.from({length:120},(_,i)=>i===119?[15]:[4])}
+        const v=execute(source,m)
+        if(pose.blocked)assert.ok(v.player_x<=pose.stop*16,`Stopped by collider at ${pose.stop}`)
+        else assert.ok(v.player_x>pose.stop*16,'Walk through the gap into the east room')
+        assert.equal(v.player_z,pose.z*16)
+        assert.ok(m.bytes<=24169);assert.ok(m.stackBytes<1024)
+    }
+})
+
+test('Gallery picks up its crystal and can finish at the west entrance',()=>{
+    const source=readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8').replace('int player_x = -18 * 16','int player_x = 14 * 16').replace('int player_z = 10 * 16','int player_z = -8 * 16')
+    const m={project:true,optimization:'aggressive',assets:{'lumen_gallery.obj':readFileSync(resolve('../../examples/lumen_gallery.obj'),'utf8')},guardGraph:true,trackStack:true,maxSlices:30000,
+        onFrame(r,result,count){
+            const set=(name,value)=>{const a=r.assembly.asm.scopes[0].symbols.get(result.symbols[name].label).value;r.machine.memory[a]=value&255;r.machine.memory[a+1]=(value>>8)&255}
+            if(count===1){set('player_x',-20*16);set('player_z',10*16)}
+            if(count===2)r.setKey(15,true)
+        }}
+    const v=execute(source,m)
+    assert.equal(v.collected,1);assert.equal(v.won,1)
+    assert.notDeepEqual(m.frames[0],m.frames[1])
+})
+
+
+test('Conservative instance side-plane rejection preserves visible pixels at camera boundaries',()=>{
+    const header='int m=mesh([(-3,-3,-3),(3,-3,-3),(3,3,-3),(-3,3,-3),(-3,-3,3),(3,-3,3),(3,3,3),(-3,3,3)],faces=[(0,1,2),(0,2,3),(4,7,6),(4,6,5),(0,4,5),(0,5,1),(3,2,6),(3,6,7)])\ninit_camera(75,2,90)\ncamera(0,0,0,0,0,-16)\n'
+    for(const size of [128,256,512]){
+        const source=header+[-50,-24,-10,0,10,24,50].map(x=>`clear()\ndraw_mesh(m,x=${x},y=3,z=-20,size=${size},cull=False,depth_test=False)\nrender()`).join('\n')
+        const actual={project:true,guardGraph:true},reference={project:true,noFrustum:true,guardGraph:true}
+        execute(source,actual);execute(source,reference)
+        assert.deepEqual(actual.frames,reference.frames,`Size ${size}`)
+    }
+})
+
+
+test('Demand-linked font subsets match the complete font for clipped text, numbers and booleans',()=>{
+    const source='clear()\nprint("FIND CRYSTAL",1,1)\nprint("WEST: 1/2?",-5,57)\nprint(-32768,61,8)\nprint(True,0,20)\nrender()'
+    const compact={project:true,guardGraph:true},full={project:true,fullFont:true,guardGraph:true}
+    execute(source,compact);execute(source,full)
+    assert.deepEqual(compact.screen,full.screen)
+    assert.ok(compact.bytes<full.bytes)
+})
+
+
+test('Gallery averages at least 20 FPS with its OBJ props, collision checks and orbiting shadows',()=>{
+    const m={project:true,optimization:'aggressive',assets:{'lumen_gallery.obj':readFileSync(resolve('../../examples/lumen_gallery.obj'),'utf8')},guardGraph:true,trackStack:true,maxSlices:40000,
+        afterFrameKeys:Array.from({length:128},(_,i)=>i===127?[15]:[3,4])}
+    execute(readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8'),m)
+    const times=m.frameTimes.slice(1).map((time,i)=>time-m.frameTimes[i])
+    const mean=times.reduce((a,b)=>a+b,0)/times.length
+    assert.ok(mean<=750000,`Mean ${mean} T-states exceeds 20 FPS at 15 MHz`)
+    assert.ok(m.bytes<=24169);assert.ok(m.stackBytes<1024)
+    assert.ok(!m.assembly.includes('__heap_start:'))
 })

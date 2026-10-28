@@ -27,7 +27,7 @@ class TextRoutine(Routine):
         )
 
 
-def draw():
+def draw(glyphs=None):
     r = TextRoutine(
         "draw", ("pointer", "length", "x", "y"), ("origin", "index", "glyph", "col")
     )
@@ -45,6 +45,8 @@ def draw():
             r.if_(("ult", "glyph", 32), lambda: r.set("glyph", 63))
             r.if_(("uge", "glyph", 127), lambda: r.set("glyph", 63))
             r.expr(sub("glyph", 32))
+            if glyphs is not None:
+                r.emit("ld de,__text_glyph_map", "add hl,de", "ld l,(hl)", "ld h,0")
             r.emit(
                 "add hl,hl", "add hl,hl", "add hl,hl", "ld de,__text_font", "add hl,de"
             )
@@ -518,10 +520,12 @@ def input_routine(used):
     )
 
 
-def assembly(used):
+def assembly(used, glyphs=None):
     from .text_font import FONT, EXTRA
 
-    code = [draw()] if "draw" in used else []
+    if glyphs is not None and len(glyphs) * 8 + 109 >= 95 * 8:
+        glyphs = None
+    code = [draw(glyphs)] if "draw" in used else []
     if "number" in used:
         code.append(number())
     if "bool" in used:
@@ -543,6 +547,21 @@ __text_true: db 84,114,117,101""")
     if "draw" in used:
         font = {**FONT, **EXTRA}
         code.extend(["__text_end_x: dw 0", "__text_end_y: dw 0", "__text_font:"])
-        for char in range(32, 127):
+        characters = (
+            list(range(32, 127))
+            if glyphs is None
+            else sorted(
+                {ord("?"), *[ord(char) for char in glyphs if 32 <= ord(char) < 127]}
+            )
+        )
+        for char in characters:
             code.append("        db " + ",".join(str(b) for b in [*font[chr(char)], 0]))
+        if glyphs is not None:
+            lookup = {char: index for index, char in enumerate(characters)}
+            code.append(
+                "__text_glyph_map: db "
+                + ",".join(
+                    str(lookup.get(char, lookup[ord("?")])) for char in range(32, 127)
+                )
+            )
     return "\n".join(code)

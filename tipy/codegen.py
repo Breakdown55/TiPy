@@ -21,8 +21,8 @@ from .types import (
 )
 
 # Larger models keep the compact interpreter to stay within calculator RAM.
-MAX_SPECIALIZED_MODEL_VERTICES = 8
-MAX_SPECIALIZED_SCENE_VERTICES = 16
+MAX_SPECIALIZED_MODEL_VERTICES = 32
+MAX_SPECIALIZED_SCENE_VERTICES = 48
 
 
 def _decode_mesh_vertices(packet):
@@ -42,6 +42,9 @@ def _decode_mesh_vertices(packet):
 
 def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
     original_tree = tree
+    from .argument_optimizer import simplify as simplify_arguments
+
+    tree = simplify_arguments(tree)
 
     def string_field(item, key):
         value = item.get(key)
@@ -153,7 +156,11 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
 
     def mesh_packets(node):
         if isinstance(node, dict):
-            if node.get("kind") == "geometry_data" and not node.get("compact"):
+            if (
+                node.get("kind") == "geometry_data"
+                and not node.get("compact")
+                and not node.get("collision_map")
+            ):
                 yield node
             for value in node.values():
                 yield from mesh_packets(value)
@@ -1221,7 +1228,7 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             else:
                 if data not in constant_data:
                     constant_data[data] = f"__constant_data_{len(constant_data)}"
-                if compiled_mesh_vertices:
+                if compiled_mesh_vertices and not item.get("collision_map"):
                     from .wireframe import vertex_program
 
                     vertices = _decode_mesh_vertices(item)
@@ -1244,7 +1251,8 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                         )
                     pixels_used.add("compiled_mesh_vertices")
                 emit(f"ld hl,{constant_data[data]}")
-            pixels_used.add("batch_capacity:" + str(item["vertex_count"]))
+            if item["vertex_count"]:
+                pixels_used.add("batch_capacity:" + str(item["vertex_count"]))
         elif kind == "address":
             emit(f"ld hl,{item['label']}")
         elif kind == "constant_list":
@@ -2880,7 +2888,26 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
     if text_used:
         from .text_runtime import assembly as text_assembly
 
-        code.append(text_assembly(text_used))
+        glyphs = set()
+        for node in text_nodes:
+            value = node["arguments"][0]
+            if (
+                node["kind"] == "text_input"
+                or value["type"] == "str"
+                and value.get("kind") != "string"
+            ):
+                glyphs = None
+                break
+            if value.get("kind") == "string":
+                glyphs.update(value["value"])
+            elif value["type"] == "bool":
+                glyphs.update("FalseTrue")
+            elif value["type"] in {"i16", "u8"}:
+                glyphs.update("-0123456789")
+            else:
+                glyphs = None
+                break
+        code.append(text_assembly(text_used, glyphs))
     if any(n.get("kind") == "key_down" for n in walk(tree)):
         from .keyboard import assembly as keyboard_assembly
 
@@ -2915,7 +2942,11 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             for n in walk(tree)
             if n.get("kind") == "native_graphics" and n.get("name") == "mesh_draw"
         ]
-        packets = [n for n in walk(tree) if n.get("kind") == "geometry_data"]
+        packets = [
+            n
+            for n in walk(tree)
+            if n.get("kind") == "geometry_data" and not n.get("collision_map")
+        ]
         shadow_calls = [
             node
             for node in walk(tree)
@@ -2957,6 +2988,23 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             ):
                 return -argument["value"]["value"]
             return None
+
+        camera_setups = [
+            node
+            for node in walk(tree)
+            if node.get("kind") == "native_graphics"
+            and node.get("name") in {"mesh_init", "mesh_fov"}
+        ]
+        if (
+            not tree.get("mesh_frustum_disabled")
+            and camera_setups
+            and all(
+                fixed_argument(node, 0) is not None
+                and 55 <= fixed_argument(node, 0) <= 75
+                for node in camera_setups
+            )
+        ):
+            pixels_used.add("mesh_tight_frustum")
 
         shadow_coordinates = ("light_x", "light_y", "light_z", "floor_y", "x", "y", "z")
         for index, name in enumerate(shadow_coordinates, start=1):
@@ -3009,7 +3057,8 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
         ):
             pixels_used.add("solid_only")
         if mesh_calls and all(
-            node.get("legacy_lighting") is False for node in mesh_calls
+            node.get("legacy_lighting") is False or flag(node, 10, False)
+            for node in mesh_calls
         ):
             pixels_used.add("solid_no_legacy_light")
         if mesh_calls and not all(flag(n, 12, False) for n in mesh_calls):
@@ -3159,16 +3208,20 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
         if estimate(assembly) > 0xFFFE - 0x9D95 - 1024:
             # Speed specializations must not turn a fitting program into a
             # compile error. Retry compact kernels before enforcing RAM limits.
-            if compiled_mesh_vertices:
+            if not tree.get("mesh_basic_spans"):
                 return generate(
-                    {**original_tree, "mesh_vertices_disabled": True},
+                    {**original_tree, "mesh_basic_spans": True},
                     symbols,
                     optimize_graphics=optimize_graphics,
                     _heap_bytes=_heap_bytes,
                 )
-            if not tree.get("mesh_basic_spans"):
+            if compiled_mesh_vertices:
                 return generate(
-                    {**original_tree, "mesh_basic_spans": True},
+                    {
+                        **original_tree,
+                        "mesh_vertices_disabled": True,
+                        "mesh_basic_spans": True,
+                    },
                     symbols,
                     optimize_graphics=optimize_graphics,
                     _heap_bytes=_heap_bytes,

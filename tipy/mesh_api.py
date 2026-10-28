@@ -7,6 +7,8 @@ PUBLIC = {
     "draw_mesh",
     "draw_shadow",
     "load_obj",
+    "collision_map",
+    "collides",
     "mesh_light",
     "no_lights",
     "ambient_light",
@@ -99,7 +101,50 @@ def install(tree):
         if n.get("kind") != "call":
             continue
         name = n.get("name")
-        if name in {"mesh", "load_obj"}:
+        if name == "collision_map":
+            arguments = n["arguments"]
+            if len(arguments) != 1:
+                raise CompileError(
+                    'Use collision_map(boxes) or collision_map("level.obj")', n
+                )
+            if arguments[0].get("kind") == "string":
+                from .scene_assets import collision_boxes
+
+                filename = arguments[0]["value"]
+                if filename not in tree.get("assets", {}):
+                    raise CompileError(
+                        "Open the OBJ asset in the project first: " + filename, n
+                    )
+                boxes = collision_boxes(tree["assets"][filename], filename, n)
+            else:
+                boxes = rows(arguments[0], 4)
+            if len(boxes) > 64 or any(
+                not -120 <= value <= 120 for box in boxes for value in box
+            ):
+                raise CompileError(
+                    "Collision maps allow up to 64 boxes with coordinates in -120..120",
+                    n,
+                )
+            if any(box[0] > box[2] or box[1] > box[3] for box in boxes):
+                raise CompileError(
+                    "Collision box must be (min_x, min_z, max_x, max_z)", n
+                )
+            words = [0x4342, len(boxes)] + [value for box in boxes for value in box]
+            data = [
+                byte for value in words for byte in (value & 255, (value >> 8) & 255)
+            ]
+            location = {
+                key: n[key] for key in ("line", "column", "filename") if key in n
+            }
+            n.clear()
+            n.update(
+                kind="geometry_data",
+                data=data,
+                vertex_count=0,
+                collision_map=True,
+                **location,
+            )
+        elif name in {"mesh", "load_obj"}:
             positional = []
             keywords = {}
             for a in n["arguments"]:
@@ -117,7 +162,7 @@ def install(tree):
                 if (
                     len(positional) != 1
                     or positional[0].get("kind") != "string"
-                    or set(keywords) - {"radius"}
+                    or set(keywords) - {"radius", "object", "normalize", "brightness"}
                 ):
                     raise CompileError('Use load_obj("model.obj", radius=32)', n)
                 filename = positional[0]["value"]
@@ -133,8 +178,39 @@ def install(tree):
                     )
                 from .obj_loader import load
 
-                vertices, faces = load(assets[filename], filename, radius, n)
-                edges = []
+                source = assets[filename]
+                if "object" in keywords:
+                    from .scene_assets import select
+
+                    if keywords["object"].get("kind") != "string":
+                        raise CompileError("OBJ object must be a constant name", n)
+                    source = select(source, filename, keywords["object"]["value"], n)
+                normalize = keywords.get(
+                    "normalize", {"kind": "boolean", "value": True}
+                )
+                if normalize.get("kind") != "boolean":
+                    raise CompileError("OBJ normalize must be True or False", n)
+                vertices, faces = load(
+                    source, filename, radius, n, normalize=normalize["value"]
+                )
+                brightness = (
+                    integer(keywords["brightness"]) if "brightness" in keywords else 16
+                )
+                if brightness is None or not 0 <= brightness <= 16:
+                    raise CompileError("OBJ brightness must be a constant in 0..16", n)
+                faces = [face + [brightness] for face in faces]
+                # Polygon boundaries should not display triangulation diagonals.
+                from .scene_assets import objects
+
+                _, object_groups = objects(source, filename, n)
+                edges = sorted(
+                    {
+                        tuple(sorted((face[i], face[(i + 1) % len(face)])))
+                        for group in object_groups.values()
+                        for face in group["faces"]
+                        for i in range(len(face))
+                    }
+                )
             else:
                 if not 1 <= len(positional) <= 3 or set(keywords) - {"edges", "faces"}:
                     raise CompileError("Use mesh(vertices, edges=[], faces=[])", n)
@@ -247,7 +323,7 @@ def install(tree):
                 0x4D54,
                 len(vertices),
                 len(edges),
-                max(sum(abs(c) for c in v) for v in vertices) + 2,
+                math.ceil(math.sqrt(max(sum(c * c for c in v) for v in vertices))) + 2,
                 len(records),
             ] + [c for v in vertices for c in v]
             data = (
@@ -275,6 +351,7 @@ def install(tree):
             in {
                 "draw_mesh",
                 "draw_shadow",
+                "collides",
                 "mesh_light",
                 "no_lights",
                 "ambient_light",
@@ -289,6 +366,7 @@ def install(tree):
                 + {
                     "draw_mesh": "mesh_draw",
                     "draw_shadow": "mesh_shadow",
+                    "collides": "mesh_collides",
                     "mesh_light": "solid_light",
                     "no_lights": "solid_no_lights",
                     "ambient_light": "solid_ambient_light",

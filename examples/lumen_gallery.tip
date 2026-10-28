@@ -1,0 +1,116 @@
+# Open this file and lumen_gallery.obj together, then Compile and Run.
+# Arrows: walk/turn. Hold 2nd + left/right to strafe. CLEAR exits.
+# Collect the crystal in the east room, then return to the west entrance.
+import time
+
+set_render_quality("aggressive")
+
+# Named objects keep the level, props, and collision boxes in one OBJ asset.
+int room = load_obj("lumen_gallery.obj", object="room", normalize=False)
+int doorway = load_obj("lumen_gallery.obj", object="doorway", normalize=False, brightness=14)
+int panel = load_obj("lumen_gallery.obj", object="panel", normalize=False, brightness=5)
+int crystal = load_obj("lumen_gallery.obj", object="crystal", normalize=False, brightness=2)
+int walls = collision_map("lumen_gallery.obj")
+
+
+def heading(int angle) -> int:
+    # A small direction approximation. The compiler turns it into a table.
+    angle = angle % 128
+    int sign = 1
+    if angle >= 64:
+        angle -= 64
+        sign = -1
+    return sign * angle * (64 - angle) // 8
+
+
+def slide(int position, int other, int amount, bool horizontal) -> int:
+    # Movement keeps fractional units; the collision API takes world units.
+    if amount == 0:
+        return position
+    int candidate = position + amount
+    if horizontal:
+        if collides(walls, candidate // 16, other // 16):
+            return position
+    else:
+        if collides(walls, other // 16, candidate // 16):
+            return position
+    return candidate
+
+
+def draw_prop(int model, int x, int z):
+    draw_shadow(model, sun_x, 24, sun_z, floor_y=-8, x=x, y=-8, z=z, max_distance=20)
+    draw_mesh(model, x=x, y=-8, z=z, cull=False, shaded=False, depth_test=False, outline=True)
+
+
+set_cpu_speed(15)
+init_camera(fov=75, near=2, far=90)
+int player_x = -18 * 16
+int player_z = 10 * 16
+int yaw = 16
+int previous_tick = time.frame_ticks()
+int sun_clock = 0
+bool collected = False
+bool won = False
+
+while not key_down("clear"):
+    int tick = time.frame_ticks()
+    int elapsed = min((tick - previous_tick) & 255, 16)
+    previous_tick = tick
+    sun_clock = (sun_clock + elapsed) % 2048
+    int sun_x = heading(sun_clock // 16) * 3 // 16
+    int sun_z = heading(sun_clock // 16 + 32) * 3 // 16
+
+    if not won:
+        int turn = int(key_down("right")) - int(key_down("left"))
+        int walk = int(key_down("up")) - int(key_down("down"))
+        int strafe = 0
+        if key_down("2nd"):
+            strafe = turn
+            turn = 0
+        yaw = (yaw + turn * max(1, elapsed // 3)) % 128
+        int forward_x = heading(yaw)
+        int forward_z = -heading(yaw + 32)
+        int step_x = (forward_x * walk - forward_z * strafe) * elapsed // 128
+        int step_z = (forward_z * walk + forward_x * strafe) * elapsed // 128
+        player_x = slide(player_x, player_z, step_x, True)
+        player_z = slide(player_z, player_x, step_z, False)
+        if abs(player_x - 14 * 16) < 40 and abs(player_z + 8 * 16) < 40:
+            collected = True
+        if collected and player_x < -18 * 16 and player_z > 8 * 16:
+            won = True
+
+    clear()
+    if won:
+        print("YOU WIN", 27, 24)
+        print("CLEAR: EXIT", 15, 39)
+    else:
+        int x = player_x // 16
+        int z = player_z // 16
+        camera(x, 0, z, x + heading(yaw) // 8, 0, z - heading(yaw + 32) // 8)
+        no_lights()
+        ambient_light(14)
+        point_light(sun_x, 24, sun_z, radius=96, intensity=8)
+        draw_mesh(room, cull=False, depth_test=False, outline=True)
+
+        # Paint the far room's prop first, then the dividing wall, then ours.
+        if x < 0:
+            if not collected:
+                draw_prop(crystal, 14, -8)
+            draw_mesh(doorway, cull=False, depth_test=False, outline=True)
+            draw_prop(panel, -8, 0)
+        else:
+            draw_prop(panel, -8, 0)
+            draw_mesh(doorway, cull=False, depth_test=False, outline=True)
+            if not collected:
+                draw_prop(crystal, 14, -8)
+        for row in range(9):
+            for column in range(96):
+                pixel_off(column, row)
+        if collected:
+            print("RETURN WEST", 1, 1)
+        else:
+            print("FIND CRYSTAL", 1, 1)
+    render()
+
+time.stop_frame_timer()
+set_cpu_speed(6)
