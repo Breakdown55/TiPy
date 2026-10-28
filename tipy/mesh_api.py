@@ -35,6 +35,13 @@ def install(tree):
             if any(v is None for v in values):raise CompileError('Mesh entries must be constant integers',row)
             result.append(values)
         return result
+    effective_points=False
+    for call in nodes:
+        if call.get('kind')=='call' and call.get('name') in {'point_light','__tipy_native_solid_point_light'}:
+            args=call['arguments'];positionals=[a for a in args if a.get('kind')!='keyword']
+            intensity=next((a['value'] for a in args if a.get('kind')=='keyword' and a['name']=='intensity'),positionals[4] if len(positionals)>4 else None)
+            if intensity is None or integer(intensity) not in {0,1}:effective_points=True
+    quad_format=tree.get('render_quality')=='aggressive' and not effective_points
     for n in nodes:
         if n.get('kind')!='call':continue
         name=n.get('name')
@@ -72,7 +79,7 @@ def install(tree):
             if len(faces)>128:raise CompileError('Meshes allow at most 128 triangles',n)
             if any(sum(abs(c) for c in v)>60 for v in vertices):raise CompileError('Mesh vertex |x| + |y| + |z| must be at most 60',n)
             if any(not 0<=i<len(vertices) for edge in edges for i in edge):raise CompileError('Mesh edge index is outside the vertex array',n)
-            face_data=[]
+            face_data=[];records=[]
             import math
             for face in faces:
                 if any(not 0<=i<len(vertices) for i in face[:3]):raise CompileError('Mesh face index is outside the vertex array',n)
@@ -83,7 +90,11 @@ def install(tree):
                 length=math.sqrt(sum(x*x for x in normal))
                 if length==0:raise CompileError('Mesh triangle has zero area after integer quantization',n)
                 normal=[round(x*256/length) for x in normal]
-                face_data.extend(face[:3]+[shade]+[byte for x in normal for byte in (x&255,(x>>8)&255)])
+                records.append((face[:3],shade,normal))
+            if quad_format:
+                records=merge_coplanar(vertices,records)
+            for indices,shade,normal in records:
+                face_data.extend(indices+(([255] if len(indices)==3 else [])+[shade,0] if quad_format else [shade])+[byte for x in normal for byte in (x&255,(x>>8)&255)])
             if faces and not edges:
                 seen_edges=set()
                 for f in faces:
@@ -91,9 +102,37 @@ def install(tree):
                         edge=tuple(sorted((a,b)))
                         if edge not in seen_edges:edges.append(edge);seen_edges.add(edge)
                 if len(edges)>192:raise CompileError('Triangulated mesh exceeds the 192-edge limit',n)
-            words=[0x4d54,len(vertices),len(edges),max(sum(abs(c) for c in v) for v in vertices)+2,len(faces)]+[c for v in vertices for c in v]
+            words=[0x4d54,len(vertices),len(edges),max(sum(abs(c) for c in v) for v in vertices)+2,len(records)]+[c for v in vertices for c in v]
             data=[b for w in words for b in (w&255,(w>>8)&255)]+[i for e in edges for i in e]+face_data
             location={k:n[k] for k in ('line','column','filename') if k in n}
-            n.clear();n.update(kind='geometry_data',data=data,vertex_count=len(vertices),face_count=len(faces),**location)
+            n.clear();n.update(kind='geometry_data',data=data,vertex_count=len(vertices),face_count=len(records),quad_format=quad_format,**location)
         elif name in {'draw_mesh','mesh_light','no_lights','ambient_light','directional_light','point_light'} or mesh_active and name in {'init_camera','camera','set_fov'}:
             n['name']='__tipy_native_'+{'draw_mesh':'mesh_draw','mesh_light':'solid_light','no_lights':'solid_no_lights','ambient_light':'solid_ambient_light','directional_light':'solid_directional_light','point_light':'solid_point_light','init_camera':'mesh_init','camera':'mesh_look','set_fov':'mesh_fov'}[name]
+
+
+def merge_coplanar(vertices,records):
+    """Merge consecutive equally shaded triangles only into convex planar quads."""
+    def cross(a,b):return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]
+    def delta(a,b):return [a[i]-b[i] for i in range(3)]
+    output=[];i=0
+    while i<len(records):
+        first=records[i];merged=None
+        if i+1<len(records):
+            second=records[i+1];a,b=first[0],second[0]
+            if first[1:]==second[1:] and len(set(a)&set(b))==2:
+                edges=[(t[j],t[(j+1)%3]) for t in (a,b) for j in range(3)]
+                boundary=[e for e in edges if (e[1],e[0]) not in edges]
+                if len(boundary)==4:
+                    quad=list(boundary[0])
+                    while len(quad)<4:
+                        next_vertex=next((v for u,v in boundary if u==quad[-1] and v not in quad),None)
+                        if next_vertex is None:break
+                        quad.append(next_vertex)
+                    if len(quad)==4 and (quad[-1],quad[0]) in boundary:
+                        p=[vertices[j] for j in quad]
+                        normal=cross(delta(p[1],p[0]),delta(p[2],p[0]))
+                        planar=sum(normal[j]*(p[3][j]-p[0][j]) for j in range(3))==0
+                        convex=all(sum(x*y for x,y in zip(cross(delta(p[(j+1)%4],p[j]),delta(p[(j+2)%4],p[(j+1)%4])),normal))>0 for j in range(4))
+                        if planar and convex:merged=(quad,first[1],first[2])
+        output.append(merged or first);i+=2 if merged else 1
+    return output

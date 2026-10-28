@@ -3,7 +3,8 @@ from .camera_math import NativeRoutine,invoke
 from .list_runtime import add,sub,word,byte
 
 
-def routines(points=True):
+def routines(points=True,quads=False):
+    normal_offset=6 if quads else 4
     out=['__gfx_light_count: dw 0\n__gfx_light_points: dw 0',
          '__gfx_light_records: defs 48,0',
          '__gfx_light_normal: defs 6,0\n__gfx_light_center: defs 6,0\n__gfx_light_delta: defs 6,0\n__gfx_light_unit: defs 6,0']
@@ -27,7 +28,8 @@ def routines(points=True):
     r.if_(('slt','radius',1),lambda:r.fail(14));r.if_(('slt',1024,'radius'),lambda:r.fail(14))
     for n in 'xyz':
         r.if_(('slt',n,-512),lambda:r.fail(14));r.if_(('slt',512,n),lambda:r.fail(14))
-    r.set('p',invoke('light_acquire','intensity'));r.write('p',2);r.write('@__gfx_light_points',1)
+    r.set('p',invoke('light_acquire','intensity'));r.write('p',2)
+    r.if_(('slt',1,'intensity'),lambda:r.write('@__gfx_light_points',1))
     for i,n in enumerate(('x','y','z','intensity','radius')):r.write(add('p',2+i*2),n)
     r.ret();out.append(r.finish())
     r=NativeRoutine('light_div3',('v',),('negative',))
@@ -49,6 +51,9 @@ def routines(points=True):
     r.ret();out.append(r.finish())
     r=NativeRoutine('light_point',('p',),('i','v','distance','radius','intensity','max'))
     r.set('radius',word(add('p',10)));r.set('intensity',word(add('p',8)));r.set('max',0)
+    # Linear integer falloff is strictly below one away from the source, and
+    # zero distance already returns zero. Intensities 0/1 cannot contribute.
+    r.if_(('ult','intensity',2),lambda:r.ret(0))
     for i in range(3):
         r.set('v',sub(word(add('p',2+i*2)),word(add('@__gfx_light_center',i*2))))
         r.write(add('@__gfx_light_delta',i*2),'v');r.if_(('negative','v'),lambda:r.set('v',sub(0,'v')))
@@ -62,7 +67,11 @@ def routines(points=True):
     r.ret(invoke('mesh_mul','v','intensity'));out.append(r.finish())
     r=NativeRoutine('light_faces',('face',),('i','p','sum','v'))
     r.if_(('eq',word('@__gfx_light_count'),0),lambda:r.ret(0))
-    for axis in range(3):r.write(add('@__gfx_light_normal',axis*2),invoke('mesh_dot',add('@__gfx_mesh_rotation',axis*6),add('face',4),2))
+    def normal():
+        for axis in range(3):r.write(add('@__gfx_light_normal',axis*2),invoke('mesh_dot',add('@__gfx_mesh_rotation',axis*6),add('face',normal_offset),2))
+    def identity_normal():
+        r.expr(add('face',normal_offset));r.emit('ld de,__gfx_light_normal','ld bc,6','ldir')
+    r.if_(('ne',word('@__gfx_mesh_identity_active'),0),identity_normal,normal)
     if points:r.if_(('ne',word('@__gfx_light_points'),0),lambda:r.expr(invoke('light_centroid','face')))
     r.set('i',0);r.set('p','@__gfx_light_records');r.set('sum',0)
     def light():

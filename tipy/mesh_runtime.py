@@ -63,12 +63,18 @@ __gfx_mesh_gain: defs 512,0''']
         if i!=2:r.set('a',add('a',2));r.set('b',add('b','step'))
     r.ret('sum');out.append(r.finish())
 
-    r=NativeRoutine('mesh_vertex_dot',('a','b'),('sum','v'))
+    r=NativeRoutine('mesh_vertex_dot',('a','b'),('sum',))
     r.set('sum',0)
     for i in range(3):
-        r.set('v',invoke('mesh_imul',word(add('b',i*2)),word(add('a',i*2))))
-        r.set('sum',add('sum','v'))
-    r.ret('sum');out.append(r.finish())
+        r.expr(('byte',add('b',i*2)));r.emit('ld c,l')
+        r.expr(word(add('a',i*2)));r.emit('ld d,h','ld e,l','ld a,c','or a')
+        positive,ready,loop,skip,done=(r.label() for _ in range(5))
+        r.emit(f'jp p,{positive}','neg','ld c,a','xor a','sub e','ld e,a','sbc a,a','sub d','ld d,a','ld a,c',f'jr {ready}')
+        r.mark(positive);r.mark(ready);r.emit('ld hl,0','or a',f'jr z,{done}')
+        r.mark(loop);r.emit('srl a',f'jr nc,{skip}','add hl,de');r.mark(skip)
+        r.emit('sla e','rl d','or a',f'jr nz,{loop}');r.mark(done)
+        offset=r.slots['sum'];r.emit(f'ld e,(ix{offset:+d})',f'ld d,(ix{offset+1:+d})','add hl,de');r._store('sum')
+    r.emit(f'jp {r.name}_return');out.append(r.finish())
 
     r=NativeRoutine('mesh_imul',('a','b'))
     r.expr('a');r.emit('ld a,l','or a')
@@ -81,22 +87,30 @@ __gfx_mesh_gain: defs 512,0''']
 
     # Every model/view coefficient is at most 512. Multiply the low eight
     # coefficient bits in eight iterations, with exact 1x/2x shortcuts.
-    r=NativeRoutine('mesh_mul',('a','b'),('negative','result','v'))
-    r.set('negative',0)
-    for name in ('a','b'):
-        r.if_(('negative',name),lambda name=name:(r.set(name,sub(0,name)),r.set('negative',sub(1,'negative'))))
-    r.if_(('ult','a','b'),lambda:(r.set('v','a'),r.set('a','b'),r.set('b','v')))
-    done=r.label()
-    for coefficient in (0,256,512):
-        def shortcut(coefficient=coefficient):
-            r.set('result',0 if coefficient==0 else 'a' if coefficient==256 else add('a','a'));r.emit(f'jp {done}')
-        r.if_(('eq','b',coefficient),shortcut)
-    r.expr('b');r.emit('ld a,h','push af');r.expr('a');r.emit('ld d,h','ld e,l');r.expr('b');r.emit('ld a,l','ld hl,0','ld c,0','ld b,8')
-    loop,skip=r.label(),r.label();r.mark(loop)
-    r.emit('add hl,hl','rl c','sla a',f'jr nc,{skip}','add hl,de',f'jr nc,{skip}','inc c');r.mark(skip);r.emit(f'djnz {loop}','ld a,l','ld l,h','ld h,c','bit 7,a')
-    rounded=r.label();r.emit(f'jr z,{rounded}','inc hl');r.mark(rounded);r.emit('pop af','or a')
-    no_high=r.label();r.emit(f'jr z,{no_high}','add hl,de');r.mark(no_high);r._store('result')
-    r.mark(done);r.if_(('ne','negative',0),lambda:r.ret(sub(0,'result')));r.ret('result');out.append(r.finish())
+    r=NativeRoutine('mesh_mul',('a','b'))
+    r.expr('a');r.emit('push hl');r.expr('b');r.emit('ex de,hl','pop hl')
+    r.emit('ld a,h','xor d','and 128',"ex af,af'",'bit 7,h','jr z,__gfx_mesh_mul_a_positive',
+           'xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
+    r.mark('__gfx_mesh_mul_a_positive')
+    r.emit('bit 7,d','jr z,__gfx_mesh_mul_b_positive','xor a','sub e','ld e,a','sbc a,a','sub d','ld d,a')
+    r.mark('__gfx_mesh_mul_b_positive')
+    r.emit('ld a,h','cp d','jr c,__gfx_mesh_mul_swap','jr nz,__gfx_mesh_mul_ordered','ld a,l','cp e','jr nc,__gfx_mesh_mul_ordered')
+    r.mark('__gfx_mesh_mul_swap');r.emit('ex de,hl')
+    r.mark('__gfx_mesh_mul_ordered')
+    r.emit('ld a,d','or e','jr nz,__gfx_mesh_mul_nonzero','ld hl,0','jr __gfx_mesh_mul_sign')
+    r.mark('__gfx_mesh_mul_nonzero')
+    r.emit('ld a,e','or a','jr nz,__gfx_mesh_mul_product','ld a,d','cp 1','jr z,__gfx_mesh_mul_sign','cp 2','jr nz,__gfx_mesh_mul_product','add hl,hl','jr __gfx_mesh_mul_sign')
+    r.mark('__gfx_mesh_mul_product')
+    r.emit('push de','ex de,hl','ld a,l','ld hl,0','ld c,0','ld b,8')
+    r.mark('__gfx_mesh_mul_bits')
+    r.emit('add hl,hl','rl c','sla a','jr nc,__gfx_mesh_mul_skip','add hl,de','jr nc,__gfx_mesh_mul_skip','inc c')
+    r.mark('__gfx_mesh_mul_skip')
+    r.emit('djnz __gfx_mesh_mul_bits','ld a,l','ld l,h','ld h,c','bit 7,a','jr z,__gfx_mesh_mul_rounded','inc hl')
+    r.mark('__gfx_mesh_mul_rounded')
+    r.emit('pop bc','ld a,b','or a','jr z,__gfx_mesh_mul_sign','add hl,de')
+    r.mark('__gfx_mesh_mul_sign')
+    r.emit("ex af,af'",'or a',f'jp z,{r.name}_return','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a',f'jp {r.name}_return')
+    out.append(r.finish())
 
     r=NativeRoutine('mesh_draw',('model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded','depth_test','outline'),
                     ('sx','cx','sy','cy','sz','cz','a','b','i','j','p','record','vertices','edges','count','radius'))
@@ -134,9 +148,10 @@ __gfx_mesh_gain: defs 512,0''']
     # This includes the common static level + translated pickup case.
     r.expr('yaw');r.emit('ld b,l');r.expr('pitch');r.emit('ld a,l','or b','ld b,a');r.expr('roll');r.emit('ld a,l','or b',f'jp nz,{general}')
     r.if_(('ne','size',256),lambda:r.emit(f'jp {general}'))
+    r.write('@__gfx_mesh_identity_active',1)
     for source,target in (('__gfx_mesh_identity','__gfx_mesh_rotation'),('__gfx_mesh_basis','__gfx_mesh_view'))+((('__gfx_mesh_basis','__gfx_mesh_norm_view'),) if solid else ()):
         r.emit(f'ld hl,{source}',f'ld de,{target}','ld bc,18','ldir')
-    r.emit(f'jp {transformed}');r.mark(general)
+    r.emit(f'jp {transformed}');r.mark(general);r.write('@__gfx_mesh_identity_active',0)
     for angle,axis in (('pitch','x'),('yaw','y'),('roll','z')):
         r.expr(angle);r.emit('ld h,0','add hl,hl','ld de,__gfx_mesh_sine','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','ex de,hl');r._store('s'+axis)
         r.expr(angle);r.emit('ld a,l','add a,64','ld l,a','ld h,0','add hl,hl','ld de,__gfx_mesh_sine','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','ex de,hl');r._store('c'+axis)
@@ -174,7 +189,7 @@ __gfx_mesh_gain: defs 512,0''']
         r.if_(('ne','filled',0),lambda:r.if_(('ne',word(add('model',8)),0),lambda:(r.expr(invoke('solid_prepare','vertices')),r.expr(invoke('solid_draw',add('p',add('edges','edges')),word(add('model',8)),'cull','shaded')),r.if_(('eq','outline',0),lambda:r.ret()))))
     if wire:r.expr(invoke('wf_draw','vertices','edges','p'))
     r.ret();out.append(r.finish())
-    out.append('__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256')
+    out.append('__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256\n__gfx_mesh_identity_active: dw 0')
     if extended:out.append('__gfx_mesh_instance: defs 8,0\n__gfx_mesh_source: dw 0')
     out.append(_normalize())
     return out

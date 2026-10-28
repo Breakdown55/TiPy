@@ -12,7 +12,7 @@ def _copy(r,src,dst,count=12):
     r.expr(src);r.emit('push hl');r.expr(dst);r.emit('ex de,hl','pop hl',f'ld bc,{count}','ldir')
 
 
-def routines(extended=False,culling=True,depth_enabled=True,dynamic_depth=False):
+def routines(extended=False,culling=True,depth_enabled=True,dynamic_depth=False,quads=False):
     out=['__gfx_solid_guard_before: db 165\n__gfx_solid_depth: defs 6144,0\n__gfx_solid_guard_after: db 90','__gfx_solid_flags: defs 64,0',
          '__gfx_solid_light_vector: dw -68,137,205\n__gfx_solid_ambient: dw 3\n__gfx_solid_direction_enabled: dw 1',
          '''__gfx_solid_poly_a: defs 144,0
@@ -72,11 +72,17 @@ __gfx_solid_pattern: db 0''']
     r=NativeRoutine('solid_clip',('src','count','dst','axis','bound','keep'),('prev','cur','ip','ic','i','n','out','outside','inside'))
     r.if_(('eq','count',0),lambda:r.ret(0))
     r.set('prev',add('src',invoke('mesh_imul',sub('count',1),12)));r.set('cur','src');r.set('out','dst');r.set('i',0);r.set('n',0)
-    r.set('ip',invoke('wf_inside','prev','axis','bound','keep'))
+    def inside(point,target):
+        equal,done=r.label(),r.label()
+        r.expr(word(add(point,'axis')));r.emit('push hl');r.expr('bound')
+        r.emit('ex de,hl','pop hl','ld a,h','xor 128','ld h,a','ld a,d','xor 128','ld d,a','or a','sbc hl,de',f'jr z,{equal}',
+               'ld a,0','adc a,0','ld b,a',f"ld a,(ix{r.slots['keep']:+d})",'xor b','ld l,a','ld h,0',f'jr {done}')
+        r.mark(equal);r.emit('ld hl,1');r.mark(done);r._store(target)
+    inside('prev','ip')
     def append(src):
         _copy(r,src,'out');r.set('out',add('out',12));r.set('n',add('n',1))
     def clip():
-        r.set('ic',invoke('wf_inside','cur','axis','bound','keep'))
+        inside('cur','ic')
         def intersection():
             r.set('outside','prev');r.set('inside','cur')
             r.if_(('ne','ip',0),lambda:(r.set('outside','cur'),r.set('inside','prev')))
@@ -121,7 +127,7 @@ __gfx_solid_pattern: db 0''']
     r.while_(('ult','y','end'),row);r.ret();out.append(r.finish())
     if not depth_enabled or dynamic_depth:
         out.extend(['__gfx_solid_bounds: defs 256,0',_flat_polygon('solid_flat_span_row' if depth_enabled else 'solid_span_row')])
-    out.append(_draw(extended,culling,depth_enabled,dynamic_depth))
+    out.append(_draw(extended,culling,depth_enabled,dynamic_depth,quads))
     if not depth_enabled:
         out[0]=''
         out=[('__gfx_solid_clear:\n        ret' if s.startswith('__gfx_solid_clear:') else s) for s in out]
@@ -182,58 +188,72 @@ __gfx_solid_span_row:
         add hl,de
         push hl
         ld a,c
-        sub b
-        ld e,a
+        dec a
+        and 7
+        ld l,a
+        ld h,0
+        ld de,__gfx_solid_span_last_masks
+        add hl,de
+        ld a,(hl)
+        push af
         ld a,b
         and 7
         ld l,a
         ld h,0
-        ld bc,__gfx_solid_span_masks
-        add hl,bc
-        ld c,(hl)
-        ld b,e
+        ld de,__gfx_solid_span_first_masks
+        add hl,de
+        ld d,(hl)
+        pop af
+        ld e,a
+        ld a,c
+        dec a
+        srl a
+        srl a
+        srl a
+        ld c,a
+        ld a,b
+        srl a
+        srl a
+        srl a
+        ld b,a
+        ld a,c
+        sub b
+        ld b,a
         ld a,(__gfx_solid_pattern)
-        ld d,a
+        ld c,a
         pop hl
-        ld a,c
-        cp 128
-        jr z,__gfx_solid_span_aligned
-__gfx_solid_span_pixel:
+        ld a,b
+        or a
+        jr nz,__gfx_solid_span_multiple
         ld a,d
-        and c
-        jr nz,__gfx_solid_span_black
+        and e
+        ld d,a
+        jr __gfx_solid_span_blend
+__gfx_solid_span_multiple:
         ld a,c
-        cpl
-        and (hl)
-        jr __gfx_solid_span_store
-__gfx_solid_span_black:
-        ld a,(hl)
-        or c
-__gfx_solid_span_store:
+        xor (hl)
+        and d
+        xor (hl)
         ld (hl),a
-        rrc c
-        jr nc,__gfx_solid_span_partial
         inc hl
         dec b
-        ret z
-        jr __gfx_solid_span_aligned
-__gfx_solid_span_partial:
-        djnz __gfx_solid_span_pixel
-        ret
-__gfx_solid_span_aligned:
-        ld a,b
-        cp 8
-        jr c,__gfx_solid_span_pixel
-__gfx_solid_span_whole:
-        ld (hl),d
+        jr z,__gfx_solid_span_last
+__gfx_solid_span_middle:
+        ld (hl),c
         inc hl
-        sub 8
-        ld b,a
-        ret z
-        cp 8
-        jr nc,__gfx_solid_span_whole
-        jr __gfx_solid_span_pixel
-__gfx_solid_span_masks: db 128,64,32,16,8,4,2,1
+        djnz __gfx_solid_span_middle
+__gfx_solid_span_last:
+        ld d,e
+__gfx_solid_span_blend:
+        ld a,c
+        xor (hl)
+        and d
+        xor (hl)
+        ld (hl),a
+        ret
+__gfx_solid_span_first_masks: db 255,127,63,31,15,7,3,1
+__gfx_solid_span_last_masks: db 128,192,224,240,248,252,254,255
+
 """
 
 
@@ -302,10 +322,19 @@ def _span_setup(r):
 
 def _flat_polygon(row_name='solid_span_row'):
     """Scan each convex clipped boundary once, without fan diagonals or depth."""
-    r=NativeRoutine('solid_flat_polygon',('poly','count','shade'),('i','a','b','v','ya','yb','y','end','x','step','negative','left','right'))
+    r=NativeRoutine('solid_flat_polygon',('poly','count','shade'),('i','a','b','v','ya','yb','y','end','x','step','negative','left','right','top','bottom'))
+    # Touch only rows this polygon covers, especially important for small
+    # meshes. Projected/clipped y coordinates are integers in 0..64.
+    extent,next_top,next_bottom,advance=(r.label() for _ in range(4))
+    r.expr('count');r.emit('ld b,l');r.expr('poly');r.emit('ld de,8','add hl,de','ld d,64','ld e,0')
+    r.mark(extent);r.emit('ld a,(hl)','cp d',f'jr nc,{next_top}','ld d,a');r.mark(next_top)
+    r.emit('cp e',f'jr c,{next_bottom}','ld e,a');r.mark(next_bottom)
+    r.emit('ld a,l','add a,12','ld l,a',f'jr nc,{advance}','inc h');r.mark(advance);r.emit(f'djnz {extent}')
+    r.emit('ld l,d','ld h,0');r._store('top');r.emit('ld l,e');r._store('bottom')
+    r.if_(('uge','top','bottom'),lambda:r.ret())
     # Interleaved min/max bounds let one index register address both sides.
     initialize=r.label()
-    r.emit('ld hl,__gfx_solid_bounds','ld b,64');r.mark(initialize)
+    r.expr(sub('bottom','top'));r.emit('ld b,l');r.expr('top');r.emit('add hl,hl','add hl,hl','ld de,__gfx_solid_bounds','add hl,de');r.mark(initialize)
     r.emit('ld (hl),255','inc hl','ld (hl),127','inc hl','ld (hl),0','inc hl','ld (hl),0','inc hl',f'djnz {initialize}')
     r.set('a',add('poly',invoke('mesh_imul',sub('count',1),12)))
     r.set('b','poly');r.set('i',0)
@@ -333,39 +362,44 @@ def _flat_polygon(row_name='solid_span_row'):
         r.if_(('ne','ya','yb'),active)
         r.set('a','b');r.set('b',add('b',12));r.set('i',add('i',1))
     r.while_(('ult','i','count'),edge)
-    r.expr('shade');r.emit('ld c,l','ld b,0','push iy','ld iy,__gfx_solid_bounds')
+    r.expr('shade');r.emit('ld c,l');r.expr('top');r.emit('ld b,l','add hl,hl','add hl,hl','ld de,__gfx_solid_bounds','add hl,de','push iy','push hl','pop iy')
     fill=r.label();r.mark(fill)
     r.emit('push bc','push bc','ld l,(iy+0)','ld h,(iy+1)','ld e,(iy+2)','ld d,(iy+3)',
            'ld a,l','add a,127','ld a,h','adc a,0','ld b,a',
            'ld a,e','add a,127','ld a,d','adc a,0','ld c,a','pop de',f'call __gfx_{row_name}',
-           'pop bc','inc iy','inc iy','inc iy','inc iy','inc b','ld a,b','cp 64',f'jr c,{fill}','pop iy')
+           'pop bc','inc iy','inc iy','inc iy','inc iy','inc b','ld a,b',f"cp (ix{r.slots['bottom']:+d})",f'jr c,{fill}','pop iy')
     r.ret();return r.finish()
 
 
-def _draw(extended,culling,depth_enabled=True,dynamic_depth=False):
+def _draw(extended,culling,depth_enabled=True,dynamic_depth=False,quads=False):
+    normal_offset=6 if quads else 4
     r=NativeRoutine('solid_draw',('faces','count','cull','shaded'),('i','face','j','p','n','flags','common','v','shade','poly','other'))
     r.if_(('uge','count',129),lambda:r.fail(14))
-    for i in range(3):r.write(add('@__gfx_solid_local_light',i*2),invoke('mesh_dot','@__gfx_solid_light_vector',add('@__gfx_mesh_rotation',i*2),6))
+    def local_light():
+        for i in range(3):r.write(add('@__gfx_solid_local_light',i*2),invoke('mesh_dot','@__gfx_solid_light_vector',add('@__gfx_mesh_rotation',i*2),6))
+    r.if_(('ne','shaded',0),lambda:r.if_(('ne',word('@__gfx_solid_direction_enabled'),0),local_light))
     r.set('face','faces');r.set('i',0)
     def face():
         skip=r.label()
-        r.set('flags',0);r.set('common',63)
-        for j in range(3):
+        r.set('flags',0);r.set('common',63);r.set('n',3)
+        def vertex(j):
             r.set('v',byte(add('@__gfx_solid_flags',byte(add('face',j)))))
             for name,op in (('flags','or'),('common','and')):
                 r.expr(name);r.emit('ld b,l');r.expr('v');r.emit('ld a,l',op+' b','ld l,a','ld h,0');r._store(name)
             r.expr(byte(add('face',j)));r.emit('add hl,hl','add hl,hl','push hl','add hl,hl','pop de','add hl,de','ld de,__gfx_wf_records','add hl,de');r._store('p')
             _copy(r,'p',add('@__gfx_solid_poly_a',j*12))
+        for j in range(3):vertex(j)
+        if quads:r.if_(('ne',byte(add('face',3)),255),lambda:(vertex(3),r.set('n',4)))
         r.if_(('ne','common',0),lambda:r.emit(f'jp {skip}'))
         def cull():
-            for j in range(3):r.write(add('@__gfx_solid_normal',j*2),invoke('mesh_dot',add('@__gfx_mesh_norm_view',j*6),add('face',4),2))
+            for j in range(3):r.write(add('@__gfx_solid_normal',j*2),invoke('mesh_dot',add('@__gfx_mesh_norm_view',j*6),add('face',normal_offset),2))
             r.if_(('eq',invoke('solid_facing','@__gfx_solid_normal','@__gfx_solid_poly_a'),0),lambda:r.emit(f'jp {skip}'))
         if culling:r.if_(('ne','cull',0),cull)
-        r.set('shade',byte(add('face',3)))
+        r.set('shade',byte(add('face',4 if quads else 3)))
         def light():
             r.set('v',word('@__gfx_solid_ambient'))
             def legacy():
-                r.set('v',invoke('mesh_dot',add('face',4),'@__gfx_solid_local_light',2))
+                r.set('v',invoke('mesh_dot',add('face',normal_offset),'@__gfx_solid_local_light',2))
                 r.if_(('negative','v'),lambda:r.set('v',0));r.if_(('slt',256,'v'),lambda:r.set('v',256))
                 r.set('v',add(word('@__gfx_solid_ambient'),invoke('mesh_mul','v',sub(16,word('@__gfx_solid_ambient')))))
             r.if_(('ne',word('@__gfx_solid_direction_enabled'),0),legacy)
@@ -373,7 +407,7 @@ def _draw(extended,culling,depth_enabled=True,dynamic_depth=False):
             r.if_(('slt',16,'v'),lambda:r.set('v',16))
             r.expr(invoke('mesh_imul','v','shade'));r.emit('srl h','rr l','srl h','rr l','srl h','rr l','srl h','rr l');r._store('shade')
         r.if_(('ne','shaded',0),light)
-        r.set('poly','@__gfx_solid_poly_a');r.set('other','@__gfx_solid_poly_b');r.set('n',3)
+        r.set('poly','@__gfx_solid_poly_a');r.set('other','@__gfx_solid_poly_b')
         def clip(axis,bound,keep):
             r.set('n',invoke('solid_clip','poly','n','other',axis,bound,keep));r.if_(('ult','n',3),lambda:r.emit(f'jp {skip}'))
             r.set('v','poly');r.set('poly','other');r.set('other','v')
@@ -395,5 +429,5 @@ def _draw(extended,culling,depth_enabled=True,dynamic_depth=False):
         if not depth_enabled:flat()
         elif dynamic_depth:r.if_(('eq',word('@__gfx_solid_depth_enabled'),0),flat,fan)
         else:fan()
-        r.mark(skip);r.set('face',add('face',10));r.set('i',add('i',1))
+        r.mark(skip);r.set('face',add('face',12 if quads else 10));r.set('i',add('i',1))
     r.while_(('ult','i','count'),face);r.ret();return r.finish()

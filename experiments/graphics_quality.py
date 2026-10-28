@@ -4,6 +4,7 @@ This does not change the editor's compiler defaults. All approximations execute
 on the emulated Z80; the host only assembles, measures and captures the LCD.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -68,8 +69,10 @@ __gfx_preview_quantize_no_carry:
     def solid(*args, **kwargs):
         groups = original_solid(*args, **kwargs)
         if profile['row_step'] == 2:
-            groups = [g.replace('inc b\n        ld a,b\n        cp 64',
-                                'inc b\n        inc b\n        ld a,b\n        cp 64')
+            groups = [re.sub(r'inc b\n        ld a,b\n        cp (\(ix-\d+\))',
+                             r'inc b\n        inc b\n        ld a,b\n        cp \1',g)
+                      .replace('ld l,d\n        ld h,0','ld a,d\n        and 254\n        ld l,a\n        ld h,0')
+                      .replace('ld l,e\n','ld a,e\n        inc a\n        and 254\n        ld l,a\n')
                       if g.startswith('__gfx_solid_flat_polygon:') else g for g in groups]
             groups = [g.replace('ld a,d\n        and 3', 'ld a,d\n        srl a\n        and 3')
                       if g.startswith('__gfx_solid_span:') else g for g in groups]
@@ -78,8 +81,7 @@ __gfx_preview_quantize_no_carry:
     def graphics(used):
         assembly = original_graphics(used)
         if profile['name'] == 'Aggressive':
-            from tipy.render_quality import apply
-            return apply(assembly, 'aggressive')
+            return assembly  # The normal compiler applies this selected policy.
         stride = profile['light_stride']
         if stride > 1 and '__gfx_light_faces:' in assembly:
             assembly = assembly.replace('__gfx_light_faces:', '__gfx_preview_light_full:')
@@ -181,7 +183,9 @@ __gfx_preview_resolve_byte:
 if __name__ == '__main__':
     profile = PROFILES[int(sys.argv[1])]
     configure(profile)
-    result = compile_project({'main.tip':sys.stdin.read()}, 'main.tip')
+    source=sys.stdin.read()
+    if profile['name']=='Aggressive':source='set_render_quality("aggressive")\n'+source
+    result = compile_project({'main.tip':source}, 'main.tip')
     result['estimated_bytes'] = estimate(result['assembly'])
     result['quality_profile'] = profile
     print(json.dumps(result))

@@ -375,9 +375,56 @@ def optimize_program(checked, symbols, mode):
         report.append({"pass": "dead-state-elimination", "removed": dead})
         report.append({"pass": "small-function-inlining", "inlined": inlined})
         if not (propagation.folded or dead or inlined): break
+    report.append({'pass':'static-pixel-batches','loops_lowered':lower_pixel_loops(tree)})
     reachable(tree)
     report.append({"pass": "frame-compaction", "bytes_removed": compact_frames(tree)})
     mentioned = {node.get("symbol") for node in walk(tree["body"]) if "symbol" in node}
     tree["temporaries"] = {name: slot for name, slot in tree.get("temporaries", {}).items() if slot["label"] in mentioned}
     emitted = symbols if mode == "balanced" else {name: symbol for name, symbol in symbols.items() if symbol["label"] in mentioned}
     return tree, emitted, report
+
+
+def lower_pixel_loops(tree):
+    """Collapse isolated constant pixel loops without assuming existing RAM."""
+    lowered=0
+    allowed={'for','if','pass','expression_statement','graphics','name','number','boolean',
+             'builtin','add','subtract','multiply','floor_divide','modulo','negate','not',
+             'compare','and','or','bit_and','bit_or','bit_xor','shift_left','shift_right'}
+    def visit(item):
+        nonlocal lowered
+        if isinstance(item,list):
+            for value in item:visit(value)
+            return
+        if not isinstance(item,dict):return
+        if item.get('kind')=='for':
+            nodes=list(walk(item))
+            loops=[n for n in nodes if n.get('kind')=='for']
+            targets={n['target']['symbol']:n['target'] for n in loops if n.get('iteration_kind')=='range'}
+            safe=all(n.get('kind') in allowed or 'kind' not in n for n in nodes)
+            safe=safe and all(n.get('iteration_kind')=='range' for n in loops)
+            safe=safe and all(n.get('kind')!='name' or n['symbol'] in targets for n in nodes)
+            safe=safe and all(n.get('kind')!='builtin' or n.get('name')=='range' for n in nodes)
+            pixels=[n for n in nodes if n.get('kind')=='graphics']
+            safe=safe and bool(pixels) and all(n['name'] in {'pixel_on','pixel_off','flip_pixel'} for n in pixels)
+            if safe:
+                trial=Evaluator(tree,budget=100000);trial.frame={}
+                try:trial.block([item])
+                except STATIC_ERRORS:pass
+                else:
+                    operations=[];index=0
+                    while index<768:
+                        keep,bits=trial.keep[index],trial.bits[index]
+                        if keep==255 and bits==0:index+=1;continue
+                        end=index+1
+                        while end<768 and trial.keep[end]==keep and trial.bits[end]==bits:end+=1
+                        operations.append((index,end-index,keep,bits));index=end
+                    finals=[]
+                    for target in targets.values():
+                        env=trial.frame if target.get('storage')=='frame' else trial.globals
+                        if target['symbol'] in env:finals.append({'target':deepcopy(target),'value':env[target['symbol']]})
+                    location={k:item[k] for k in ('line','column','filename') if k in item}
+                    item.clear();item.update(kind='pixel_batch',operations=operations,finals=finals,**location)
+                    lowered+=1;return
+        for value in item.values():visit(value)
+    visit(tree['body'])
+    return lowered

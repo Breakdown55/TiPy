@@ -14,6 +14,28 @@ def routines(capacity):
     table=[round(128*4096/math.sqrt(n)) for n in range(256,1024)]
     out.append('__gfx_wf_root_table:\n        dw '+','.join(map(str,table)))
     out.append('''__gfx_wf_umul:
+        ld a,b
+        or c
+        jr z,__gfx_wf_umul_zero
+        ld a,d
+        or e
+        jr z,__gfx_wf_umul_zero
+        ld a,b
+        cp 1
+        jr nz,__gfx_wf_umul_general
+        ld a,c
+        or a
+        jr nz,__gfx_wf_umul_general
+        ld h,e
+        ld l,0
+        ld e,d
+        ld d,0
+        ret
+__gfx_wf_umul_zero:
+        ld hl,0
+        ld de,0
+        ret
+__gfx_wf_umul_general:
         ld hl,0
         ld a,16
 __gfx_wf_umul_loop:
@@ -29,6 +51,36 @@ __gfx_wf_umul_skip:
         jr nz,__gfx_wf_umul_loop
         ret
 __gfx_wf_udiv:
+        ld a,d
+        or e
+        jr nz,__gfx_wf_udiv_general
+        or h
+        or l
+        ret z
+        ld a,b
+        or a
+        jr nz,__gfx_wf_udiv_general
+        ld a,c
+        or a
+        jr z,__gfx_wf_udiv_general
+        bit 7,a
+        jr nz,__gfx_wf_udiv_general
+        ld e,16
+__gfx_wf_udiv_small:
+        add hl,hl
+        rl d
+        ld a,d
+        sub c
+        jr c,__gfx_wf_udiv_small_next
+        ld d,a
+        inc l
+__gfx_wf_udiv_small_next:
+        dec e
+        jr nz,__gfx_wf_udiv_small
+        ld e,d
+        ld d,0
+        ret
+__gfx_wf_udiv_general:
         ld a,16
 __gfx_wf_udiv_loop:
         add hl,hl

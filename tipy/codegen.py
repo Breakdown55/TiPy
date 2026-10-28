@@ -523,6 +523,7 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             emit(f"ld hl,({item['label']})")
         elif kind=='geometry_data':
             if item.get('face_count'):pixels_used.add('mesh_faces')
+            if item.get('face_count') and item.get('quad_format'):pixels_used.add('solid_quads')
             data=tuple(item['data'])
             if item.get('compact'):
                 if data not in geometry_packets:
@@ -904,6 +905,22 @@ def generate(tree, symbols, *, optimize_graphics=True,_heap_bytes=HEAP_BYTES):
             if statement.get("unreachable") or kind == "function":
                 continue
             code.append(f"; Line {statement['line']}: {kind} {statement.get('name', '')}")
+            if kind=='pixel_batch':
+                for start,count,keep,bits in statement['operations']:
+                    emit(f'ld hl,{0x9340+start}')
+                    if keep==0:
+                        emit(f'ld (hl),{bits}')
+                        if count>1:emit(f'ld de,{0x9341+start}',f'ld bc,{count-1}','ldir')
+                    else:
+                        while count:
+                            chunk=min(count,255);again=label()
+                            emit(f'ld b,{chunk}');mark(again);emit('ld a,(hl)')
+                            if keep!=255:emit(f'and {keep}')
+                            if bits:emit(f'xor {bits}')
+                            emit('ld (hl),a','inc hl',f'djnz {again}');count-=chunk
+                for final in statement['finals']:
+                    emit(f"ld hl,{int(final['value'])&65535}");store(final['target'])
+                continue
             if kind=="release_temp":
                 if managed(statement["type"]):
                     load(statement);emit("push hl",f"call {release(statement['type'])}","pop de","ld hl,0");store(statement)

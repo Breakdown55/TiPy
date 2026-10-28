@@ -466,15 +466,19 @@ test('LUMEN RUN clamps wall collisions and allows held-key strafing',()=>{
 
 test('LUMEN RUN held turning follows elapsed calculator time',()=>{
     const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:20000,
-        afterFrameKeys:Array.from({length:6},(_,i)=>i===5?[15]:[3])}
+        afterFrameKeys:Array.from({length:6},(_,i)=>i===5?[15]:[3]),
+        onFrame(r,result){
+            const a=r.assembly.asm.scopes[0].symbols.get(result.symbols.yaw.label).value
+            ;(m.yaws??=[]).push(r.machine.memory[a]|r.machine.memory[a+1]<<8)
+        }}
     const values=execute(readFileSync(resolve('../../examples/lumen_run.tip'),'utf8'),m)
     // First press immediately advances three phases; subsequent motion uses
     // the 128 Hz timer at one phase per three ticks, regardless of draw cost.
     const seconds=(m.frameTimes[4]-m.frameTimes[0])/15_000_000
     assert.ok(Math.abs(values.yaw-(3+seconds*128/3))<=2)
-    assert.ok(values.yaw>30,'Turning must not remain limited to three phases/frame')
+    assert.equal(m.yaws[1],3,'A newly held direction must respond immediately')
     const movingFrames=m.frameTimes.slice(1).map((t,i)=>t-m.frameTimes[i])
-    assert.ok(Math.max(...movingFrames)<4_000_000,'Moving-frame CPU cost must stay below the previous outlined renderer')
+    assert.ok(Math.max(...movingFrames)<2_000_000,'Moving-frame CPU cost must stay below the previous outlined renderer')
 })
 
 test('Single-pass mesh outlines match separate filled and wire draws',()=>{
@@ -510,6 +514,27 @@ test('Aggressive lighting cache keeps separate instances distinct',()=>{
     for(const frame of m.frames)assert.deepEqual(frame,m.frames[0])
     assert.ok(m.assembly.includes('__gfx_quality_light_instance:'))
     assert.ok(m.stackBytes<1024)
+})
+
+test('Static pixel batches preserve arbitrary RAM and local loop results',()=>{
+    const source='def paint(int flag) -> int:\n    int y=0\n    int x=0\n    if flag!=0:\n        pixel_on(0,0)\n    for y in range(-1,9):\n        for x in range(-2,97):\n            if (x+y)%3==0:\n                flip_pixel(x,y)\n            elif x%2==0:\n                pixel_off(x,y)\n            else:\n                pixel_on(x,y)\n    return y*100+x\nint final=paint(int(key_down("left")))\npixel_on(final%96,63)\nrender()'
+    const seed=Uint8Array.from({length:768},(_,i)=>(i*57+139)&255)
+    const baseline={project:true,optimization:'reference',seedGraph:seed,guardGraph:true,trackStack:true}
+    const optimized={project:true,optimization:'aggressive',seedGraph:seed,guardGraph:true,trackStack:true}
+    const before=execute(source,baseline),after=execute(source,optimized)
+    assert.equal(before.final,896);assert.equal(after.final,896)
+    assert.deepEqual(optimized.frames,baseline.frames)
+    assert.ok(optimized.report.some(p=>p.pass==='static-pixel-batches'&&p.loops_lowered>0))
+    assert.ok(optimized.tStates<baseline.tStates/3)
+})
+
+test('Merged coplanar faces preserve opaque pixels and explicit borders',()=>{
+    const source='int m=mesh([(-18,-12,0),(18,-12,0),(18,12,0),(-18,12,0)],edges=[(0,1),(1,2),(2,3),(3,0)],faces=[(0,1,2,11),(0,2,3,11)])\nclear()\ndraw_mesh(m,cull=False,shaded=False,depth_test=False,outline=True)\nrender()'
+    const baseline={project:true,optimization:'reference',guardGraph:true,trackStack:true}
+    const optimized={project:true,optimization:'aggressive',guardGraph:true,trackStack:true}
+    execute(source,baseline);execute('set_render_quality("aggressive")\n'+source,optimized)
+    assert.deepEqual(optimized.frames,baseline.frames)
+    assert.ok(optimized.tStates<baseline.tStates)
 })
 
 test('Convex depth-free scan conversion preserves clipped polygon coverage',()=>{
