@@ -15,7 +15,21 @@ def optimize_drawing(tree):
     def pure(item):
         if not isinstance(item, dict):
             return True
-        if item.get("kind") not in {"name", "number", "boolean", "add", "subtract", "negate", "compare", "and", "or", "not", "modulo", "multiply", "floor_divide"}:
+        if item.get("kind") not in {
+            "name",
+            "number",
+            "boolean",
+            "add",
+            "subtract",
+            "negate",
+            "compare",
+            "and",
+            "or",
+            "not",
+            "modulo",
+            "multiply",
+            "floor_divide",
+        }:
             return False
         return all(pure(value) for value in item.values() if isinstance(value, dict))
 
@@ -36,12 +50,14 @@ def optimize_drawing(tree):
             if not all(pure(arg) for arg in loop["iterable"]["arguments"]):
                 return None
             values = [constant(arg) for arg in loop["iterable"]["arguments"]]
-            if len(values) == 3 and values[2] == 0: return None
+            if len(values) == 3 and values[2] == 0:
+                return None
             if all(value is not None for value in values) and len(range(*values)) < 4:
                 return None  # Mask construction does not amortize for tiny loops.
         elif loop["iteration_kind"] != "array" or loop["sources"][0]["kind"] != "name":
             return None
         found = []
+
         def inspect(body):
             for item in body:
                 if item.get("unreachable") or item["kind"] == "pass":
@@ -50,19 +66,37 @@ def optimize_drawing(tree):
                     if not inspect(item["body"]) or not inspect(item["alternative"]):
                         return False
                     continue
-                if item["kind"] != "for" or item["iteration_kind"] != "array" or len(item["body"]) != 1:
+                if (
+                    item["kind"] != "for"
+                    or item["iteration_kind"] != "array"
+                    or len(item["body"]) != 1
+                ):
                     return False
                 source, statement = item["sources"][0], item["body"][0]
-                if source["kind"] != "name" or statement["kind"] != "expression_statement":
+                if (
+                    source["kind"] != "name"
+                    or statement["kind"] != "expression_statement"
+                ):
                     return False
                 call = statement["value"]
-                if call["kind"] != "graphics" or call["name"] not in {"pixel_on", "pixel_off", "flip_pixel"}:
+                if call["kind"] != "graphics" or call["name"] not in {
+                    "pixel_on",
+                    "pixel_off",
+                    "flip_pixel",
+                }:
                     return False
                 x, y = call["arguments"]
-                if x["kind"] != "name" or y["kind"] != "name" or key(x) != key(item["target"]) or key(y) != key(row) or key(x) == key(y):
+                if (
+                    x["kind"] != "name"
+                    or y["kind"] != "name"
+                    or key(x) != key(item["target"])
+                    or key(y) != key(row)
+                    or key(x) == key(y)
+                ):
                     return False
                 found.append((item, source, call["name"]))
             return True
+
         return found if inspect(loop["body"]) and found else None
 
     def transform(body, function=None):
@@ -74,7 +108,9 @@ def optimize_drawing(tree):
                 continue
             found = candidate(item) if item["kind"] == "for" else None
             if found:
-                unique = {(key(source), mode == "flip_pixel") for _, source, mode in found}
+                unique = {
+                    (key(source), mode == "flip_pixel") for _, source, mode in found
+                }
                 if function and function["frame_size"] + 16 * len(unique) > 128:
                     found = None
             if found:
@@ -84,23 +120,54 @@ def optimize_drawing(tree):
                     if cache_key not in cached:
                         serial += 1
                         name = f"__row_mask_{serial}"
+
                         def allocate(suffix, size, type_name):
                             label = name + suffix
                             if function:
                                 function["frame_size"] += size
-                                slot = {"label": label, "symbol": label, "storage": "frame", "offset": -function["frame_size"], "type": type_name, "size": size}
+                                slot = {
+                                    "label": label,
+                                    "symbol": label,
+                                    "storage": "frame",
+                                    "offset": -function["frame_size"],
+                                    "type": type_name,
+                                    "size": size,
+                                }
                                 function["locals"]["$" + label] = slot
                             else:
-                                slot = {"label": label, "symbol": label, "type": type_name, "size": size}
+                                slot = {
+                                    "label": label,
+                                    "symbol": label,
+                                    "type": type_name,
+                                    "size": size,
+                                }
                                 if size == 12:
                                     tree.setdefault("drawing_buffers", []).append(slot)
                                 else:
                                     tree["temporaries"][label] = slot
                             return slot
-                        mask = {"buffer": allocate("", 12, "row_mask"), "last": allocate("_last", 2, source["type"][:-2]), "length": allocate("_length", 2, "i16")}
+
+                        mask = {
+                            "buffer": allocate("", 12, "row_mask"),
+                            "last": allocate("_last", 2, source["type"][:-2]),
+                            "length": allocate("_length", 2, "i16"),
+                        }
                         cached[cache_key] = mask
-                        result.append({"kind": "prepare_row_mask", "source": source, "mask": mask, "parity": mode == "flip_pixel", "line": inner["line"]})
-                    inner.update(kind="pixel_row", row=item["target"], mask=cached[cache_key], mode=mode)
+                        result.append(
+                            {
+                                "kind": "prepare_row_mask",
+                                "source": source,
+                                "mask": mask,
+                                "parity": mode == "flip_pixel",
+                                "line": inner["line"],
+                            }
+                        )
+                    inner.update(
+                        kind="pixel_row",
+                        row=item["target"],
+                        mask=cached[cache_key],
+                        mode=mode,
+                    )
                 result.append(item)
             else:
                 if item["kind"] == "function":
@@ -119,47 +186,138 @@ def optimize_drawing(tree):
 def annotate_blank_meshes(tree):
     """A clear reaches a draw only through operations proven not to draw."""
     from .optimization_pipeline import walk
-    pure={f['label'] for f in tree['body'] if f.get('kind')=='function' and 'finite_table' in f}
-    harmless={'expression_statement','assign','declare','collect','number','boolean','string','name','geometry_data','address','global_value','void_constant','constant_list','add','subtract','multiply','floor_divide','modulo','compare','and','or','not','negate','invert','bit_and','bit_or','bit_xor','shift_left','shift_right','power','list','tuple','dict','set','index','length','key_down','native','builtin'}
+
+    pure_functions = {
+        f["label"]
+        for f in tree["body"]
+        if f.get("kind") == "function" and "finite_table" in f
+    }
+    non_drawing_nodes = {
+        "expression_statement",
+        "assign",
+        "declare",
+        "collect",
+        "number",
+        "boolean",
+        "string",
+        "name",
+        "geometry_data",
+        "address",
+        "global_value",
+        "void_constant",
+        "constant_list",
+        "add",
+        "subtract",
+        "multiply",
+        "floor_divide",
+        "modulo",
+        "compare",
+        "and",
+        "or",
+        "not",
+        "negate",
+        "invert",
+        "bit_and",
+        "bit_or",
+        "bit_xor",
+        "shift_left",
+        "shift_right",
+        "power",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "index",
+        "length",
+        "key_down",
+        "native",
+        "builtin",
+    }
     for node in walk(tree):
-        if node.get('kind')=='native_graphics' and node.get('name')=='mesh_draw':node['blank_framebuffer']=False
-    def expr(node,blank):
-        if isinstance(node,list):
-            for value in node:blank=expr(value,blank)
-            return blank
-        if not isinstance(node,dict):return blank
-        if node.get('kind')=='conditional':
-            state=expr(node['condition'],blank)
-            yes=expr(node['body'],state);no=expr(node['alternative'],state)
+        if node.get("kind") == "native_graphics" and node.get("name") == "mesh_draw":
+            node["blank_framebuffer"] = False
+
+    def visit_expression(node, is_blank):
+        if isinstance(node, list):
+            for value in node:
+                is_blank = visit_expression(value, is_blank)
+            return is_blank
+        if not isinstance(node, dict):
+            return is_blank
+        if node.get("kind") == "conditional":
+            state = visit_expression(node["condition"], is_blank)
+            yes = visit_expression(node["body"], state)
+            no = visit_expression(node["alternative"], state)
             return yes and no
-        for key,value in node.items():
-            if key not in {'blank_framebuffer','body','alternative','final'}:blank=expr(value,blank)
-        kind=node.get('kind')
-        if kind=='call' and node.get('symbol') not in pure:return False
-        if kind in {'closure_call','text_print','text_input','pixel_batch','native_matrix'}:return False
-        if kind=='graphics':return True if node['name']=='clear' else blank if node['name']=='render' else False
-        if kind=='native_graphics':
-            if node['name']=='mesh_draw':
-                arg=node['arguments'][12]
-                if arg.get('kind')=='name':arg=next((e['value'] for e in node.get('evaluations',[]) if e['slot']['label']==arg.get('label')),arg)
-                node['blank_framebuffer']=bool(blank and arg.get('kind')=='boolean' and arg['value'])
+        for key, value in node.items():
+            if key not in {"blank_framebuffer", "body", "alternative", "final"}:
+                is_blank = visit_expression(value, is_blank)
+        kind = node.get("kind")
+        if kind == "call" and node.get("symbol") not in pure_functions:
+            return False
+        if kind in {
+            "closure_call",
+            "text_print",
+            "text_input",
+            "pixel_batch",
+            "native_matrix",
+        }:
+            return False
+        if kind == "graphics":
+            if node["name"] == "clear":
+                return True
+            if node["name"] == "render":
+                return is_blank
+            return False
+        if kind == "native_graphics":
+            if node["name"] == "mesh_draw":
+                arg = node["arguments"][12]
+                if arg.get("kind") == "name":
+                    arg = next(
+                        (
+                            e["value"]
+                            for e in node.get("evaluations", [])
+                            if e["slot"]["label"] == arg.get("label")
+                        ),
+                        arg,
+                    )
+                node["blank_framebuffer"] = bool(
+                    is_blank and arg.get("kind") == "boolean" and arg["value"]
+                )
                 return False
-            if not node['name'].startswith(('mesh_','solid_')):return False
-        if kind is not None and kind not in harmless|{'call','native_graphics','graphics'}:return False
-        return blank
-    def block(body,blank):
+            if not node["name"].startswith(("mesh_", "solid_")):
+                return False
+        if kind is not None and kind not in non_drawing_nodes | {
+            "call",
+            "native_graphics",
+            "graphics",
+        }:
+            return False
+        return is_blank
+
+    def visit_statements(body, is_blank):
         for node in body:
-            if node.get('unreachable'):continue
-            kind=node.get('kind')
-            if kind=='function':block(node['body'],False);continue
-            if kind=='if':
-                blank=expr(node['condition'],blank)
-                yes=block(node['body'],blank);no=block(node['alternative'],blank);blank=yes and no
-            elif kind in {'while','for'}:
-                block(node['body'],False);blank=False
-            elif isinstance(node.get('body'),list):
-                block(node['body'],False);blank=False
-            elif kind in {'return','break','continue','raise'}:return False
-            else:blank=expr(node,blank)
-        return blank
-    block(tree['body'],False)
+            if node.get("unreachable"):
+                continue
+            kind = node.get("kind")
+            if kind == "function":
+                visit_statements(node["body"], False)
+                continue
+            if kind == "if":
+                is_blank = visit_expression(node["condition"], is_blank)
+                yes = visit_statements(node["body"], is_blank)
+                no = visit_statements(node["alternative"], is_blank)
+                is_blank = yes and no
+            elif kind in {"while", "for"}:
+                visit_statements(node["body"], False)
+                is_blank = False
+            elif isinstance(node.get("body"), list):
+                visit_statements(node["body"], False)
+                is_blank = False
+            elif kind in {"return", "break", "continue", "raise"}:
+                return False
+            else:
+                is_blank = visit_expression(node, is_blank)
+        return is_blank
+
+    visit_statements(tree["body"], False)

@@ -3,13 +3,25 @@
 Angles use 256 steps per turn; size=256 is 1x. Buffers are reused across draws.
 The bounded path shares the existing reciprocal projector and edge rasterizer.
 """
+
 import math
-from .camera_math import NativeRoutine,invoke
-from .list_runtime import add,sub,word
+from .camera_math import NativeRoutine, invoke
+from .list_runtime import add, sub, word
 
 
-def routines(capacity=64,solid=False,extended=False,wire=True,dynamic_depth=False,no_depth=False,outlines=True,compiled_vertices=False,blank_spans=False,approximate=False):
-    out=['''__gfx_mesh_ready: dw 0
+def routines(
+    capacity=64,
+    solid=False,
+    extended=False,
+    wire=True,
+    dynamic_depth=False,
+    no_depth=False,
+    outlines=True,
+    compiled_vertices=False,
+    blank_spans=False,
+    approximate=False,
+):
+    out = ["""__gfx_mesh_ready: dw 0
 __gfx_mesh_near: dw 512
 __gfx_mesh_far: dw 30720
 __gfx_mesh_eye: dw 0,0,80
@@ -19,223 +31,676 @@ __gfx_mesh_view: defs 18,0
 __gfx_mesh_norm_view: defs 18,0
 __gfx_mesh_center: defs 6,0
 __gfx_mesh_vertex: defs 6,0
-__gfx_mesh_gain: defs 512,0''']
-    out.append('__gfx_mesh_sine: dw '+','.join(str(round(math.sin(i*math.tau/256)*256)) for i in range(256)))
-    out.append('__gfx_mesh_focals: dw '+','.join(str(round(32/math.tan(math.radians(f)/2)*16)) for f in range(55,121)))
-    r=NativeRoutine('mesh_fov',('fov',),('focal','i','p'))
-    r.if_(('slt','fov',55),lambda:r.fail(14));r.if_(('slt',120,'fov'),lambda:r.fail(14))
-    r.set('focal',word(add('@__gfx_mesh_focals',add(sub('fov',55),sub('fov',55)))))
-    r.set('i',256);r.set('p','@__gfx_mesh_gain')
-    def gain():
-        r.expr('i');r.emit('ld b,h','ld c,l');r.expr('focal')
-        r.emit('ld d,0','ld e,h','ld h,l','ld l,0')
-        for _ in range(4):r.emit('add hl,hl','rl e','rl d')
-        r.emit('call __gfx_wf_udiv')
-        r.emit('push hl');r.expr('p');r.emit('ex de,hl','pop hl','ld a,l','ld (de),a','inc de','ld a,h','ld (de),a')
-        r.set('p',add('p',2));r.set('i',add('i',1))
-    r.while_(('ult','i',512),gain);r.write('@__gfx_mesh_ready',1);r.ret();out.append(r.finish())
-    r=NativeRoutine('mesh_init',('fov','near','far'))
-    r.if_(('slt','near',1),lambda:r.fail(14));r.if_(('sge','near','far'),lambda:r.fail(14));r.if_(('slt',127,'far'),lambda:r.fail(14))
-    for name in ('near','far'):
-        r.expr(name);r.emit('ld h,l','ld l,0')
-        r.emit(f'ld (__gfx_mesh_{name}),hl')
-    r.expr(invoke('mesh_fov','fov'));r.ret();out.append(r.finish())
+__gfx_mesh_gain: defs 512,0"""]
+    out.append(
+        "__gfx_mesh_sine: dw "
+        + ",".join(str(round(math.sin(i * math.tau / 256) * 256)) for i in range(256))
+    )
+    out.append(
+        "__gfx_mesh_focals: dw "
+        + ",".join(
+            str(round(32 / math.tan(math.radians(f) / 2) * 16)) for f in range(55, 121)
+        )
+    )
+    routine = NativeRoutine("mesh_fov", ("fov",), ("focal", "i", "p"))
+    routine.if_(("slt", "fov", 55), lambda: routine.fail(14))
+    routine.if_(("slt", 120, "fov"), lambda: routine.fail(14))
+    routine.set(
+        "focal", word(add("@__gfx_mesh_focals", add(sub("fov", 55), sub("fov", 55))))
+    )
+    routine.set("i", 256)
+    routine.set("p", "@__gfx_mesh_gain")
 
-    r=NativeRoutine('mesh_look',('ex','ey','ez','tx','ty','tz'),('x','y','z','a','b'))
-    for axis in 'xyz':
-        for prefix in ('e','t'):
-            r.if_(('slt',prefix+axis,-120),lambda:r.fail(14));r.if_(('slt',120,prefix+axis),lambda:r.fail(14))
-        r.set(axis,sub('t'+axis,'e'+axis));r.write(add('@__gfx_mesh_eye','xyz'.index(axis)*2),'e'+axis)
-    r.if_(('eq','x',0),lambda:r.if_(('eq','z',0),lambda:r.fail(14)))
+    def gain():
+        routine.expr("i")
+        routine.emit("ld b,h", "ld c,l")
+        routine.expr("focal")
+        routine.emit("ld d,0", "ld e,h", "ld h,l", "ld l,0")
+        for _ in range(4):
+            routine.emit("add hl,hl", "rl e", "rl d")
+        routine.emit("call __gfx_wf_udiv")
+        routine.emit("push hl")
+        routine.expr("p")
+        routine.emit(
+            "ex de,hl", "pop hl", "ld a,l", "ld (de),a", "inc de", "ld a,h", "ld (de),a"
+        )
+        routine.set("p", add("p", 2))
+        routine.set("i", add("i", 1))
+
+    routine.while_(("ult", "i", 512), gain)
+    routine.write("@__gfx_mesh_ready", 1)
+    routine.ret()
+    out.append(routine.finish())
+    routine = NativeRoutine("mesh_init", ("fov", "near", "far"))
+    routine.if_(("slt", "near", 1), lambda: routine.fail(14))
+    routine.if_(("sge", "near", "far"), lambda: routine.fail(14))
+    routine.if_(("slt", 127, "far"), lambda: routine.fail(14))
+    for name in ("near", "far"):
+        routine.expr(name)
+        routine.emit("ld h,l", "ld l,0")
+        routine.emit(f"ld (__gfx_mesh_{name}),hl")
+    routine.expr(invoke("mesh_fov", "fov"))
+    routine.ret()
+    out.append(routine.finish())
+
+    routine = NativeRoutine(
+        "mesh_look", ("ex", "ey", "ez", "tx", "ty", "tz"), ("x", "y", "z", "a", "b")
+    )
+    for axis in "xyz":
+        for prefix in ("e", "t"):
+            routine.if_(("slt", prefix + axis, -120), lambda: routine.fail(14))
+            routine.if_(("slt", 120, prefix + axis), lambda: routine.fail(14))
+        routine.set(axis, sub("t" + axis, "e" + axis))
+        routine.write(add("@__gfx_mesh_eye", "xyz".index(axis) * 2), "e" + axis)
+    routine.if_(
+        ("eq", "x", 0), lambda: routine.if_(("eq", "z", 0), lambda: routine.fail(14))
+    )
     if approximate:
-        general_camera=r.label();r.expr('y');r.emit('ld a,h','or l',f'jr nz,{general_camera}')
-        r.expr(invoke('mesh_level_fast','x','z'));r.emit('ld a,h','or l',f'jr z,{general_camera}');r.ret();r.mark(general_camera)
-    r.expr(invoke('mesh_normalize',sub(0,'z'),0,'x','@__gfx_mesh_basis'))
-    tilted=r.label();r.expr('y');r.emit('ld a,h','or l',f'jp nz,{tilted}')
+        general_camera = routine.label()
+        routine.expr("y")
+        routine.emit("ld a,h", "or l", f"jr nz,{general_camera}")
+        routine.expr(invoke("mesh_level_fast", "x", "z"))
+        routine.emit("ld a,h", "or l", f"jr z,{general_camera}")
+        routine.ret()
+        routine.mark(general_camera)
+    routine.expr(invoke("mesh_normalize", sub(0, "z"), 0, "x", "@__gfx_mesh_basis"))
+    tilted = routine.label()
+    routine.expr("y")
+    routine.emit("ld a,h", "or l", f"jp nz,{tilted}")
     # For a level camera the forward vector is a permutation of the right
     # vector. Its length and rounding are identical; normalize only once.
-    r.write('@__gfx_mesh_basis+12',word('@__gfx_mesh_basis+4'))
-    r.write('@__gfx_mesh_basis+14',0)
-    r.write('@__gfx_mesh_basis+16',sub(0,word('@__gfx_mesh_basis')))
-    r.write('@__gfx_mesh_basis+6',0);r.write('@__gfx_mesh_basis+10',0)
-    r.set('a',invoke('wf_qmul',word('@__gfx_mesh_basis+4'),word('@__gfx_mesh_basis+4')))
-    r.set('b',invoke('wf_qmul',word('@__gfx_mesh_basis'),word('@__gfx_mesh_basis')))
-    r.write('@__gfx_mesh_basis+8',add('a','b'));r.ret();r.mark(tilted)
-    r.expr(invoke('mesh_normalize','x','y','z',add('@__gfx_mesh_basis',12)))
-    for axis,(j,k) in enumerate(((1,2),(2,0),(0,1))):
-        r.set('a',invoke('wf_qmul',word(add('@__gfx_mesh_basis',j*2)),word(add('@__gfx_mesh_basis',12+k*2))))
-        r.set('b',invoke('wf_qmul',word(add('@__gfx_mesh_basis',k*2)),word(add('@__gfx_mesh_basis',12+j*2))))
-        r.write(add('@__gfx_mesh_basis',6+axis*2),sub('a','b'))
-    r.ret();out.append(r.finish())
+    routine.write("@__gfx_mesh_basis+12", word("@__gfx_mesh_basis+4"))
+    routine.write("@__gfx_mesh_basis+14", 0)
+    routine.write("@__gfx_mesh_basis+16", sub(0, word("@__gfx_mesh_basis")))
+    routine.write("@__gfx_mesh_basis+6", 0)
+    routine.write("@__gfx_mesh_basis+10", 0)
+    routine.set(
+        "a", invoke("wf_qmul", word("@__gfx_mesh_basis+4"), word("@__gfx_mesh_basis+4"))
+    )
+    routine.set(
+        "b", invoke("wf_qmul", word("@__gfx_mesh_basis"), word("@__gfx_mesh_basis"))
+    )
+    routine.write("@__gfx_mesh_basis+8", add("a", "b"))
+    routine.ret()
+    routine.mark(tilted)
+    routine.expr(invoke("mesh_normalize", "x", "y", "z", add("@__gfx_mesh_basis", 12)))
+    for axis, (j, k) in enumerate(((1, 2), (2, 0), (0, 1))):
+        routine.set(
+            "a",
+            invoke(
+                "wf_qmul",
+                word(add("@__gfx_mesh_basis", j * 2)),
+                word(add("@__gfx_mesh_basis", 12 + k * 2)),
+            ),
+        )
+        routine.set(
+            "b",
+            invoke(
+                "wf_qmul",
+                word(add("@__gfx_mesh_basis", k * 2)),
+                word(add("@__gfx_mesh_basis", 12 + j * 2)),
+            ),
+        )
+        routine.write(add("@__gfx_mesh_basis", 6 + axis * 2), sub("a", "b"))
+    routine.ret()
+    out.append(routine.finish())
 
-    r=NativeRoutine('mesh_dot',('a','b','step'),('sum','v'))
-    r.set('sum',0)
+    routine = NativeRoutine("mesh_dot", ("a", "b", "step"), ("sum", "v"))
+    routine.set("sum", 0)
     for i in range(3):
-        r.set('v',invoke('mesh_mul',word('a'),word('b')))
-        r.set('sum',add('sum','v'))
-        if i!=2:r.set('a',add('a',2));r.set('b',add('b','step'))
-    r.ret('sum');out.append(r.finish())
+        routine.set("v", invoke("mesh_mul", word("a"), word("b")))
+        routine.set("sum", add("sum", "v"))
+        if i != 2:
+            routine.set("a", add("a", 2))
+            routine.set("b", add("b", "step"))
+    routine.ret("sum")
+    out.append(routine.finish())
 
-    code=['__gfx_mesh_vertex_dot:','push ix','push iy','ld hl,8','add hl,sp','ld e,(hl)','inc hl','ld d,(hl)','push de','pop iy',
-          'ld hl,6','add hl,sp','ld e,(hl)','inc hl','ld d,(hl)','push de','pop ix','exx','ld hl,0','exx']
+    code = [
+        "__gfx_mesh_vertex_dot:",
+        "push ix",
+        "push iy",
+        "ld hl,8",
+        "add hl,sp",
+        "ld e,(hl)",
+        "inc hl",
+        "ld d,(hl)",
+        "push de",
+        "pop iy",
+        "ld hl,6",
+        "add hl,sp",
+        "ld e,(hl)",
+        "inc hl",
+        "ld d,(hl)",
+        "push de",
+        "pop ix",
+        "exx",
+        "ld hl,0",
+        "exx",
+    ]
     for i in range(3):
-        n=f'__gfx_mesh_vertex_dot_{i}'
-        code += [f'ld e,(iy+{i*2})',f'ld d,(iy+{i*2+1})','ld a,d','or e',f'jr z,{n}_zero',f'ld a,(ix+{i*2})','or a',f'jr z,{n}_zero',f'jp p,{n}_positive',
-                 'neg','ld c,a','xor a','sub e','ld e,a','sbc a,a','sub d','ld d,a','ld a,c',n+'_positive:','ld hl,0',
-                 n+'_loop:','srl a',f'jr nc,{n}_skip','add hl,de',n+'_skip:','sla e','rl d','or a',f'jr nz,{n}_loop',
-                 'push hl','exx','pop de','add hl,de','exx',n+'_zero:']
-    code+=['exx','pop iy','pop ix','ret']
-    out.append('\n'.join(line if line.endswith(':') else '        '+line for line in code))
+        n = f"__gfx_mesh_vertex_dot_{i}"
+        code += [
+            f"ld e,(iy+{i*2})",
+            f"ld d,(iy+{i*2+1})",
+            "ld a,d",
+            "or e",
+            f"jr z,{n}_zero",
+            f"ld a,(ix+{i*2})",
+            "or a",
+            f"jr z,{n}_zero",
+            f"jp p,{n}_positive",
+            "neg",
+            "ld c,a",
+            "xor a",
+            "sub e",
+            "ld e,a",
+            "sbc a,a",
+            "sub d",
+            "ld d,a",
+            "ld a,c",
+            n + "_positive:",
+            "ld hl,0",
+            n + "_loop:",
+            "srl a",
+            f"jr nc,{n}_skip",
+            "add hl,de",
+            n + "_skip:",
+            "sla e",
+            "rl d",
+            "or a",
+            f"jr nz,{n}_loop",
+            "push hl",
+            "exx",
+            "pop de",
+            "add hl,de",
+            "exx",
+            n + "_zero:",
+        ]
+    code += ["exx", "pop iy", "pop ix", "ret"]
+    out.append(
+        "\n".join(line if line.endswith(":") else "        " + line for line in code)
+    )
 
-    r=NativeRoutine('mesh_imul',('a','b'))
-    r.expr('a');r.emit('ld a,l','or a')
-    positive,ready,loop,skip,end=(r.label() for _ in range(5))
-    r.emit(f'jp p,{positive}','neg','ld c,a');r.expr('b')
-    r.emit('xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a','ld a,c',f'jr {ready}')
-    r.mark(positive);r.expr('b');r.mark(ready);r.emit('ld d,h','ld e,l','ld hl,0','or a',f'jr z,{end}')
-    r.mark(loop);r.emit('srl a',f'jr nc,{skip}','add hl,de');r.mark(skip)
-    r.emit('sla e','rl d','or a',f'jr nz,{loop}');r.mark(end);r.emit(f'jp {r.name}_return');out.append(r.finish())
+    routine = NativeRoutine("mesh_imul", ("a", "b"))
+    routine.expr("a")
+    routine.emit("ld a,l", "or a")
+    positive, ready, loop, skip, end = (routine.label() for _ in range(5))
+    routine.emit(f"jp p,{positive}", "neg", "ld c,a")
+    routine.expr("b")
+    routine.emit(
+        "xor a",
+        "sub l",
+        "ld l,a",
+        "sbc a,a",
+        "sub h",
+        "ld h,a",
+        "ld a,c",
+        f"jr {ready}",
+    )
+    routine.mark(positive)
+    routine.expr("b")
+    routine.mark(ready)
+    routine.emit("ld d,h", "ld e,l", "ld hl,0", "or a", f"jr z,{end}")
+    routine.mark(loop)
+    routine.emit("srl a", f"jr nc,{skip}", "add hl,de")
+    routine.mark(skip)
+    routine.emit("sla e", "rl d", "or a", f"jr nz,{loop}")
+    routine.mark(end)
+    routine.emit(f"jp {routine.name}_return")
+    out.append(routine.finish())
 
     # Every model/view coefficient is at most 512. Multiply the low eight
     # coefficient bits in eight iterations, with exact 1x/2x shortcuts.
-    r=NativeRoutine('mesh_mul',('a','b'))
-    r.expr('a');r.emit('push hl');r.expr('b');r.emit('ex de,hl','pop hl')
-    r.emit('ld a,h','xor d','and 128',"ex af,af'",'bit 7,h','jr z,__gfx_mesh_mul_a_positive',
-           'xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
-    r.mark('__gfx_mesh_mul_a_positive')
-    r.emit('bit 7,d','jr z,__gfx_mesh_mul_b_positive','xor a','sub e','ld e,a','sbc a,a','sub d','ld d,a')
-    r.mark('__gfx_mesh_mul_b_positive')
-    r.emit('ld a,h','cp d','jr c,__gfx_mesh_mul_swap','jr nz,__gfx_mesh_mul_ordered','ld a,l','cp e','jr nc,__gfx_mesh_mul_ordered')
-    r.mark('__gfx_mesh_mul_swap');r.emit('ex de,hl')
-    r.mark('__gfx_mesh_mul_ordered')
-    r.emit('ld a,d','or e','jr nz,__gfx_mesh_mul_nonzero','ld hl,0','jr __gfx_mesh_mul_sign')
-    r.mark('__gfx_mesh_mul_nonzero')
-    r.emit('ld a,e','or a','jr nz,__gfx_mesh_mul_product','ld a,d','cp 1','jr z,__gfx_mesh_mul_sign','cp 2','jr nz,__gfx_mesh_mul_product','add hl,hl','jr __gfx_mesh_mul_sign')
-    r.mark('__gfx_mesh_mul_product')
-    r.emit('push de','ex de,hl','ld a,l','ld hl,0','ld c,0','ld b,8')
-    r.mark('__gfx_mesh_mul_bits')
-    r.emit('add hl,hl','rl c','sla a','jr nc,__gfx_mesh_mul_skip','add hl,de','jr nc,__gfx_mesh_mul_skip','inc c')
-    r.mark('__gfx_mesh_mul_skip')
-    r.emit('djnz __gfx_mesh_mul_bits','ld a,l','ld l,h','ld h,c','bit 7,a','jr z,__gfx_mesh_mul_rounded','inc hl')
-    r.mark('__gfx_mesh_mul_rounded')
-    r.emit('pop bc','ld a,b','or a','jr z,__gfx_mesh_mul_sign','add hl,de')
-    r.mark('__gfx_mesh_mul_sign')
-    r.emit("ex af,af'",'or a',f'jp z,{r.name}_return','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a',f'jp {r.name}_return')
-    out.append(r.finish())
+    routine = NativeRoutine("mesh_mul", ("a", "b"))
+    routine.expr("a")
+    routine.emit("push hl")
+    routine.expr("b")
+    routine.emit("ex de,hl", "pop hl")
+    routine.emit(
+        "ld a,h",
+        "xor d",
+        "and 128",
+        "ex af,af'",
+        "bit 7,h",
+        "jr z,__gfx_mesh_mul_a_positive",
+        "xor a",
+        "sub l",
+        "ld l,a",
+        "sbc a,a",
+        "sub h",
+        "ld h,a",
+    )
+    routine.mark("__gfx_mesh_mul_a_positive")
+    routine.emit(
+        "bit 7,d",
+        "jr z,__gfx_mesh_mul_b_positive",
+        "xor a",
+        "sub e",
+        "ld e,a",
+        "sbc a,a",
+        "sub d",
+        "ld d,a",
+    )
+    routine.mark("__gfx_mesh_mul_b_positive")
+    routine.emit(
+        "ld a,h",
+        "cp d",
+        "jr c,__gfx_mesh_mul_swap",
+        "jr nz,__gfx_mesh_mul_ordered",
+        "ld a,l",
+        "cp e",
+        "jr nc,__gfx_mesh_mul_ordered",
+    )
+    routine.mark("__gfx_mesh_mul_swap")
+    routine.emit("ex de,hl")
+    routine.mark("__gfx_mesh_mul_ordered")
+    routine.emit(
+        "ld a,d",
+        "or e",
+        "jr nz,__gfx_mesh_mul_nonzero",
+        "ld hl,0",
+        "jr __gfx_mesh_mul_sign",
+    )
+    routine.mark("__gfx_mesh_mul_nonzero")
+    routine.emit(
+        "ld a,e",
+        "or a",
+        "jr nz,__gfx_mesh_mul_product",
+        "ld a,d",
+        "cp 1",
+        "jr z,__gfx_mesh_mul_sign",
+        "cp 2",
+        "jr nz,__gfx_mesh_mul_product",
+        "add hl,hl",
+        "jr __gfx_mesh_mul_sign",
+    )
+    routine.mark("__gfx_mesh_mul_product")
+    routine.emit("push de", "ex de,hl", "ld a,l", "ld hl,0", "ld c,0", "ld b,8")
+    routine.mark("__gfx_mesh_mul_bits")
+    routine.emit(
+        "add hl,hl",
+        "rl c",
+        "sla a",
+        "jr nc,__gfx_mesh_mul_skip",
+        "add hl,de",
+        "jr nc,__gfx_mesh_mul_skip",
+        "inc c",
+    )
+    routine.mark("__gfx_mesh_mul_skip")
+    routine.emit(
+        "djnz __gfx_mesh_mul_bits",
+        "ld a,l",
+        "ld l,h",
+        "ld h,c",
+        "bit 7,a",
+        "jr z,__gfx_mesh_mul_rounded",
+        "inc hl",
+    )
+    routine.mark("__gfx_mesh_mul_rounded")
+    routine.emit("pop bc", "ld a,b", "or a", "jr z,__gfx_mesh_mul_sign", "add hl,de")
+    routine.mark("__gfx_mesh_mul_sign")
+    routine.emit(
+        "ex af,af'",
+        "or a",
+        f"jp z,{routine.name}_return",
+        "xor a",
+        "sub l",
+        "ld l,a",
+        "sbc a,a",
+        "sub h",
+        "ld h,a",
+        f"jp {routine.name}_return",
+    )
+    out.append(routine.finish())
 
-    r=NativeRoutine('mesh_draw',('model','x','y','z','yaw','pitch','roll','size','filled','cull','shaded','depth_test','outline'),
-                    ('sx','cx','sy','cy','sz','cz','a','b','i','j','p','record','vertices','edges','count','radius'))
-    r.if_(('eq',word('@__gfx_mesh_ready'),0),lambda:r.expr(invoke('mesh_init',75,2,120)))
-    if dynamic_depth:r.write('@__gfx_solid_depth_enabled','depth_test')
-    if blank_spans:r.emit('xor a','ld (__gfx_solid_transparent_white),a')
+    routine = NativeRoutine(
+        "mesh_draw",
+        (
+            "model",
+            "x",
+            "y",
+            "z",
+            "yaw",
+            "pitch",
+            "roll",
+            "size",
+            "filled",
+            "cull",
+            "shaded",
+            "depth_test",
+            "outline",
+        ),
+        (
+            "sx",
+            "cx",
+            "sy",
+            "cy",
+            "sz",
+            "cz",
+            "a",
+            "b",
+            "i",
+            "j",
+            "p",
+            "record",
+            "vertices",
+            "edges",
+            "count",
+            "radius",
+        ),
+    )
+    routine.if_(
+        ("eq", word("@__gfx_mesh_ready"), 0),
+        lambda: routine.expr(invoke("mesh_init", 75, 2, 120)),
+    )
+    if dynamic_depth:
+        routine.write("@__gfx_solid_depth_enabled", "depth_test")
+    if blank_spans:
+        routine.emit("xor a", "ld (__gfx_solid_transparent_white),a")
     if extended:
-        for i,n in enumerate(('x','y','z','size')):r.write(add('@__gfx_mesh_instance',i*2),n)
-        r.write('@__gfx_mesh_source',add('model',10))
-    r.if_(('ne',word('model'),0x4d54),lambda:r.fail(14))
-    r.set('vertices',word(add('model',2)));r.set('edges',word(add('model',4)))
-    r.if_(('eq','vertices',0),lambda:r.fail(14));r.if_(('uge','vertices',min(capacity,64)+1),lambda:r.fail(14))
-    r.if_(('eq','edges',0),lambda:r.fail(14));r.if_(('uge','edges',193),lambda:r.fail(14))
-    r.if_(('slt','size',1),lambda:r.fail(14));r.if_(('slt',512,'size'),lambda:r.fail(14))
+        for i, n in enumerate(("x", "y", "z", "size")):
+            routine.write(add("@__gfx_mesh_instance", i * 2), n)
+        routine.write("@__gfx_mesh_source", add("model", 10))
+    routine.if_(("ne", word("model"), 0x4D54), lambda: routine.fail(14))
+    routine.set("vertices", word(add("model", 2)))
+    routine.set("edges", word(add("model", 4)))
+    routine.if_(("eq", "vertices", 0), lambda: routine.fail(14))
+    routine.if_(("uge", "vertices", min(capacity, 64) + 1), lambda: routine.fail(14))
+    routine.if_(("eq", "edges", 0), lambda: routine.fail(14))
+    routine.if_(("uge", "edges", 193), lambda: routine.fail(14))
+    routine.if_(("slt", "size", 1), lambda: routine.fail(14))
+    routine.if_(("slt", 512, "size"), lambda: routine.fail(14))
     # Reject distant instances before rotating or projecting a single vertex.
-    for i,axis in enumerate('xyz'):
-        r.set(axis,sub(axis,word(add('@__gfx_mesh_eye',i*2))))
-        r.if_(('slt',axis,-120),lambda:r.ret());r.if_(('slt',120,axis),lambda:r.ret())
-        r.expr(axis);r.emit(f'ld (__gfx_mesh_vertex+{i*2}),hl')
+    for i, axis in enumerate("xyz"):
+        routine.set(axis, sub(axis, word(add("@__gfx_mesh_eye", i * 2))))
+        routine.if_(("slt", axis, -120), lambda: routine.ret())
+        routine.if_(("slt", 120, axis), lambda: routine.ret())
+        routine.expr(axis)
+        routine.emit(f"ld (__gfx_mesh_vertex+{i*2}),hl")
     # A conservative camera-relative L1 bound guarantees safe Q8 dot products.
-    r.set('a',0)
-    for axis in 'xyz':
-        r.set('b',axis);r.if_(('negative','b'),lambda:r.set('b',sub(0,'b')));r.set('a',add('a','b'))
-    r.if_(('slt',120,'a'),lambda:r.ret())
-    r.set('i',0)
+    routine.set("a", 0)
+    for axis in "xyz":
+        routine.set("b", axis)
+        routine.if_(("negative", "b"), lambda: routine.set("b", sub(0, "b")))
+        routine.set("a", add("a", "b"))
+    routine.if_(("slt", 120, "a"), lambda: routine.ret())
+    routine.set("i", 0)
+
     def center():
-        r.write(add('@__gfx_mesh_center','i'),invoke('mesh_vertex_dot',add('@__gfx_mesh_basis',add('i',add('i','i'))),'@__gfx_mesh_vertex'))
-        r.set('i',add('i',2))
-    r.while_(('ult','i',6),center)
-    r.set('radius',invoke('mesh_imul',word(add('model',6)),'size'))
-    r.set('a',word(add('@__gfx_mesh_center',4)))
-    r.if_(('slt','a',word('@__gfx_mesh_near')),lambda:r.if_(('ult','radius',sub(word('@__gfx_mesh_near'),'a')),lambda:r.ret()))
-    r.if_(('slt',word('@__gfx_mesh_far'),'a'),lambda:r.if_(('ult','radius',sub('a',word('@__gfx_mesh_far'))),lambda:r.ret()))
-    general,transformed=r.label(),r.label()
+        routine.write(
+            add("@__gfx_mesh_center", "i"),
+            invoke(
+                "mesh_vertex_dot",
+                add("@__gfx_mesh_basis", add("i", add("i", "i"))),
+                "@__gfx_mesh_vertex",
+            ),
+        )
+        routine.set("i", add("i", 2))
+
+    routine.while_(("ult", "i", 6), center)
+    routine.set("radius", invoke("mesh_imul", word(add("model", 6)), "size"))
+    routine.set("a", word(add("@__gfx_mesh_center", 4)))
+    routine.if_(
+        ("slt", "a", word("@__gfx_mesh_near")),
+        lambda: routine.if_(
+            ("ult", "radius", sub(word("@__gfx_mesh_near"), "a")), lambda: routine.ret()
+        ),
+    )
+    routine.if_(
+        ("slt", word("@__gfx_mesh_far"), "a"),
+        lambda: routine.if_(
+            ("ult", "radius", sub("a", word("@__gfx_mesh_far"))), lambda: routine.ret()
+        ),
+    )
+    general, transformed = routine.label(), routine.label()
     # Unrotated unit-scale instances can reuse the camera matrix exactly.
     # This includes the common static level + translated pickup case.
-    r.expr('yaw');r.emit('ld b,l');r.expr('pitch');r.emit('ld a,l','or b','ld b,a');r.expr('roll');r.emit('ld a,l','or b',f'jp nz,{general}')
-    r.if_(('ne','size',256),lambda:r.emit(f'jp {general}'))
-    r.write('@__gfx_mesh_identity_active',1)
-    for source,target in (('__gfx_mesh_identity','__gfx_mesh_rotation'),('__gfx_mesh_basis','__gfx_mesh_view'))+((('__gfx_mesh_basis','__gfx_mesh_norm_view'),) if solid else ()):
-        r.emit(f'ld hl,{source}',f'ld de,{target}','ld bc,18','ldir')
-    r.emit(f'jp {transformed}');r.mark(general);r.write('@__gfx_mesh_identity_active',0)
-    for angle,axis in (('pitch','x'),('yaw','y'),('roll','z')):
-        r.expr(angle);r.emit('ld h,0','add hl,hl','ld de,__gfx_mesh_sine','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','ex de,hl');r._store('s'+axis)
-        r.expr(angle);r.emit('ld a,l','add a,64','ld l,a','ld h,0','add hl,hl','ld de,__gfx_mesh_sine','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','ex de,hl');r._store('c'+axis)
-    def mul(a,b):return invoke('mesh_mul',a,b)
-    coefficients=[mul('cz','cy'),sub(mul(mul('cz','sy'),'sx'),mul('sz','cx')),add(mul(mul('cz','sy'),'cx'),mul('sz','sx')),
-                  mul('sz','cy'),add(mul(mul('sz','sy'),'sx'),mul('cz','cx')),sub(mul(mul('sz','sy'),'cx'),mul('cz','sx')),
-                  sub(0,'sy'),mul('cy','sx'),mul('cy','cx')]
-    for i,value in enumerate(coefficients):r.write(add('@__gfx_mesh_rotation',i*2),value)
-    r.set('i',0)
+    routine.expr("yaw")
+    routine.emit("ld b,l")
+    routine.expr("pitch")
+    routine.emit("ld a,l", "or b", "ld b,a")
+    routine.expr("roll")
+    routine.emit("ld a,l", "or b", f"jp nz,{general}")
+    routine.if_(("ne", "size", 256), lambda: routine.emit(f"jp {general}"))
+    routine.write("@__gfx_mesh_identity_active", 1)
+    for source, target in (
+        ("__gfx_mesh_identity", "__gfx_mesh_rotation"),
+        ("__gfx_mesh_basis", "__gfx_mesh_view"),
+    ) + ((("__gfx_mesh_basis", "__gfx_mesh_norm_view"),) if solid else ()):
+        routine.emit(f"ld hl,{source}", f"ld de,{target}", "ld bc,18", "ldir")
+    routine.emit(f"jp {transformed}")
+    routine.mark(general)
+    routine.write("@__gfx_mesh_identity_active", 0)
+    for angle, axis in (("pitch", "x"), ("yaw", "y"), ("roll", "z")):
+        routine.expr(angle)
+        routine.emit(
+            "ld h,0",
+            "add hl,hl",
+            "ld de,__gfx_mesh_sine",
+            "add hl,de",
+            "ld e,(hl)",
+            "inc hl",
+            "ld d,(hl)",
+            "ex de,hl",
+        )
+        routine._store("s" + axis)
+        routine.expr(angle)
+        routine.emit(
+            "ld a,l",
+            "add a,64",
+            "ld l,a",
+            "ld h,0",
+            "add hl,hl",
+            "ld de,__gfx_mesh_sine",
+            "add hl,de",
+            "ld e,(hl)",
+            "inc hl",
+            "ld d,(hl)",
+            "ex de,hl",
+        )
+        routine._store("c" + axis)
+
+    def mul(a, b):
+        return invoke("mesh_mul", a, b)
+
+    coefficients = [
+        mul("cz", "cy"),
+        sub(mul(mul("cz", "sy"), "sx"), mul("sz", "cx")),
+        add(mul(mul("cz", "sy"), "cx"), mul("sz", "sx")),
+        mul("sz", "cy"),
+        add(mul(mul("sz", "sy"), "sx"), mul("cz", "cx")),
+        sub(mul(mul("sz", "sy"), "cx"), mul("cz", "sx")),
+        sub(0, "sy"),
+        mul("cy", "sx"),
+        mul("cy", "cx"),
+    ]
+    for i, value in enumerate(coefficients):
+        routine.write(add("@__gfx_mesh_rotation", i * 2), value)
+    routine.set("i", 0)
+
     def matrix_row():
-        r.set('j',0)
+        routine.set("j", 0)
+
         def matrix_col():
-            r.set('a',invoke('mesh_dot',add('@__gfx_mesh_basis','i'),add('@__gfx_mesh_rotation','j'),6))
+            routine.set(
+                "a",
+                invoke(
+                    "mesh_dot",
+                    add("@__gfx_mesh_basis", "i"),
+                    add("@__gfx_mesh_rotation", "j"),
+                    6,
+                ),
+            )
             # Unit basis rounding may exceed one by a few Q8 increments.
-            r.if_(('slt',256,'a'),lambda:r.set('a',256));r.if_(('slt','a',-256),lambda:r.set('a',-256))
-            if solid:r.write(add('@__gfx_mesh_norm_view',add('i','j')),'a')
-            r.write(add('@__gfx_mesh_view',add('i','j')),mul('a','size'));r.set('j',add('j',2))
-        r.while_(('ult','j',6),matrix_col);r.set('i',add('i',6))
-    r.while_(('ult','i',18),matrix_row)
-    r.mark(transformed)
+            routine.if_(("slt", 256, "a"), lambda: routine.set("a", 256))
+            routine.if_(("slt", "a", -256), lambda: routine.set("a", -256))
+            if solid:
+                routine.write(add("@__gfx_mesh_norm_view", add("i", "j")), "a")
+            routine.write(add("@__gfx_mesh_view", add("i", "j")), mul("a", "size"))
+            routine.set("j", add("j", 2))
+
+        routine.while_(("ult", "j", 6), matrix_col)
+        routine.set("i", add("i", 6))
+
+    routine.while_(("ult", "i", 18), matrix_row)
+    routine.mark(transformed)
     if compiled_vertices:
         # Specialized coordinate products are shared across every vertex of a
         # small static model, using the same general model/view matrix.
         if blank_spans:
-            for i,axis in enumerate('xyz'):r.expr(axis);r.emit(f'ld (__gfx_mesh_relative+{i*2}),hl')
-        r.emit('ld hl,__gfx_wf_records')
-        r.expr('model');r.emit('ld b,h','ld c,l','ld hl,__gfx_mesh_programs')
-        find,next_,found,returned=(r.label() for _ in range(4))
-        r.mark(find);r.emit('ld e,(hl)','inc hl','ld d,(hl)','inc hl','ld a,d','or e',f'jp z,{r.name}_invalid_model','ld a,d','xor b',f'jr nz,{next_}','ld a,e','xor c',f'jr z,{found}')
-        r.mark(next_);r.emit('inc hl','inc hl',f'jr {find}')
-        r.mark(found);r.emit('ld e,(hl)','inc hl','ld d,(hl)',f'ld hl,{returned}','push hl','ex de,hl','jp (hl)');r.mark(returned)
-        r.emit('ld a,h','or l',f'jp z,{r.name}_return')
-        r.expr('vertices');r.emit('add hl,hl','ld d,h','ld e,l','add hl,hl','add hl,de','push hl');r.expr(add('model',10));r.emit('pop de','add hl,de');r._store('p')
+            for i, axis in enumerate("xyz"):
+                routine.expr(axis)
+                routine.emit(f"ld (__gfx_mesh_relative+{i*2}),hl")
+        routine.emit("ld hl,__gfx_wf_records")
+        routine.expr("model")
+        routine.emit("ld b,h", "ld c,l", "ld hl,__gfx_mesh_programs")
+        find, next_, found, returned = (routine.label() for _ in range(4))
+        routine.mark(find)
+        routine.emit(
+            "ld e,(hl)",
+            "inc hl",
+            "ld d,(hl)",
+            "inc hl",
+            "ld a,d",
+            "or e",
+            f"jp z,{routine.name}_invalid_model",
+            "ld a,d",
+            "xor b",
+            f"jr nz,{next_}",
+            "ld a,e",
+            "xor c",
+            f"jr z,{found}",
+        )
+        routine.mark(next_)
+        routine.emit("inc hl", "inc hl", f"jr {find}")
+        routine.mark(found)
+        routine.emit(
+            "ld e,(hl)",
+            "inc hl",
+            "ld d,(hl)",
+            f"ld hl,{returned}",
+            "push hl",
+            "ex de,hl",
+            "jp (hl)",
+        )
+        routine.mark(returned)
+        routine.emit("ld a,h", "or l", f"jp z,{routine.name}_return")
+        routine.expr("vertices")
+        routine.emit(
+            "add hl,hl", "ld d,h", "ld e,l", "add hl,hl", "add hl,de", "push hl"
+        )
+        routine.expr(add("model", 10))
+        routine.emit("pop de", "add hl,de")
+        routine._store("p")
     else:
-        r.set('p',add('model',10));r.set('record','@__gfx_wf_records');r.set('count',0)
+        routine.set("p", add("model", 10))
+        routine.set("record", "@__gfx_wf_records")
+        routine.set("count", 0)
+
         def vertex():
             for i in range(3):
-                r.expr(word(add('p',i*2)));r.emit(f'ld (__gfx_mesh_vertex+{i*2}),hl')
-            r.set('i',0)
+                routine.expr(word(add("p", i * 2)))
+                routine.emit(f"ld (__gfx_mesh_vertex+{i*2}),hl")
+            routine.set("i", 0)
+
             def axis():
-                r.set('a',invoke('mesh_vertex_dot',add('@__gfx_mesh_view',add('i',add('i','i'))),'@__gfx_mesh_vertex'))
-                r.expr(word(add('@__gfx_mesh_center','i')));r.emit('push hl');r.expr('a');r.emit('pop de','or a','adc hl,de',f'jp pe,{r.name}_return');r._store('a')
-                r.write(add('record','i'),'a');r.set('i',add('i',2))
-            r.while_(('ult','i',6),axis);r.set('p',add('p',6));r.set('record',add('record',12));r.set('count',add('count',1))
-        r.while_(('ult','count','vertices'),vertex)
-    r.write('@__gfx_wf_near',word('@__gfx_mesh_near'));r.write('@__gfx_wf_far',word('@__gfx_mesh_far'));r.write('@__gfx_wf_gain','@__gfx_mesh_gain')
-    r.emit('ld a,1','ld (__gfx_ink),a')
+                routine.set(
+                    "a",
+                    invoke(
+                        "mesh_vertex_dot",
+                        add("@__gfx_mesh_view", add("i", add("i", "i"))),
+                        "@__gfx_mesh_vertex",
+                    ),
+                )
+                routine.expr(word(add("@__gfx_mesh_center", "i")))
+                routine.emit("push hl")
+                routine.expr("a")
+                routine.emit(
+                    "pop de", "or a", "adc hl,de", f"jp pe,{routine.name}_return"
+                )
+                routine._store("a")
+                routine.write(add("record", "i"), "a")
+                routine.set("i", add("i", 2))
+
+            routine.while_(("ult", "i", 6), axis)
+            routine.set("p", add("p", 6))
+            routine.set("record", add("record", 12))
+            routine.set("count", add("count", 1))
+
+        routine.while_(("ult", "count", "vertices"), vertex)
+    routine.write("@__gfx_wf_near", word("@__gfx_mesh_near"))
+    routine.write("@__gfx_wf_far", word("@__gfx_mesh_far"))
+    routine.write("@__gfx_wf_gain", "@__gfx_mesh_gain")
+    routine.emit("ld a,1", "ld (__gfx_ink),a")
     if solid:
+
         def filled_mesh():
-            r.expr(invoke('solid_prepare','vertices'))
-            r.expr(invoke('solid_draw',add('p',add('edges','edges')),word(add('model',8)),'cull','shaded'))
-            if not outlines:r.ret();return
-            r.if_(('eq','outline',0),lambda:r.ret())
+            routine.expr(invoke("solid_prepare", "vertices"))
+            routine.expr(
+                invoke(
+                    "solid_draw",
+                    add("p", add("edges", "edges")),
+                    word(add("model", 8)),
+                    "cull",
+                    "shaded",
+                )
+            )
+            if not outlines:
+                routine.ret()
+                return
+            routine.if_(("eq", "outline", 0), lambda: routine.ret())
             if wire:
-                if not no_depth:r.expr(invoke('mesh_restore_flags','vertices'))
-                r.expr(invoke('wf_draw_prepared','vertices','edges','p'));r.ret()
-        r.if_(('ne','filled',0),lambda:r.if_(('ne',word(add('model',8)),0),filled_mesh))
-    if wire:r.expr(invoke('wf_draw','vertices','edges','p'))
-    r.ret()
-    if compiled_vertices:r.mark(r.name+'_invalid_model');r.fail(14)
-    out.append(r.finish())
-    out.append('__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256\n__gfx_mesh_identity_active: dw 0')
+                if not no_depth:
+                    routine.expr(invoke("mesh_restore_flags", "vertices"))
+                routine.expr(invoke("wf_draw_prepared", "vertices", "edges", "p"))
+                routine.ret()
+
+        routine.if_(
+            ("ne", "filled", 0),
+            lambda: routine.if_(("ne", word(add("model", 8)), 0), filled_mesh),
+        )
+    if wire:
+        routine.expr(invoke("wf_draw", "vertices", "edges", "p"))
+    routine.ret()
+    if compiled_vertices:
+        routine.mark(routine.name + "_invalid_model")
+        routine.fail(14)
+    out.append(routine.finish())
+    out.append(
+        "__gfx_mesh_identity: dw 256,0,0,0,256,0,0,0,256\n__gfx_mesh_identity_active: dw 0"
+    )
     if solid and wire and outlines and not no_depth:
-        r=NativeRoutine('mesh_restore_flags',('count',))
-        loop,advance=r.label(),r.label()
-        r.expr('count');r.emit('ld b,l','ld hl,__gfx_wf_records+10','ld de,__gfx_solid_flags')
-        r.mark(loop);r.emit('ld a,(de)','ld (hl),a','inc hl','ld (hl),0','ld a,l','add a,11','ld l,a',f'jr nc,{advance}','inc h')
-        r.mark(advance);r.emit('inc de',f'djnz {loop}');r.ret();out.append(r.finish())
-    if extended:out.append('__gfx_mesh_instance: defs 8,0\n__gfx_mesh_source: dw 0')
-    if blank_spans:out[0]+='\n__gfx_mesh_blank: db 0\n__gfx_solid_transparent_white: db 0\n__gfx_mesh_relative: defs 6,0'
-    if approximate:out.append(_level_fast())
-    if compiled_vertices:out.append(_vertex_plan())
+        routine = NativeRoutine("mesh_restore_flags", ("count",))
+        loop, advance = routine.label(), routine.label()
+        routine.expr("count")
+        routine.emit("ld b,l", "ld hl,__gfx_wf_records+10", "ld de,__gfx_solid_flags")
+        routine.mark(loop)
+        routine.emit(
+            "ld a,(de)",
+            "ld (hl),a",
+            "inc hl",
+            "ld (hl),0",
+            "ld a,l",
+            "add a,11",
+            "ld l,a",
+            f"jr nc,{advance}",
+            "inc h",
+        )
+        routine.mark(advance)
+        routine.emit("inc de", f"djnz {loop}")
+        routine.ret()
+        out.append(routine.finish())
+    if extended:
+        out.append("__gfx_mesh_instance: defs 8,0\n__gfx_mesh_source: dw 0")
+    if blank_spans:
+        out[
+            0
+        ] += "\n__gfx_mesh_blank: db 0\n__gfx_solid_transparent_white: db 0\n__gfx_mesh_relative: defs 6,0"
+    if approximate:
+        out.append(_level_fast())
+    if compiled_vertices:
+        out.append(_vertex_plan())
     out.append(_normalize())
     return out
 
@@ -243,27 +708,71 @@ __gfx_mesh_gain: defs 512,0''']
 def _normalize():
     """Bounded unit vectors use an allocation-free 24-bit restoring square root."""
     from .shape_runtime import words
-    r=NativeRoutine('mesh_normalize',('x','y','z','out'),('sx','sy','sz','max','lo','v','shift')+words('sum',2)+words('p',2))
-    r.set('max',0);r.set('shift',0)
-    for n in 'xyz':
-        r.set('s'+n,0);r.if_(('negative',n),lambda n=n:(r.set(n,sub(0,n)),r.set('s'+n,1)))
-        r.if_(('slt','max',n),lambda n=n:r.set('max',n))
-    r.if_(('eq','max',0),lambda:r.fail(14));r.if_(('slt',2047,'max'),lambda:r.fail(14))
+
+    routine = NativeRoutine(
+        "mesh_normalize",
+        ("x", "y", "z", "out"),
+        ("sx", "sy", "sz", "max", "lo", "v", "shift") + words("sum", 2) + words("p", 2),
+    )
+    routine.set("max", 0)
+    routine.set("shift", 0)
+    for axis in "xyz":
+        routine.set("s" + axis, 0)
+
+        def make_axis_positive(axis=axis):
+            routine.set(axis, sub(0, axis))
+            routine.set("s" + axis, 1)
+
+        routine.if_(("negative", axis), make_axis_positive)
+        routine.if_(("slt", "max", axis), lambda axis=axis: routine.set("max", axis))
+    routine.if_(("eq", "max", 0), lambda: routine.fail(14))
+    routine.if_(("slt", 2047, "max"), lambda: routine.fail(14))
+
     def enlarge():
-        for n in 'xyz':r.set(n,add(n,n))
-        r.set('max',add('max','max'))
-        r.set('shift',add('shift',1))
-    r.while_(('ult','max',1024),enlarge);r.zero('sum')
-    for n in 'xyz':
-        r.expr(n);r.emit('ld d,h','ld e,l','ld b,h','ld c,l','call __gfx_wf_umul');r._store('p0');r.emit('ex de,hl');r._store('p1');r.binary('sum','sum','p')
-    r.expr('sum0');r.emit('push hl');r.expr('sum1');r.emit('ex de,hl','pop hl','call __gfx_mesh_sqrt24');r._store('lo')
-    for i,n in enumerate('xyz'):
-        r.expr(n);r.emit('ld d,0','ld e,h','ld h,l','ld l,0','push hl');r.expr('lo');r.emit('srl h','rr l','ld b,h','ld c,l','pop hl','add hl,bc')
-        carry=r.label();r.emit(f'jr nc,{carry}','inc de');r.mark(carry);r.emit('push hl');r.expr('lo');r.emit('ld b,h','ld c,l','pop hl','call __gfx_wf_udiv');r._store('v')
-        r.if_(('ne','s'+n,0),lambda:r.set('v',sub(0,'v')));r.write(add('out',i*2),'v')
-    r.expr('shift');r.emit('ld b,l');r.expr('lo');r.emit('inc b')
-    loop,ready=r.label(),r.label();r.emit(f'jr {ready}');r.mark(loop);r.emit('srl h','rr l');r.mark(ready);r.emit(f'djnz {loop}',f'jp {r.name}_return')
-    return r.finish()+'''
+        for axis in "xyz":
+            routine.set(axis, add(axis, axis))
+        routine.set("max", add("max", "max"))
+        routine.set("shift", add("shift", 1))
+
+    routine.while_(("ult", "max", 1024), enlarge)
+    routine.zero("sum")
+    for axis in "xyz":
+        routine.expr(axis)
+        routine.emit("ld d,h", "ld e,l", "ld b,h", "ld c,l", "call __gfx_wf_umul")
+        routine._store("p0")
+        routine.emit("ex de,hl")
+        routine._store("p1")
+        routine.binary("sum", "sum", "p")
+    routine.expr("sum0")
+    routine.emit("push hl")
+    routine.expr("sum1")
+    routine.emit("ex de,hl", "pop hl", "call __gfx_mesh_sqrt24")
+    routine._store("lo")
+    for i, axis in enumerate("xyz"):
+        routine.expr(axis)
+        routine.emit("ld d,0", "ld e,h", "ld h,l", "ld l,0", "push hl")
+        routine.expr("lo")
+        routine.emit("srl h", "rr l", "ld b,h", "ld c,l", "pop hl", "add hl,bc")
+        carry = routine.label()
+        routine.emit(f"jr nc,{carry}", "inc de")
+        routine.mark(carry)
+        routine.emit("push hl")
+        routine.expr("lo")
+        routine.emit("ld b,h", "ld c,l", "pop hl", "call __gfx_wf_udiv")
+        routine._store("v")
+        routine.if_(("ne", "s" + axis, 0), lambda: routine.set("v", sub(0, "v")))
+        routine.write(add("out", i * 2), "v")
+    routine.expr("shift")
+    routine.emit("ld b,l")
+    routine.expr("lo")
+    routine.emit("inc b")
+    loop, ready = routine.label(), routine.label()
+    routine.emit(f"jr {ready}")
+    routine.mark(loop)
+    routine.emit("srl h", "rr l")
+    routine.mark(ready)
+    routine.emit(f"djnz {loop}", f"jp {routine.name}_return")
+    return routine.finish() + """
 ; Exact restoring square root for the bounded 24-bit squared vector length.
 ; DE:HL input (< 3*2048^2), HL output. No multiply or divide in the loop.
 ; Main/alternate BC, DE, HL are scratch; IX/IY are preserved.
@@ -308,20 +817,69 @@ __gfx_mesh_sqrt24_next:
         jr nz,__gfx_mesh_sqrt24_loop
         ld h,b
         ld l,c
-        ret'''
+        ret"""
 
 
 def _vertex_plan():
-    code=['__gfx_mesh_vertex_plan:','ld (__gfx_mesh_plan_terms),hl','push ix','push iy','push de','pop iy','ld ix,__gfx_wf_records','ld b,a',
-          '__gfx_mesh_vertex_plan_loop:']
+    instructions = [
+        "__gfx_mesh_vertex_plan:",
+        "ld (__gfx_mesh_plan_terms),hl",
+        "push ix",
+        "push iy",
+        "push de",
+        "pop iy",
+        "ld ix,__gfx_wf_records",
+        "ld b,a",
+        "__gfx_mesh_vertex_plan_loop:",
+    ]
     for row in range(3):
-        code+=['exx','ld hl,0','exx']
+        instructions += ["exx", "ld hl,0", "exx"]
         for axis in range(3):
-            code+=['ld l,(iy+0)','inc iy','ld h,0','add hl,hl','ld de,(__gfx_mesh_plan_terms)','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','push de','exx','pop de','add hl,de','exx']
-        code+=['exx',f'ld de,(__gfx_mesh_center+{row*2})','or a','adc hl,de','jp pe,__gfx_mesh_vertex_plan_overflow',f'ld (ix+{row*2}),l',f'ld (ix+{row*2+1}),h','exx']
-    code+=['ld de,12','add ix,de','dec b','jp nz,__gfx_mesh_vertex_plan_loop','ld hl,1','jr __gfx_mesh_vertex_plan_done',
-           '__gfx_mesh_vertex_plan_overflow:','ld hl,0','__gfx_mesh_vertex_plan_done:','pop iy','pop ix','ret','__gfx_mesh_plan_terms: dw 0']
-    return '\n'.join(line if line.endswith(':') or ': dw ' in line else '        '+line for line in code)
+            instructions += [
+                "ld l,(iy+0)",
+                "inc iy",
+                "ld h,0",
+                "add hl,hl",
+                "ld de,(__gfx_mesh_plan_terms)",
+                "add hl,de",
+                "ld e,(hl)",
+                "inc hl",
+                "ld d,(hl)",
+                "push de",
+                "exx",
+                "pop de",
+                "add hl,de",
+                "exx",
+            ]
+        instructions += [
+            "exx",
+            f"ld de,(__gfx_mesh_center+{row*2})",
+            "or a",
+            "adc hl,de",
+            "jp pe,__gfx_mesh_vertex_plan_overflow",
+            f"ld (ix+{row*2}),l",
+            f"ld (ix+{row*2+1}),h",
+            "exx",
+        ]
+    instructions += [
+        "ld de,12",
+        "add ix,de",
+        "dec b",
+        "jp nz,__gfx_mesh_vertex_plan_loop",
+        "ld hl,1",
+        "jr __gfx_mesh_vertex_plan_done",
+        "__gfx_mesh_vertex_plan_overflow:",
+        "ld hl,0",
+        "__gfx_mesh_vertex_plan_done:",
+        "pop iy",
+        "pop ix",
+        "ret",
+        "__gfx_mesh_plan_terms: dw 0",
+    ]
+    return "\n".join(
+        line if line.endswith(":") or ": dw " in line else "        " + line
+        for line in instructions
+    )
 
 
 def _level_fast():
@@ -330,22 +888,108 @@ def _level_fast():
     Max reciprocal rounding error is under 0.07 Q8 units; arbitrary direction
     magnitudes and tilted cameras retain the full normalizer.
     """
-    r=NativeRoutine('mesh_level_fast',('x','z'),('sum','gain'))
-    for value in ('x','z'):
-        valid=r.label();r.expr(value);r.emit('ld de,20','add hl,de','ld de,41','or a','sbc hl,de',f'jr c,{valid}');r.ret(0);r.mark(valid)
-    r.set('sum',0)
-    for value in ('x','z'):
-        positive=r.label();r.expr(value);r.emit('bit 7,h',f'jr z,{positive}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(positive)
-        r.emit('add hl,hl','ld de,__gfx_mesh_level_squares','add hl,de','ld e,(hl)','inc hl','ld d,(hl)');r.expr('sum');r.emit('add hl,de');r._store('sum')
-    r.expr('sum');r.emit('ld de,192','or a','sbc hl,de','ld a,h','or a');valid=r.label();r.emit(f'jr nz,{valid}','ld a,l','cp 128',f'jr c,{valid}_sum');r.mark(valid);r.ret(0);r.mark(valid+'_sum')
-    r.emit('add hl,hl','ld de,__gfx_mesh_level_roots','add hl,de','ld e,(hl)','inc hl','ld d,(hl)','ex de,hl');r._store('gain')
-    for value,forward,right in (('x',12,4),('z',16,0)):
-        positive,signed=r.label(),r.label();r.expr(value);r.emit('ld a,h','or a','push af',f'jp p,{positive}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(positive)
-        r.emit('ex de,hl',f"ld c,(ix{r.slots['gain']:+d})",f"ld b,(ix{r.slots['gain']+1:+d})",'call __gfx_wf_umul','ld de,64','add hl,de','add hl,hl','ld l,h','ld h,0','rl h','pop af',f'jp p,{signed}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a');r.mark(signed)
-        r.emit(f'ld (__gfx_mesh_basis+{forward}),hl')
-        if value=='z':r.emit('xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
-        r.emit(f'ld (__gfx_mesh_basis+{right}),hl')
-    r.emit('ld hl,0')
-    for offset in (2,6,10,14):r.emit(f'ld (__gfx_mesh_basis+{offset}),hl')
-    r.emit('ld hl,256','ld (__gfx_mesh_basis+8),hl');r.ret(1)
-    return r.finish()+'\n__gfx_mesh_level_squares: dw '+','.join(str(i*i) for i in range(21))+'\n__gfx_mesh_level_roots: dw '+','.join(str(round(32768/math.sqrt(i))) for i in range(192,320))
+    routine = NativeRoutine("mesh_level_fast", ("x", "z"), ("sum", "gain"))
+    for component in ("x", "z"):
+        in_range = routine.label()
+        routine.expr(component)
+        routine.emit(
+            "ld de,20", "add hl,de", "ld de,41", "or a", "sbc hl,de", f"jr c,{in_range}"
+        )
+        routine.ret(0)
+        routine.mark(in_range)
+    routine.set("sum", 0)
+    for component in ("x", "z"):
+        nonnegative = routine.label()
+        routine.expr(component)
+        routine.emit(
+            "bit 7,h",
+            f"jr z,{nonnegative}",
+            "xor a",
+            "sub l",
+            "ld l,a",
+            "sbc a,a",
+            "sub h",
+            "ld h,a",
+        )
+        routine.mark(nonnegative)
+        routine.emit(
+            "add hl,hl",
+            "ld de,__gfx_mesh_level_squares",
+            "add hl,de",
+            "ld e,(hl)",
+            "inc hl",
+            "ld d,(hl)",
+        )
+        routine.expr("sum")
+        routine.emit("add hl,de")
+        routine._store("sum")
+    routine.expr("sum")
+    routine.emit("ld de,192", "or a", "sbc hl,de", "ld a,h", "or a")
+    in_range = routine.label()
+    routine.emit(f"jr nz,{in_range}", "ld a,l", "cp 128", f"jr c,{in_range}_sum")
+    routine.mark(in_range)
+    routine.ret(0)
+    routine.mark(in_range + "_sum")
+    routine.emit(
+        "add hl,hl",
+        "ld de,__gfx_mesh_level_roots",
+        "add hl,de",
+        "ld e,(hl)",
+        "inc hl",
+        "ld d,(hl)",
+        "ex de,hl",
+    )
+    routine._store("gain")
+    for component, forward, right in (("x", 12, 4), ("z", 16, 0)):
+        nonnegative, sign_restored = routine.label(), routine.label()
+        routine.expr(component)
+        routine.emit(
+            "ld a,h",
+            "or a",
+            "push af",
+            f"jp p,{nonnegative}",
+            "xor a",
+            "sub l",
+            "ld l,a",
+            "sbc a,a",
+            "sub h",
+            "ld h,a",
+        )
+        routine.mark(nonnegative)
+        routine.emit(
+            "ex de,hl",
+            f"ld c,(ix{routine.slots['gain']:+d})",
+            f"ld b,(ix{routine.slots['gain']+1:+d})",
+            "call __gfx_wf_umul",
+            "ld de,64",
+            "add hl,de",
+            "add hl,hl",
+            "ld l,h",
+            "ld h,0",
+            "rl h",
+            "pop af",
+            f"jp p,{sign_restored}",
+            "xor a",
+            "sub l",
+            "ld l,a",
+            "sbc a,a",
+            "sub h",
+            "ld h,a",
+        )
+        routine.mark(sign_restored)
+        routine.emit(f"ld (__gfx_mesh_basis+{forward}),hl")
+        if component == "z":
+            routine.emit("xor a", "sub l", "ld l,a", "sbc a,a", "sub h", "ld h,a")
+        routine.emit(f"ld (__gfx_mesh_basis+{right}),hl")
+    routine.emit("ld hl,0")
+    for offset in (2, 6, 10, 14):
+        routine.emit(f"ld (__gfx_mesh_basis+{offset}),hl")
+    routine.emit("ld hl,256", "ld (__gfx_mesh_basis+8),hl")
+    routine.ret(1)
+    return (
+        routine.finish()
+        + "\n__gfx_mesh_level_squares: dw "
+        + ",".join(str(i * i) for i in range(21))
+        + "\n__gfx_mesh_level_roots: dw "
+        + ",".join(str(round(32768 / math.sqrt(i))) for i in range(192, 320))
+    )
