@@ -63,7 +63,7 @@ const assert = require('node:assert/strict')
         assert.equal(await setEntry().isDisabled(),true)
         await page.screenshot({path:'dist/file-menu-preview.png',fullPage:true})
         await page.keyboard.press('Escape')
-        for(const name of ['utils.tip','main.tip']){
+        for(const name of (await page.locator('#files .file').allTextContents()).filter(name=>name!=='level.obj')){
             await file(name).click({button:'right'})
             await remove().click()
         }

@@ -1,5 +1,6 @@
 import { Ti84Runner, KEYS, HOST_KEYS } from './hardware.js'
 import { loadProject, removeFile, restoreFile } from './project.js'
+import { addBundledAssets } from './bundled-assets.js'
 
 const $ = id => document.getElementById(id)
 const ctx = $('lcd').getContext('2d')
@@ -19,6 +20,10 @@ try {
     files = project.files
     entry = project.entry
 } catch {}
+project = await addBundledAssets(project)
+files = project.files
+entry = project.entry
+const bundledAssets = project.bundledAssets
 let deletedFile = project.deletedFile ?? null
 let opened = [...new Set([entry,...['main.tip','utils.tip'].filter(name => Object.hasOwn(files,name))].filter(Boolean))]
 let current = entry ?? Object.keys(files)[0] ?? null
@@ -32,7 +37,7 @@ const status = (message,error = false) => { $('status').textContent = message; $
 function persist() {
     $('undo-delete').hidden = !deletedFile || Object.hasOwn(files,deletedFile.name)
     if (deletedFile) $('undo-delete').title = `Restore ${deletedFile.name}`
-    try { localStorage.setItem('tipy-project',JSON.stringify({ files,entry,deletedFile })) } catch {}
+    try { localStorage.setItem('tipy-project',JSON.stringify({ files,entry,deletedFile,bundledAssets })) } catch {}
 }
 function closeFileMenu(restoreFocus = false) {
     $('file-menu').hidden = true

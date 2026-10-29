@@ -4,6 +4,7 @@ import { Ti84Runner, TiLcd, TI } from './hardware.js'
 import { EXAMPLES } from './examples.js'
 import { compilePyTie, DEFAULT_FILES } from './compiler.js'
 import { loadProject, removeFile, restoreFile } from './project.js'
+import { addBundledAssets, BUNDLED_ASSETS } from './bundled-assets.js'
 
 function finish(runner) {
     for (let i = 0; i < 200 && !runner.done; i++) runner.runSlice()
@@ -90,6 +91,34 @@ test('Undo does not overwrite a replacement file or a newly chosen entry',()=>{
     const replacement={...removed,files:{...removed.files,'a.tip':'new'}}
     assert.strictEqual(restoreFile(replacement),replacement)
     assert.strictEqual(removeFile(replacement,'missing.tip'),replacement)
+})
+
+test('Bundled OBJ assets are available in existing projects without overwriting edits or resurrecting deletions',async()=>{
+    const original={files:{'main.tip':'clear()\nrender()','chair.obj':'# my chair'},entry:'main.tip'}
+    const seeded=await addBundledAssets(original)
+    assert.equal(seeded.files['chair.obj'],'# my chair')
+    assert.equal(seeded.files['lumen_gallery.obj'],BUNDLED_ASSETS['lumen_gallery.obj'])
+    assert.equal(seeded.entry,'main.tip')
+    assert.equal(Object.hasOwn(original.files,'lumen_gallery.obj'),false)
+    const deleted=loadProject(removeFile(seeded,'lumen_gallery.obj'))
+    const reloaded=await addBundledAssets(deleted)
+    assert.equal(Object.hasOwn(reloaded.files,'lumen_gallery.obj'),false)
+    assert.equal(restoreFile(reloaded).files['lumen_gallery.obj'],BUNDLED_ASSETS['lumen_gallery.obj'])
+    assert.equal((await addBundledAssets(loadProject(restoreFile(reloaded)))).files['chair.obj'],'# my chair')
+})
+
+test('Only the exact old gallery sample is upgraded to world coordinates',async()=>{
+    const current=BUNDLED_ASSETS['lumen_gallery.obj'].replace(/\r\n/g,'\n')
+    const previous=current.replace('# All render objects and colliders use world coordinates.','# Named render objects use exact world/local units.')
+        .replace('v -11 -8 0\nv -5 -8 0\nv -5 -2 0\nv -11 -2 0','v -3 0 0\nv 3 0 0\nv 3 6 0\nv -3 6 0')
+        .replace('v 12 -8 -10\nv 16 -8 -10\nv 16 -8 -6\nv 12 -8 -6\nv 14 -3 -8','v -2 0 -2\nv 2 0 -2\nv 2 0 2\nv -2 0 2\nv 0 5 0')
+    const source='int gallery=load_scene("lumen_gallery.obj")'
+    const upgraded=await addBundledAssets({files:{'main.tip':source,'lumen_gallery.obj':previous.replace(/\n/g,'\r\n')},entry:'main.tip'})
+    assert.equal(upgraded.files['lumen_gallery.obj'],BUNDLED_ASSETS['lumen_gallery.obj'])
+    const edited=previous+'\n# custom modifications\n'
+    assert.equal((await addBundledAssets({files:{'main.tip':source,'lumen_gallery.obj':edited},entry:'main.tip'})).files['lumen_gallery.obj'],edited)
+    const legacyProject={files:{'main.tip':'int model=load_obj("lumen_gallery.obj")','lumen_gallery.obj':previous},entry:'main.tip'}
+    assert.equal((await addBundledAssets(legacyProject)).files['lumen_gallery.obj'],previous,'Programs using the old local-coordinate models keep their original asset')
 })
 test('RAM graphics do not appear until the actual Z80 program invokes GrBufCpy',() => {
     const runner = new Ti84Runner(`        org 0x9d95

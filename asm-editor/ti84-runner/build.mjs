@@ -22,8 +22,8 @@ const rstFix = {
     }
 }
 await mkdir('dist', { recursive: true })
-await build({ entryPoints: ['src/app.js'], outfile: 'dist/app.js', bundle: true, format: 'esm', alias, plugins: [rstFix], sourcemap: true })
-await build({ entryPoints: ['src/hardware.test.js'], outfile: 'dist/hardware.test.mjs', bundle: true, platform: 'node', format: 'esm', alias, plugins: [rstFix] })
+await build({ entryPoints: ['src/app.js'], outfile: 'dist/app.js', bundle: true, format: 'esm', alias, plugins: [rstFix], loader: { '.obj': 'text' }, sourcemap: true })
+await build({ entryPoints: ['src/hardware.test.js'], outfile: 'dist/hardware.test.mjs', bundle: true, platform: 'node', format: 'esm', alias, plugins: [rstFix], loader: { '.obj': 'text' } })
 await build({ entryPoints: ['src/python-compiler.test.js'], outfile: 'dist/python-compiler.test.mjs', bundle: true, platform: 'node', format: 'esm', alias, plugins: [rstFix] })
 for (const file of ['index.html', 'style.css']) await copyFile(file, `dist/${file}`)
 console.log('Built TI-84 runner using ASM Editor’s checked-out @specy/z80 sources')

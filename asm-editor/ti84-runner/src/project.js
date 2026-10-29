@@ -22,6 +22,7 @@ export function loadProject(saved) {
     const sources=Object.keys(files).filter(runnable)
     const requested = typeof saved?.entry === 'string' ? rename(saved.entry) : 'main.tip'
     const project = { files, entry: sources.includes(requested) ? requested : sources[0] ?? null }
+    if (Array.isArray(saved?.bundledAssets)) project.bundledAssets = saved.bundledAssets.filter(name=>validName(name) && /\.obj$/i.test(name))
     const deleted = saved?.deletedFile
     if (validName(deleted?.name) && typeof deleted.content === 'string' && !Object.hasOwn(files,deleted.name)) {
         project.deletedFile = { name: deleted.name, content: deleted.content,
@@ -37,13 +38,14 @@ export function removeFile(project, name) {
     const content = files[name]
     delete files[name]
     const entry = project.entry === name ? Object.keys(files).find(runnable) ?? null : project.entry
-    return { files, entry, deletedFile: { name, content, wasEntry: project.entry === name, fallbackEntry: entry } }
+    return { ...project, files, entry, deletedFile: { name, content, wasEntry: project.entry === name, fallbackEntry: entry } }
 }
 
 export function restoreFile(project) {
     const deleted = project.deletedFile
     if (!deleted || Object.hasOwn(project.files,deleted.name)) return project
     const restoreEntry = runnable(deleted.name) && (!project.entry || deleted.wasEntry && project.entry === deleted.fallbackEntry)
-    return { files: { ...project.files, [deleted.name]: deleted.content },
+    const { deletedFile, ...restored } = project
+    return { ...restored, files: { ...project.files, [deleted.name]: deleted.content },
         entry: restoreEntry ? deleted.name : project.entry }
 }
