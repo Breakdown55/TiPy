@@ -127,6 +127,13 @@ function execute(source, measurements) {
         return raw&0x8000?raw-65536:raw
     }
     for (const [name,symbol] of Object.entries(result.symbols)) values[name]=decode(runner.assembly.asm.scopes[0].symbols.get(symbol.label).value,symbol.type)
+    for(const [name,fields] of Object.entries(result.record_symbols??{})){
+        values[name]={}
+        for(const [field,symbol] of Object.entries(fields)){
+            const address=runner.assembly.asm.scopes[0].symbols.get(symbol.label)?.value
+            if(address!==undefined)values[name][field]=decode(address,symbol.type)
+        }
+    }
     return values
 }
 
@@ -3060,23 +3067,23 @@ test('Gallery walks through the doorway, blocks divider walls and the imported p
     const asset=readFileSync(resolve('../../examples/lumen_gallery.obj'),'utf8')
     const original=readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8')
     for(const pose of [{z:3,yaw:32,stop:8,blocked:false},{z:10,yaw:32,stop:-2,blocked:true},{z:0,yaw:32,stop:-12,blocked:true}]){
-        const source=original.replace('first_person(x=-18, z=10, yaw=45)',`first_person(x=-18, z=${pose.z}, yaw=90)`)
+        const source=original.replace('FirstPerson(x=-18, z=10, yaw=45)',`FirstPerson(x=-18, z=${pose.z}, yaw=90)`)
         const m={project:true,optimization:'aggressive',assets:{'lumen_gallery.obj':asset},guardGraph:true,trackStack:true,maxSlices:30000,
             afterFrameKeys:Array.from({length:120},(_,i)=>i===119?[15]:[4])}
         const v=execute(source,m)
-        if(pose.blocked)assert.ok(v.__tipy_game_1_x<=pose.stop*16,`Stopped by collider at ${pose.stop}`)
-        else assert.ok(v.__tipy_game_1_x>pose.stop*16,'Walk through the gap into the east room')
-        assert.equal(v.__tipy_game_1_z,pose.z*16)
+        if(pose.blocked)assert.ok(v.player._x<=pose.stop*16,`Stopped by collider at ${pose.stop}`)
+        else assert.ok(v.player._x>pose.stop*16,'Walk through the gap into the east room')
+        assert.equal(v.player._z,pose.z*16)
         assert.ok(m.bytes<=24169);assert.ok(m.stackBytes<1024)
     }
 })
 
 test('Gallery picks up its crystal and can finish at the west entrance',()=>{
-    const source=readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8').replace('first_person(x=-18, z=10, yaw=45)','first_person(x=14, z=-8, yaw=45)')
+    const source=readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8').replace('FirstPerson(x=-18, z=10, yaw=45)','FirstPerson(x=14, z=-8, yaw=45)')
     const m={project:true,optimization:'aggressive',assets:{'lumen_gallery.obj':readFileSync(resolve('../../examples/lumen_gallery.obj'),'utf8')},guardGraph:true,trackStack:true,maxSlices:30000,
         onFrame(r,result,count){
-            const set=(name,value)=>{const a=r.assembly.asm.scopes[0].symbols.get(result.symbols[name].label).value;r.machine.memory[a]=value&255;r.machine.memory[a+1]=(value>>8)&255}
-            if(count===1){set('__tipy_game_1_x',-20*16);set('__tipy_game_1_z',10*16)}
+            const set=(name,value)=>{const [record,field]=name.split('.');const symbol=field?result.record_symbols[record][field]:result.symbols[name];const a=r.assembly.asm.scopes[0].symbols.get(symbol.label).value;r.machine.memory[a]=value&255;r.machine.memory[a+1]=(value>>8)&255}
+            if(count===1){set('player._x',-20*16);set('player._z',10*16)}
             if(count===2)r.setKey(15,true)
         }}
     const v=execute(source,m)
@@ -3174,8 +3181,8 @@ test('Gallery forward diagonal motion keeps a constant camera direction and bala
         afterFrameKeys:Array.from({length:16},(_,i)=>i===15?[15]:[4]),onFrame(r,result){
             const symbols=r.assembly.asm.scopes[0].symbols,mem=r.machine.memory
             const word=a=>{const v=mem[a]|mem[a+1]<<8;return v>32767?v-65536:v}
-            const read=name=>word(symbols.get(result.symbols[name].label).value)
-            poses.push({x:read('__tipy_game_1_x'),z:read('__tipy_game_1_z'),side:word(symbols.get('__gfx_mesh_center').value),basis:Array.from({length:9},(_,i)=>word(symbols.get('__gfx_mesh_basis').value+i*2))})
+            const read=name=>{const [record,field]=name.split('.');return word(symbols.get((field?result.record_symbols[record][field]:result.symbols[name]).label).value)}
+            poses.push({x:read('player._x'),z:read('player._z'),side:word(symbols.get('__gfx_mesh_center').value),basis:Array.from({length:9},(_,i)=>word(symbols.get('__gfx_mesh_basis').value+i*2))})
         }}
     execute(readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8'),m)
     const totals=poses.map(p=>p.x+p.z),side=poses.map(p=>p.side)
@@ -3263,4 +3270,190 @@ render()
         assert.equal(runner.clockHz,initialCpuMode?15000000:6000000)
         assert.equal(runner.frameTimer.clock,0)
     }
+})
+
+
+test('Source record inlining preserves argument snapshots, local scopes, loops and mutable defaults',()=>{
+    const source=`int value=100
+class Body:
+    def __init__(self):
+        self.x=9
+        self.y=0
+    def reset(self):
+        self.x=0
+    def apply(self,int dx):
+        self.reset()
+        self.y+=dx
+    def repeat(self):
+        value=4
+        for i in range(2):
+            self.y+=value
+    def step(self,int amount=1):
+        amount+=1
+        self.y+=amount
+body=Body()
+body.apply(body.x)
+body.repeat()
+body.step()
+int result=body.y`
+    for(const optimization of ['reference','aggressive']){
+        const m={project:true,optimization,trackStack:true}
+        const v=execute(source+'\nclear()\nprint(result,0,0)\nrender()',m)
+        const expected={project:true}
+        execute('clear()\nprint(19,0,0)\nrender()',expected)
+        assert.deepEqual(m.screen,expected.screen)
+        if('result' in v)assert.equal(v.result,19)
+        if('value' in v)assert.equal(v.value,100)
+        assert.ok(!m.assembly.includes('__heap_start:'))
+    }
+})
+
+test('Toolkit source modules are editable and independent record instances do not alias',()=>{
+    const m={project:true,assets:{'geometry.tip':'class Vector2:\n    def __init__(self,int x=0,int y=0):\n        self.x=x+1\n        self.y=y\n    def move_ip(self,int x,int y):\n        self.x+=x\n        self.y+=y\n'},trackStack:true}
+    const v=execute('from geometry import Vector2\na=Vector2(1,2)\nb=Vector2(10,20)\na.move_ip(3,4)\nint ax=a.x\nint ay=a.y\nint bx=b.x\nint by=b.y',m)
+    assert.deepEqual([v.ax,v.ay,v.bx,v.by],[5,6,11,20])
+    assert.ok(!m.assembly.includes('__heap_start:'))
+})
+
+test('Scalar records preserve computed boolean fields and byte argument widening',()=>{
+    const source=`import time
+class Flags:
+    def __init__(self):
+        self.active=time.frame_ticks()>0
+        self.count=17
+    def set_active(self,bool active):
+        self.active=active
+    def add_one(self,int value)->int:
+        return value+1
+flags=Flags()
+flags.set_active(True)
+u8 byte_value=255
+int widened=flags.add_one(byte_value)
+bool active=flags.active
+int count=flags.count`
+    const m={project:true,optimization:'reference',trackStack:true}
+    const v=execute(source,m)
+    assert.deepEqual([v.widened,v.active,v.count],[256,1,17])
+    assert.equal(v.flags.active,1)
+    assert.ok(!m.assembly.includes('__heap_start:'))
+})
+
+test('Pygame-level draw helpers and GX framebuffer access share pixels without a heap',()=>{
+    const m={project:true,guardGraph:true,trackStack:true}
+    const v=execute(`import gfx
+import gx
+gfx.clear()
+int width=3+int(gfx.key_down("right"))
+gfx.draw_rect(4,5,width,2)
+gfx.draw_rect(4,8,0,3)
+gfx.draw_circle(15,10,2,filled=False)
+gfx.draw_line(20,20,22,22)
+gx.set_buffer_byte(0,0xAA)
+int packed=gx.get_buffer_byte(0)
+bool a=gfx.get_pixel(0,0)
+bool b=gfx.get_pixel(1,0)
+bool clipped=gfx.get_pixel(-1,0)
+bool inside=gfx.get_pixel(5,5)
+bool outside=gfx.get_pixel(5,8)
+gfx.render()`,m)
+    assert.deepEqual([v.packed,v.a,v.b,v.clipped,v.inside,v.outside],[170,1,0,0,1,0])
+    assert.ok(!m.assembly.includes('__heap_start:'))
+    assert.equal(m.screen[20*96+20],1)
+    assert.equal(m.screen[22*96+22],1)
+})
+
+test('GX view matrices render the same mesh as the convenience camera',()=>{
+    const header=`import gfx
+import gx
+int model=gx.mesh([(-6,-6,0),(6,-6,0),(6,6,0),(-6,6,0)],faces=[(0,1,2,7),(0,2,3,7)])
+gx.set_projection(75,2,90)
+`
+    const draw='gfx.clear()\ngx.draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)\ngx.present()'
+    const explicit={project:true,guardGraph:true,trackStack:true},convenient={project:true,guardGraph:true,trackStack:true}
+    execute(header+'gx.load_view_matrix(0,0,24,256,0,0,0,256,0,0,0,-256)\n'+draw,explicit)
+    execute(header+'gfx.camera(0,0,24,0,0,0)\n'+draw,convenient)
+    assert.deepEqual(explicit.screen,convenient.screen)
+    assert.ok(explicit.screen.some(Boolean))
+    for(const source of ['import gx\ngx.get_buffer_byte(-1)','import gx\ngx.set_buffer_byte(768,0)','import gx\ngx.set_buffer_byte(0,256)','import gx\ngx.load_view_matrix(0,0,0,257,0,0,0,256,0,0,0,-256)']){
+        assert.throws(()=>execute(source,{project:true}),/Runtime error/)
+    }
+})
+
+test('Raw framebuffer writes retain observable draw order across presents',()=>{
+    const m={project:true,guardGraph:true}
+    execute('import gx\ngx.clear()\ngx.set_buffer_byte(0,0x80)\ngx.present()\ngx.set_buffer_byte(0,0)\ngx.present()',m)
+    assert.equal(m.frames.length,2)
+    assert.equal(m.frames[0][0],1)
+    assert.equal(m.frames[1][0],0)
+})
+
+
+test('Toolkit Clock reports milliseconds and limits frames without owning the application loop',()=>{
+    const m={project:true,guardGraph:true,trackStack:true,maxSlices:30000}
+    const v=execute(`import gfx
+from timing import Clock
+gfx.init()
+clock=Clock()
+int elapsed=0
+for frame in range(20):
+    elapsed=clock.tick(60)
+    gfx.clear()
+    gfx.pixel_on(frame,10)
+    gfx.flip()
+gfx.quit()`,m)
+    const times=m.frameTimes.slice(1).map((time,i)=>time-m.frameTimes[i])
+    const mean=times.reduce((a,b)=>a+b,0)/times.length
+    assert.ok(mean>220000&&mean<280000,`60 FPS timing at 15 MHz: ${mean} T-states`)
+    assert.ok(v.elapsed>=15&&v.elapsed<=24)
+    assert.equal(m.frames.length,20)
+    assert.equal(m.clockHz,6000000)
+    assert.ok(!m.assembly.includes('__heap_start:'))
+})
+
+test('Graphics session init and quit are idempotent and restore the original CPU mode',()=>{
+    for(const initialCpuMode of [0,1]){
+        const m={project:true,initialCpuMode}
+        execute('import gfx\ngfx.quit()\ngfx.init()\ngfx.init()\ngfx.quit()\ngfx.quit()',m)
+        assert.equal(m.clockHz,initialCpuMode?15000000:6000000)
+    }
+})
+
+
+test('Scene visibility and parameterized drawing work in ordinary user functions',()=>{
+    const asset='o prop\nv -3 0 0\nv 3 0 0\nv 3 5 0\nv -3 5 0\nf 1 2 3 4\n'
+    const m={project:true,assets:{'model.obj':asset},guardGraph:true,trackStack:true,maxSlices:10000}
+    execute(`import gfx
+int group=gfx.load_scene("model.obj",unlit=["prop"])
+gfx.init_camera(75,2,90)
+gfx.camera(0,8,24,0,2,0)
+def draw(int light_x,int light_z):
+    gfx.draw_scene(group,shadow_light=(light_x,24,light_z))
+def hide():
+    gfx.set_visible(group,"prop",False)
+gfx.clear()
+draw(10,8)
+gfx.render()
+hide()
+gfx.clear()
+draw(10,8)
+gfx.render()`,m)
+    assert.ok(m.frames[0].some(Boolean))
+    assert.equal(m.frames[1].some(Boolean),false)
+})
+
+test('Drawing helper keyword arguments execute once in source order',()=>{
+    const m={project:true,guardGraph:true}
+    const v=execute(`import gfx
+int calls=[0]
+def next_value()->int:
+    calls[0]+=1
+    return calls[0]
+gfx.clear()
+gfx.draw_circle(radius=next_value(),x=next_value(),y=next_value())
+int count=calls[0]
+gfx.render()`,m)
+    assert.equal(v.count,3)
+    const expected={project:true}
+    execute('clear()\n__tipy_native_circle(2,3,1,True)\nrender()',expected)
+    assert.deepEqual(m.screen,expected.screen)
 })

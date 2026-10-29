@@ -10,7 +10,8 @@ from .errors import CompileError
 from .optimization_pipeline import optimize_program
 
 
-def compile_project(files, entry, *, optimization="aggressive"):
+def parse_project(files, entry, *, optimization="aggressive"):
+    files = dict(files)
     output = []
     locations = []
     visited = set()
@@ -25,7 +26,11 @@ def compile_project(files, entry, *, optimization="aggressive"):
         if name in visited:
             return
         if name not in files:
-            raise CompileError(f"File not found: {name}", origin)
+            from .source_library import module_source
+            source = module_source(name)
+            if source is None:
+                raise CompileError(f"File not found: {name}", origin)
+            files[name] = source
         active.add(name)
         imports.setdefault(name, set())
         selections.setdefault(name, {})
@@ -83,9 +88,14 @@ def compile_project(files, entry, *, optimization="aggressive"):
     from .stdlib import resolve as resolve_native
     resolve_native(tree, native_imports)
     resolve_module_calls(tree, imports, selections)
+    return tree, tokens
+
+
+def compile_project(files, entry, *, optimization="aggressive"):
+    tree, tokens = parse_project(files, entry, optimization=optimization)
     checked, symbols = check(tree)
     optimized, emitted_symbols, report = optimize_program(checked, symbols, optimization)
-    return {"assembly": generate(optimized, emitted_symbols), "symbols": emitted_symbols,
+    return {"assembly": generate(optimized, emitted_symbols), "symbols": emitted_symbols,"record_symbols":checked.get("record_symbols",{}),
             "source_symbols": symbols, "optimization_report": report}
 
 
@@ -97,9 +107,10 @@ def resolve_module_calls(tree, imports, selections=None):
     Existing unqualified calls remain valid when their import is unambiguous.
     """
     exports = {filename: {} for filename in imports}
+    class_names = set()
     selections = selections or {filename: {} for filename in imports}
     for statement in tree["body"]:
-        if statement["kind"] != "function":
+        if statement["kind"] not in {"function", "class"}:
             continue
         filename, name = statement["filename"], statement["name"]
         if name in GRAPHICS_BUILTINS - {"clear"} or name == "len":
@@ -108,6 +119,7 @@ def resolve_module_calls(tree, imports, selections=None):
             raise CompileError(f"Function {name!r} is already defined", statement)
         qualified = filename[:-4] + "." + name
         exports[filename][name] = qualified
+        if statement["kind"] == "class":class_names.add(qualified)
         statement["name"] = qualified
 
     for filename, bindings in selections.items():
@@ -158,9 +170,21 @@ def resolve_module_calls(tree, imports, selections=None):
             return
         filename = item.get("filename")
         if filename:
+            def resolve_type(value):
+                suffix=""
+                while value.endswith("[]"):value=value[:-2];suffix+="[]"
+                target=exports[filename].get(value)
+                if value in selections[filename]:
+                    module,member,_=selections[filename][value]
+                    target=exports[module+".tip"].get(member)
+                return (target if target in class_names else value)+suffix
+            for field in ("type","return_type"):
+                if isinstance(item.get(field),str):item[field]=resolve_type(item[field])
+            if item["kind"]=="class":item["bases"]=[resolve_type(base) for base in item["bases"]]
             lexical=lexical | module_bindings[filename]
             if item["kind"] in {"function","lambda"}:
                 for parameter in item["params"]:
+                    parameter["type"]=resolve_type(parameter["type"])
                     if parameter.get("default") is not None:visit(parameter["default"],lexical)
                 body=item["body"] if item["kind"]=="function" else item["value"]
                 local=bound_names(body)|{p["name"] for p in item["params"]}

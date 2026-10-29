@@ -1,37 +1,58 @@
-# Open this file and lumen_gallery.obj together, then Compile and Run.
 # Arrows: walk/turn. Hold 2nd + left/right to strafe. CLEAR exits.
 # Find the crystal in the east room, then return to the west entrance.
-set_render_quality("aggressive")
+import gfx
+from timing import Clock
+from motion import FirstPerson
+from lighting import OrbitLight
 
-int gallery = load_scene(
+set_render_quality("aggressive")
+gfx.init()
+gfx.init_camera(fov=75, near=2, far=90)
+
+int gallery = gfx.load_scene(
     "lumen_gallery.obj", background="room", floor_y=-8,
     brightness={"doorway": 14, "panel": 5, "crystal": 2},
     unlit=["panel", "crystal"]
 )
-int player = first_person(x=-18, z=10, yaw=45)
-int sun = orbit_light(radius=24, height=24, period=16)
-
+int walls = gfx.scene_collisions(gallery)
+player = FirstPerson(x=-18, z=10, yaw=45)
+sun = OrbitLight(radius=24, height=24, period=16)
+clock = Clock()
 bool collected = False
 bool won = False
 
-while not key_down("clear"):
+while not gfx.key_down("clear"):
+    int dt = clock.tick()
+    sun.update(dt)
     if not won:
-        update_player(player, gallery)
-        if not collected and player_near(player, 14, -8):
+        int turn = int(gfx.key_down("right")) - int(gfx.key_down("left"))
+        int walk = int(gfx.key_down("up")) - int(gfx.key_down("down"))
+        int strafe = 0
+        if gfx.key_down("2nd"):
+            strafe = turn
+            turn = 0
+        player.move(walk, strafe, turn, dt, walls)
+        if not collected and player.near(14, -8):
             collected = True
-            set_visible(gallery, "crystal", False)
-        if collected and player_near(player, -18, 10):
+            gfx.set_visible(gallery, "crystal", False)
+        if collected and player.near(-18, 10):
             won = True
 
-    clear()
+    gfx.clear()
     if won:
-        print("YOU WIN", 27, 24)
-        print("CLEAR: EXIT", 15, 39)
+        gfx.print("YOU WIN", 27, 24)
+        gfx.print("CLEAR: EXIT", 15, 39)
     else:
-        draw_scene(gallery, camera=player, light=sun)
-        clear_rect(0, 0, 96, 9)
+        player.look()
+        gfx.no_lights()
+        gfx.ambient_light(14)
+        gfx.point_light(sun.x, sun.height, sun.z, radius=96, intensity=8)
+        gfx.draw_scene(gallery, shadow_light=(sun.x, sun.height, sun.z))
+        gfx.clear_rect(0, 0, 96, 9)
         if collected:
-            print("RETURN WEST", 1, 1)
+            gfx.print("RETURN WEST", 1, 1)
         else:
-            print("FIND CRYSTAL", 1, 1)
-    render()
+            gfx.print("FIND CRYSTAL", 1, 1)
+    gfx.render()
+
+gfx.quit()

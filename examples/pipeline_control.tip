@@ -1,0 +1,22 @@
+# Both interfaces use the same native framebuffer and mesh renderer.
+import gfx
+import gx
+
+gfx.init()
+int model = gx.mesh(
+    [(-6,-6,0), (6,-6,0), (6,6,0), (-6,6,0)],
+    faces=[(0,1,2,7), (0,2,3,7)]
+)
+gx.set_projection(fov=75, near=2, far=90)
+# View basis rows use Q8 coefficients: 256 represents 1.0.
+gx.load_view_matrix(0, 0, 24,
+                    256, 0, 0,
+                    0, 256, 0,
+                    0, 0, -256)
+gfx.clear()
+gx.draw_mesh(model, cull=False, shaded=False, depth_test=False, outline=True)
+# Direct access to one packed framebuffer byte; bit 7 is the left pixel.
+gx.set_buffer_byte(0, 0xAA)
+gfx.draw_text("GX PIPELINE", 0, 55)
+gx.present()
+gfx.quit()

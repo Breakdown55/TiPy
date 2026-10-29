@@ -1,0 +1,31 @@
+import time
+
+
+class Clock:
+    def __init__(self):
+        self.previous = time.frame_ticks()
+        self.remainder = 0
+        self.wait_remainder = 0
+
+    def tick(self, int fps=0, int max_ms=125) -> int:
+        # Convert the 128 Hz timer to milliseconds, carrying the fraction.
+        int now = time.frame_ticks()
+        if fps > 0:
+            # Fractional scheduling alternates waits to meet the requested FPS.
+            self.wait_remainder += 128
+            int minimum = self.wait_remainder // fps
+            self.wait_remainder %= fps
+            while ((now - self.previous) & 255) < minimum:
+                now = time.frame_ticks()
+        int ticks = (now - self.previous) & 255
+        self.previous = now
+        int scaled = ticks * 125 + self.remainder
+        self.remainder = scaled % 16
+        return min(scaled // 16, max_ms)
+
+    def tick_ticks(self, int maximum=16) -> int:
+        # Raw timer ticks are available for programs using a fixed timestep.
+        int now = time.frame_ticks()
+        int elapsed = min((now - self.previous) & 255, maximum)
+        self.previous = now
+        return elapsed

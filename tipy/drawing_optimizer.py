@@ -270,7 +270,7 @@ def annotate_blank_meshes(tree):
                 return is_blank
             return False
         if kind == "native_graphics":
-            if node["name"] == "mesh_shadow":
+            if node["name"] in {"mesh_shadow", "mesh_buffer_write"}:
                 return False
             if node["name"] == "mesh_draw":
                 arg = node["arguments"][12]

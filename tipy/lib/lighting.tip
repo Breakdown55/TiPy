@@ -1,0 +1,18 @@
+from motion import heading
+
+
+class OrbitLight:
+    def __init__(self, int radius=24, int height=24, int period=16):
+        self.radius = radius
+        self.height = height
+        self.period = period * 1000
+        self.phase_length = period * 1000 // 128
+        self.clock = 0
+        self.x = 0
+        self.z = 0
+
+    def update(self, int dt):
+        self.clock = (self.clock + dt) % self.period
+        int phase = self.clock // self.phase_length
+        self.x = heading(phase) * self.radius // 128
+        self.z = heading(phase + 32) * self.radius // 128

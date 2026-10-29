@@ -360,6 +360,7 @@ def install(tree):
             }
             or mesh_active
             and name in {"init_camera", "camera", "set_fov"}
+            or name == "camera" and any(argument.get("kind") == "keyword" and argument.get("name") == "coordinate_scale" for argument in n["arguments"])
         ):
             if name in {"camera", "collides"}:
                 scales = [

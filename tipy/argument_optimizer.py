@@ -5,6 +5,25 @@ from copy import deepcopy
 
 def simplify(tree):
     tree = deepcopy(tree)
+    function_bounds = {
+        node["label"]: (
+            min(node["finite_table"]["values"]),
+            max(node["finite_table"]["values"]),
+        )
+        for node in tree["body"]
+        if node.get("finite_table")
+    }
+
+    def bounds(node):
+        kind = node.get("kind")
+        if kind == "number":
+            return node["value"], node["value"]
+        if kind == "call":
+            return function_bounds.get(node.get("symbol"))
+        if kind == "negate":
+            value = bounds(node["value"])
+            return (-value[1], -value[0]) if value and value[0] > -32768 else None
+        return None
 
     def visit(node):
         if isinstance(node, list):
@@ -12,6 +31,42 @@ def simplify(tree):
         if not isinstance(node, dict):
             return node
         node = {key: visit(value) for key, value in node.items()}
+        if (
+            node.get("kind") == "floor_divide"
+            and node["right"].get("kind") == "number"
+            and node["right"]["value"] > 0
+        ):
+            left = node["left"]
+            if left.get("kind") == "multiply":
+                factor, value = (
+                    (left["right"], left["left"])
+                    if left["right"].get("kind") == "number"
+                    else (left["left"], left["right"])
+                )
+                interval = bounds(value)
+                if (
+                    factor.get("kind") == "number"
+                    and factor["value"] > 0
+                    and interval
+                    and -32768 <= interval[0] * factor["value"]
+                    and interval[1] * factor["value"] <= 32767
+                ):
+                    from math import gcd
+
+                    common = gcd(factor["value"], node["right"]["value"])
+                    if common > 1:
+                        factor = {**factor, "value": factor["value"] // common}
+                        node["left"] = (
+                            value
+                            if factor["value"] == 1
+                            else {**left, "left": value, "right": factor}
+                        )
+                        node["right"] = {
+                            **node["right"],
+                            "value": node["right"]["value"] // common,
+                        }
+            if node["right"]["value"] == 1:
+                return node["left"]
         if (
             node.get("kind") == "negate"
             and node.get("value", {}).get("kind") == "number"

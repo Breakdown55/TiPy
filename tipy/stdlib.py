@@ -6,14 +6,17 @@ from .errors import CompileError
 MEMBERS = {"time": {"sleep","frame_ticks","stop_frame_timer"}, "random": {"randint", "seed"},
            "math": {"radians", "sin", "cos"}}
 from .graphics_library import PUBLIC
+from .toolkit_namespace import ALIASES
 MEMBERS['py5']=PUBLIC|{'line','BLACK','WHITE','CLOSE','OPEN'}
+MEMBERS.update({name:set(members) for name,members in ALIASES.items()})
 
 
 def imports(source):
     bindings, lines = {}, []
     for text in source.splitlines():
-        match = re.fullmatch(r"(\s*)import (time|random|math|py5)(?:\s+as\s+(\w+))?\s*(?:#.*)?", text)
-        selected = re.fullmatch(r"(\s*)from (time|random|math|py5) import (.+)", text.split("#", 1)[0].rstrip())
+        modules = "|".join(MEMBERS)
+        match = re.fullmatch(r"(\s*)import ("+modules+r")(?:\s+as\s+(\w+))?\s*(?:#.*)?", text)
+        selected = re.fullmatch(r"(\s*)from ("+modules+r") import (.+)", text.split("#", 1)[0].rstrip())
         if match:
             indent, module, alias = match.groups()
             bindings[alias or module] = module
@@ -41,10 +44,11 @@ def resolve(tree, bindings):
                 if module in MEMBERS:
                     if item["name"] not in MEMBERS[module]:
                         raise CompileError(f"Unsupported {module} member {item['name']!r}", item)
-                    item.update(kind="call" if module=='py5' else "stdlib", name=item['name'] if module=='py5' else module + "." + item["name"])
+                    item.update(kind="call" if module=='py5' or module in ALIASES else "stdlib", name=ALIASES[module][item['name']] if module in ALIASES else item['name'] if module=='py5' else module + "." + item["name"])
                     del item["base"]
             elif item.get("kind") == "call" and "." in scope.get(item["name"], ""):
-                target=scope[item['name']];item.update(kind='call' if target.startswith('py5.') else 'stdlib',name=target[4:] if target.startswith('py5.') else target)
+                target=scope[item['name']];module,member=target.split('.',1)
+                item.update(kind='call' if module=='py5' or module in ALIASES else 'stdlib',name=ALIASES[module][member] if module in ALIASES else member if module=='py5' else target)
             constants={'BLACK':0,'WHITE':255,'CLOSE':True,'OPEN':False}
             constant=None
             if item.get('kind')=='attribute' and item['base'].get('kind')=='name' and scope.get(item['base']['name'])=='py5':

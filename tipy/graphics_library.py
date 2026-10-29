@@ -3,10 +3,11 @@ from pathlib import Path
 from .errors import CompileError
 from .camera_api import CAMERA_PUBLIC,install_helpers as install_camera_helpers
 from .mesh_api import PUBLIC as MESH_PUBLIC
-from .game_api import PUBLIC as GAME_PUBLIC
+from .scene_api import PUBLIC as SCENE_PUBLIC
+from .toolkit_api import PUBLIC as TOOLKIT_PUBLIC
 MATRIX_NAMES={'translate','scale','rotate','rotate_x','rotate_y','rotate_z','push_matrix','pop_matrix','reset_matrix','apply_matrix'}
 PUBLIC={'background','circle','ellipse','rect','triangle','quad','polygon','polyline','point','fill','no_fill','stroke','no_stroke','stroke_weight','begin_shape','vertex','end_shape'}|MATRIX_NAMES|CAMERA_PUBLIC|MESH_PUBLIC
-PUBLIC |= GAME_PUBLIC
+PUBLIC |= SCENE_PUBLIC | TOOLKIT_PUBLIC
 SIGNATURES={'circle':(3,),'ellipse':(4,),'rect':(4,),'triangle':(6,),'quad':(8,),'polygon':(1,),'polyline':(1,2),'point':(2,3),'line':(4,6),'fill':(1,),'stroke':(1,),'no_fill':(0,),'no_stroke':(0,),'stroke_weight':(1,),'translate':(2,3),'scale':(1,2,3),'rotate':(1,),'rotate_x':(1,),'rotate_y':(1,),'rotate_z':(1,),'push_matrix':(0,),'pop_matrix':(0,),'reset_matrix':(0,),'apply_matrix':(16,),'begin_shape':(0,),'vertex':(2,3),'end_shape':(0,1)}
 SIGNATURES['background']=(1,)
 def walk(n):
@@ -49,6 +50,7 @@ def install(tree):
                 if value['name']=='no_fill':outline_only=True
             break
     for n in nodes:
+        if n.get('raw_graphics'):continue
         if n.get('kind')=='function' and (n['name'] in PUBLIC or n['name'].startswith('__tipy_gfx_')):raise CompileError('Graphics names are reserved',n)
         if n.get('kind')=='call' and n['name'] in CAMERA_PUBLIC:
             n['name']='__tipy_native_'+{'init_camera':'cam_init','camera':'cam_look','set_fov':'cam_fov'}[n['name']]

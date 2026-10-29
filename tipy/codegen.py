@@ -289,6 +289,27 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
     native_used = {
         item["name"] for item in walk(tree["body"]) if item.get("kind") == "stdlib"
     }
+    # A small acyclic scalar program has a statically bounded source stack.
+    # Keep 768 bytes for native kernels and 128 for expression temporaries;
+    # source frames may use at most the remaining 128 of the reserved 1 KB.
+    bounded_stack = False
+    if not lists_used and not generators and not any(node.get("kind") in {"closure_call","closure","function_ref","bound_method"} for node in walk(tree["body"])):
+        cache = {}
+        def source_stack(name, pending):
+            if name in pending:return 1025
+            if name in cache:return cache[name]
+            function=functions[name]
+            callees=called_labels(function["body"]) & live & functions.keys()
+            weight=function["frame_size"] + 2*len(function["params"]) + 4
+            cache[name]=weight+max((source_stack(callee,pending|{name}) for callee in callees),default=0)
+            return cache[name]
+        def expression_depth(value):
+            if isinstance(value,dict):return 1+max((expression_depth(child) for child in value.values()),default=0)
+            if isinstance(value,list):return max((expression_depth(child) for child in value),default=0)
+            return 0
+        bounded_stack = max((source_stack(name,set()) for name in live & functions.keys()),default=0)<=128 and expression_depth(tree["body"])<=32
+    if any(item.get("kind") == "native_graphics" and item.get("name") in {"mesh_game_begin", "mesh_session_begin", "mesh_session_end"} for item in walk(tree["body"])):
+        native_used.update({"time.frame_ticks", "time.stop_frame_timer"})
     text_nodes = [
         item
         for item in walk(tree["body"])
@@ -1192,6 +1213,8 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                 if name in {"math.sin", "math.cos"} and args[0]["type"] != "fixed":
                     emit("ld h,l", "ld l,0")
                 emit(f"call __native_{name.split('.')[-1]}")
+        elif kind == "argument_check":
+            expression(item["value"])
         elif kind == "global_value":
             emit(f"ld hl,({item['label']})")
         elif kind == "geometry_data":
@@ -1712,6 +1735,12 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
         elif kind in {"shift_left", "shift_right", "power"}:
             runtime(kind, [item["left"], item["right"]], "__obj_")
         elif kind in {"bit_and", "bit_or", "bit_xor"}:
+            if item["right"].get("kind") == "number" and kind == "bit_and" and 0<=item["right"]["value"]<=255:
+                expression(item["left"])
+                mask=item["right"]["value"]
+                if mask!=255:emit("ld a,l",f"and {mask}","ld l,a")
+                emit("ld h,0")
+                return
             expression(item["left"])
             emit("push hl")
             expression(item["right"])
@@ -1754,6 +1783,17 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                 emit("or a", "sbc hl,de")
 
     def branch_false(item, false):
+        inverted = item["kind"] == "not"
+        tested = item["value"] if inverted else item
+        if tested.get("kind") == "name" and tested.get("type") in {"bool","u8"} and not tested.get("cell"):
+            if tested.get("storage") == "frame":emit(f"ld a,(ix{tested['offset']:+d})")
+            else:emit(f"ld a,({tested['symbol']})")
+            emit("or a",f"jp {'nz' if inverted else 'z'},{false}")
+            return
+        if inverted:
+            expression(tested)
+            emit("ld a,h","or l",f"jp nz,{false}")
+            return
         if item["kind"] == "compare_chain":
             expression(item["operands"][0])
             for i, (operator, right) in enumerate(
@@ -1792,6 +1832,10 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             return
         op = item["operator"]
         left, right = item["left"], item["right"]
+        if op in {"<", ">="} and right.get("kind") == "number" and right["value"] == 0:
+            expression(left)
+            emit("bit 7,h",f"jp {'z' if op == '<' else 'nz'},{false}")
+            return
         if op in {"==", "!="} and right["kind"] == "number" and right["value"] == 0:
             if left["kind"] == "modulo" and left["right"]["kind"] == "number":
                 divisor = left["right"]["value"]
@@ -2801,16 +2845,20 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             )
             continue
         emit("push ix", "ld ix,0", "add ix,sp")
-        emit(f"ld hl,{(-function['frame_size']) & 0xFFFF}", "add hl,sp", "push hl")
-        if generators:
-            emit("call __obj_stack_floor", "ex de,hl", "pop hl", "push hl")
+        if bounded_stack:
+            if function["frame_size"]:
+                emit(f"ld hl,{(-function['frame_size']) & 0xFFFF}","add hl,sp","ld sp,hl")
         else:
-            emit("ld de,__program_end+256")
-        emit("or a", "sbc hl,de", "pop hl")
-        room = label()
-        emit(f"jp nc,{room}", "ld hl,3", "jp __arr_fail")
-        mark(room)
-        emit("ld sp,hl")
+            emit(f"ld hl,{(-function['frame_size']) & 0xFFFF}", "add hl,sp", "push hl")
+            if generators:
+                emit("call __obj_stack_floor", "ex de,hl", "pop hl", "push hl")
+            else:
+                emit("ld de,__program_end+256")
+            emit("or a", "sbc hl,de", "pop hl")
+            room = label()
+            emit(f"jp nc,{room}", "ld hl,3", "jp __arr_fail")
+            mark(room)
+            emit("ld sp,hl")
         return_label = label()
         array_locals = [
             value for value in function["locals"].values() if managed(value["type"])
@@ -3202,9 +3250,11 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
     if tree.get("game_runtime"):
         # Fatal errors unwind directly to the main caller. Release the game
         # timer and restore its original CPU mode on that path as well.
+        cleanup = "__gfx_mesh_session_end" if tree.get("graphics_session") else "__gfx_mesh_game_end"
+        release_clock = "" if tree.get("graphics_session") else "        call __native_stop_frame_timer\n"
         assembly = assembly.replace(
             "        ld sp,(__list_main_sp)\n        ld ix,(__list_main_ix)\n        ret",
-            "        call __native_stop_frame_timer\n        call __gfx_mesh_game_end\n        ld sp,(__list_main_sp)\n        ld ix,(__list_main_ix)\n        ret",
+            f"{release_clock}        call {cleanup}\n        ld sp,(__list_main_sp)\n        ld ix,(__list_main_ix)\n        ret",
         )
     if "__gfx_solid_fast_span_tables:" in assembly:
         from .assembly_size import estimate

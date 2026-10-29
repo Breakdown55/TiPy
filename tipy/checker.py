@@ -16,7 +16,13 @@ def check(tree):
     checked = deepcopy(tree)
     from .render_quality import prepare as prepare_render_quality
     prepare_render_quality(checked)
-    from .game_api import install as install_game_helpers
+    from .scene_api import install as install_scenes
+    install_scenes(checked)
+    from .static_records import prepare as replace_static_records
+    replace_static_records(checked)
+    from .toolkit_api import install as install_toolkit
+    install_toolkit(checked)
+    from .legacy_game_api import install as install_game_helpers
     install_game_helpers(checked)
     from .graphics_library import install as install_graphics
     install_graphics(checked)
@@ -111,7 +117,7 @@ def check(tree):
                 raise CompileError(f"Variable {name!r} may not be initialized on this branch", item)
             return context["locals"][name]
         if context["function"] and name in globals_:
-            if writing:
+            if writing and not globals_[name].get("static_field"):
                 raise CompileError("Declare a local before assigning inside a function; global writes are not supported yet", item)
             context["function"]["requires_globals"].add(name)
             return globals_[name]
@@ -335,6 +341,13 @@ def check(tree):
     def _expression(item, allow_min_magnitude=False, allow_void=False, expected_element=None):
         kind = item["kind"]
         constant = None
+        if kind=='argument_check':
+            target=normalize(item['expected_type']);source,value=expression(item['value'])
+            compatible(target,source,value,item)
+            if target==source:
+                inner=item['value'];item.clear();item.update(inner)
+            item['type']=target
+            return target,value
         if kind=='geometry_data':item['type']='i16';return 'i16',None
         if kind=="zero_value" or kind=="bound_argument":return item["type"],None
         if kind=="call":
@@ -1871,6 +1884,8 @@ def check(tree):
                 if symbol is None:
                     symbol = {"type": source_type, "size": 1 if source_type in {"u8", "bool"} else 2,
                               "label": f"__var_{len(globals_)}"}
+                    if statement.get("static_field"):
+                        symbol["static_field"] = True
                     context["locals"][name] = symbol
                     statement["kind"] = "declare"
                 elif symbol["type"] == "auto":
@@ -1896,6 +1911,8 @@ def check(tree):
                         raise CompileError(f"Variable {name!r} is already declared", statement)
                     symbol = {"type": target, "label": f"__var_{len(globals_)}",
                               "size": 1 if target in {"u8", "bool"} else 2}
+                    if statement.get("static_field"):
+                        symbol["static_field"] = True
                 source_type, constant = expression(statement["value"], expected_element=target)
                 if source_type.endswith("[]"):
                     leaf=source_type
@@ -2051,4 +2068,8 @@ def check(tree):
         function.pop("capture_bindings",None)
     for name,value in globals_.items():
         if name.startswith("$"):checked["temporaries"][value["label"]]=value
+    checked["record_symbols"] = {
+        record: {field:globals_[name] for field,name in fields.items() if name in globals_}
+        for record,fields in checked.get("static_records",{}).items()
+    }
     return checked, {name: value for name, value in globals_.items() if not name.startswith("$")}

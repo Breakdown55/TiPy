@@ -587,10 +587,14 @@ def graphics_assembly(used):
                 "mesh_unit_transform" in used,
             )
         )
-        if used & {"mesh_game_begin", "mesh_game_end", "mesh_frame_step", "mesh_clear_rows"}:
+        if used & {"mesh_game_begin", "mesh_game_end", "mesh_frame_step"}:
             from .game_runtime import routines as game_routines
 
             groups += game_routines()
+        if used & {"mesh_clear_rows", "mesh_session_begin", "mesh_session_end", "mesh_eye_x", "mesh_eye_y", "mesh_eye_z", "mesh_load_view", "mesh_get_pixel", "mesh_buffer_read", "mesh_buffer_write"}:
+            from .toolkit_runtime import routines as toolkit_routines
+
+            groups += toolkit_routines(bool(fractional_bits))
         if "mesh_shadow" in used:
             from .shadow_runtime import routines as shadow_routines
 

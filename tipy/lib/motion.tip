@@ -1,0 +1,57 @@
+import gfx
+
+
+def heading(int angle) -> int:
+    # A compact periodic approximation; finite-table optimization handles it.
+    angle %= 128
+    int sign = 1
+    if angle >= 64:
+        angle -= 64
+        sign = -1
+    int value = angle * (64 - angle) // 8
+    value -= value * (128 - value) * 7 // 4096
+    return sign * value
+
+
+class FirstPerson:
+    def __init__(self, int x=0, int z=0, int yaw=0, int speed=8):
+        self._x = x * 16
+        self._z = z * 16
+        self._yaw = yaw * 128 // 360
+        self.speed = speed
+        self.movement_x = 0
+        self.movement_z = 0
+
+    def slide(self, int position, int other, int amount, bool horizontal, int walls) -> int:
+        if amount == 0:
+            return position
+        int candidate = position + amount
+        if horizontal:
+            if gfx.collides(walls, candidate, other, coordinate_scale=16):
+                return position
+        else:
+            if gfx.collides(walls, other, candidate, coordinate_scale=16):
+                return position
+        return candidate
+
+    def move(self, int forward, int strafe, int turn, int dt, int walls):
+        # Fractional coordinates and remainders stay inside this optional helper.
+        self._yaw = (self._yaw + turn * max(1, dt // 24)) % 128
+        int forward_x = heading(self._yaw) * self.speed // 8
+        int forward_z = -heading(self._yaw + 32) * self.speed // 8
+        self.movement_x += (forward_x * forward - forward_z * strafe) * dt
+        self.movement_z += (forward_z * forward + forward_x * strafe) * dt
+        int step_x = self.movement_x // 1000
+        int step_z = self.movement_z // 1000
+        self.movement_x %= 1000
+        self.movement_z %= 1000
+        self._x = self.slide(self._x, self._z, step_x, True, walls)
+        self._z = self.slide(self._z, self._x, step_z, False, walls)
+
+    def look(self):
+        gfx.camera(self._x, 0, self._z,
+                   self._x + heading(self._yaw) * 2, 0, self._z - heading(self._yaw + 32) * 2,
+                   coordinate_scale=16)
+
+    def near(self, int x, int z, int radius=3) -> bool:
+        return abs(self._x - x * 16) < radius * 16 and abs(self._z - z * 16) < radius * 16
