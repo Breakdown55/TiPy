@@ -15,6 +15,10 @@ aside{border-right:3px solid #111;min-width:0;padding:12px 8px;display:flex;flex
 .file.selected{background:#eee;color:#111}
 .entry-toggle{border:0;padding:4px 2px;font-size:12px;color:#888;background:transparent;flex-shrink:0}
 .entry-toggle.is-entry{color:#008cc4}
+#file-menu{position:fixed;z-index:10;min-width:150px;padding:4px;background:#fff;border:1px solid #555;box-shadow:2px 3px 8px #0002}
+#file-menu button{display:block;width:100%;border:0;text-align:left;padding:7px 10px;font-size:12px}
+#file-menu button:disabled{cursor:default;color:#999;background:#fff}
+#file-menu button:focus-visible{outline-offset:-2px}
 .entry-badge{font-size:8px;font-weight:bold;letter-spacing:.3px;border:1px solid #008cc4;border-radius:8px;padding:1px 4px;color:#008cc4;margin-right:4px;flex-shrink:0}
 .open-file{font-size:12px;cursor:pointer;text-decoration:underline;margin-top:auto;padding:7px 3px}
 .open-file input{display:none}
@@ -30,6 +34,7 @@ textarea[readonly]{background:#fafafa}
 .toolbar{border-top:3px solid #111;min-height:44px;display:flex;align-items:center;gap:10px;overflow:hidden}
 #run{align-self:stretch;border:3px solid #00a5e6;color:#008cc4;font-weight:bold;padding:7px 20px;min-width:117px}
 #pause{font-size:12px;padding:5px 8px}
+#undo-delete{font-size:12px;padding:4px 7px;margin-right:8px;white-space:nowrap}
 #execute{font-weight:bold;padding:7px 12px}
 #status{font-size:12px;color:#555;white-space:pre-wrap;max-height:70px;overflow:auto;padding:5px 8px 5px 0}
 #status.error{color:#a31919}

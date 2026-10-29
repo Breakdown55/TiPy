@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { Ti84Runner, TiLcd, TI } from './hardware.js'
 import { EXAMPLES } from './examples.js'
 import { compilePyTie, DEFAULT_FILES } from './compiler.js'
-import { loadProject } from './project.js'
+import { loadProject, removeFile, restoreFile } from './project.js'
 
 function finish(runner) {
     for (let i = 0; i < 200 && !runner.done; i++) runner.runSlice()
@@ -57,6 +57,39 @@ test('Saved projects migrate legacy extensions and preserve a selected entry fil
     assert.deepEqual(loadProject({ files: { 'other.tip': 'pixel(1,1)', 'main.tip': '' }, entry: 'other.tip' }).entry,'other.tip')
     assert.equal(loadProject({ 'main.pti': 'old', 'main.tip': 'new' }).files['main.tip'],'new')
     assert.equal(loadProject({ files: { 'other.tip': 'code' }, entry: 'missing.tip' }).entry,'other.tip')
+})
+
+test('Deleting an entry chooses a source, persists its undo, and restores its content',()=>{
+    const original={files:{'main.tip':'print("unsaved work",0,0)','level.obj':'o room','other.z80':'ret'},entry:'main.tip'}
+    const removed=removeFile(original,'main.tip')
+    assert.equal(removed.entry,'other.z80')
+    assert.deepEqual(Object.keys(removed.files),['level.obj','other.z80'])
+    assert.equal(original.files['main.tip'],'print("unsaved work",0,0)')
+    const restored=restoreFile(loadProject(JSON.parse(JSON.stringify(removed))))
+    assert.equal(restored.entry,'main.tip')
+    assert.equal(restored.files['main.tip'],original.files['main.tip'])
+    assert.ok(!restored.deletedFile)
+})
+
+test('Empty and asset-only projects survive reload without recreating deleted files',()=>{
+    let project=removeFile({files:{'main.tip':'code','level.obj':'model'},entry:'main.tip'},'main.tip')
+    project=loadProject(project)
+    assert.equal(project.entry,null)
+    assert.deepEqual(project.files,{'level.obj':'model'})
+    project=loadProject(removeFile(project,'level.obj'))
+    assert.deepEqual(project.files,{})
+    assert.equal(project.entry,null)
+    assert.deepEqual(restoreFile(project).files,{'level.obj':'model'})
+    assert.equal(restoreFile(project).entry,null)
+})
+
+test('Undo does not overwrite a replacement file or a newly chosen entry',()=>{
+    const removed=removeFile({files:{'a.tip':'old','b.tip':'b','c.tip':'c'},entry:'a.tip'},'a.tip')
+    const changed={...removed,entry:'c.tip'}
+    assert.equal(restoreFile(changed).entry,'c.tip')
+    const replacement={...removed,files:{...removed.files,'a.tip':'new'}}
+    assert.strictEqual(restoreFile(replacement),replacement)
+    assert.strictEqual(removeFile(replacement,'missing.tip'),replacement)
 })
 test('RAM graphics do not appear until the actual Z80 program invokes GrBufCpy',() => {
     const runner = new Ti84Runner(`        org 0x9d95

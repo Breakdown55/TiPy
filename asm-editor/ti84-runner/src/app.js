@@ -1,5 +1,5 @@
 import { Ti84Runner, KEYS, HOST_KEYS } from './hardware.js'
-import { loadProject } from './project.js'
+import { loadProject, removeFile, restoreFile } from './project.js'
 
 const $ = id => document.getElementById(id)
 const ctx = $('lcd').getContext('2d')
@@ -19,14 +19,111 @@ try {
     files = project.files
     entry = project.entry
 } catch {}
-let opened = [...new Set([entry,...['main.tip','utils.tip'].filter(name => Object.hasOwn(files,name))])]
-let current = entry
-let lastSource = entry
+let deletedFile = project.deletedFile ?? null
+let opened = [...new Set([entry,...['main.tip','utils.tip'].filter(name => Object.hasOwn(files,name))].filter(Boolean))]
+let current = entry ?? Object.keys(files)[0] ?? null
+let lastSource = current
+let menuFile = null
+let menuTrigger = null
 let compileGeneration = 0
 let compileRequest = null
 let compiling = false
 const status = (message,error = false) => { $('status').textContent = message; $('status').classList.toggle('error',error) }
-function persist() { try { localStorage.setItem('tipy-project',JSON.stringify({ files,entry })) } catch {} }
+function persist() {
+    $('undo-delete').hidden = !deletedFile || Object.hasOwn(files,deletedFile.name)
+    if (deletedFile) $('undo-delete').title = `Restore ${deletedFile.name}`
+    try { localStorage.setItem('tipy-project',JSON.stringify({ files,entry,deletedFile })) } catch {}
+}
+function closeFileMenu(restoreFocus = false) {
+    $('file-menu').hidden = true
+    if (restoreFocus && menuTrigger?.isConnected) menuTrigger.focus()
+    menuFile = null
+    menuTrigger = null
+}
+function showFileMenu(event, name, trigger) {
+    event.preventDefault()
+    event.stopPropagation()
+    menuFile = name
+    menuTrigger = trigger
+    const menu = $('file-menu')
+    menu.setAttribute('aria-label',`${name} file actions`)
+    $('file-menu-entry').disabled = name === entry || !/\.(tip|asm|z80)$/i.test(name)
+    menu.hidden = false
+    const rect = trigger.getBoundingClientRect()
+    const pointer = Number.isFinite(event.clientX) && Number.isFinite(event.clientY) && (event.clientX !== 0 || event.clientY !== 0)
+    const x = pointer ? event.clientX : rect.left
+    const y = pointer ? event.clientY : rect.bottom
+    menu.style.left = `${Math.max(4,Math.min(x,innerWidth-menu.offsetWidth-4))}px`
+    menu.style.top = `${Math.max(4,Math.min(y,innerHeight-menu.offsetHeight-4))}px`
+    menu.querySelector('button:not(:disabled)').focus({preventScroll:true})
+}
+function fileActions(element, name, trigger = element) {
+    element.oncontextmenu = event => showFileMenu(event,name,trigger)
+    trigger.setAttribute('aria-haspopup','menu')
+    trigger.addEventListener('keydown',event => {
+        if (event.key === 'ContextMenu' || event.shiftKey && event.key === 'F10') showFileMenu(event,name,trigger)
+    })
+}
+function setEntry(name) {
+    if (!Object.hasOwn(files,name) || !/\.(tip|asm|z80)$/i.test(name) || name === entry) return
+    save()
+    invalidateCompile()
+    entry = name
+    persist()
+    renderFiles()
+    status(`Entry: ${name}`)
+}
+function deleteFile(name) {
+    if (!Object.hasOwn(files,name)) return
+    save()
+    const next = removeFile({ files,entry },name)
+    files = next.files
+    entry = next.entry
+    deletedFile = next.deletedFile
+    invalidateCompile()
+    assembly = null
+    opened = opened.filter(file => file !== name && file !== 'main.asm')
+    if (lastSource === name) lastSource = entry ?? Object.keys(files)[0] ?? null
+    select(current === name || current === 'main.asm' ? opened[0] ?? entry ?? Object.keys(files)[0] ?? null : current)
+    persist()
+    paintBlank()
+    status(`Deleted ${name}`)
+    $('new-file').focus()
+}
+$('file-menu-entry').onclick = () => setEntry(menuFile)
+$('file-menu-delete').onclick = () => deleteFile(menuFile)
+$('file-menu').oncontextmenu = event => event.preventDefault()
+$('undo-delete').onclick = () => {
+    if (!deletedFile || Object.hasOwn(files,deletedFile.name)) return
+    save()
+    const name = deletedFile.name
+    const next = restoreFile({ files,entry,deletedFile })
+    files = next.files
+    entry = next.entry
+    deletedFile = null
+    invalidateCompile()
+    select(name)
+    persist()
+    status(`Restored ${name}`)
+}
+document.addEventListener('pointerdown',event => { if (!$('file-menu').contains(event.target)) closeFileMenu() })
+document.addEventListener('contextmenu',() => closeFileMenu())
+document.addEventListener('keydown',event => {
+    if ($('file-menu').hidden) return
+    event.stopImmediatePropagation()
+    if (event.key === 'Escape') { event.preventDefault(); closeFileMenu(true); return }
+    if (event.key === 'Tab') { closeFileMenu(true); return }
+    const items = [...$('file-menu').querySelectorAll('button:not(:disabled)')]
+    const index = items.indexOf(document.activeElement)
+    let next
+    if (event.key === 'ArrowDown') next = (index+1)%items.length
+    if (event.key === 'ArrowUp') next = (index+items.length-1)%items.length
+    if (event.key === 'Home') next = 0
+    if (event.key === 'End') next = items.length-1
+    if (next !== undefined) { event.preventDefault(); items[next].focus() }
+})
+window.addEventListener('resize',() => closeFileMenu())
+document.addEventListener('scroll',() => closeFileMenu(),true)
 function invalidateCompile() {
     compileGeneration++
     compileRequest?.abort()
@@ -49,16 +146,18 @@ function save() {
 }
 function select(name) {
     save()
-    if (name !== 'main.asm' && !Object.hasOwn(files,name)) return
+    if (name !== null && name !== 'main.asm' && !Object.hasOwn(files,name)) return
     current = name
-    if (name !== 'main.asm') lastSource = name
-    if (!opened.includes(name)) opened.push(name)
-    $('source').value = name === 'main.asm' ? assembly ?? '' : files[name]
-    $('source').readOnly = name === 'main.asm'
-    $('source').setAttribute('aria-label',name === 'main.asm' ? 'Generated Z80 assembly' : `${name} source code`)
+    if (name && name !== 'main.asm') lastSource = name
+    if (name && !opened.includes(name)) opened.push(name)
+    $('source').value = name === 'main.asm' ? assembly ?? '' : files[name] ?? ''
+    $('source').readOnly = name === null || name === 'main.asm'
+    $('source').placeholder = name === null ? 'Open or create a file' : ''
+    $('source').setAttribute('aria-label',name === null ? 'Source code' : name === 'main.asm' ? 'Generated Z80 assembly' : `${name} source code`)
     renderFiles()
 }
 function renderFiles() {
+    closeFileMenu()
     $('files').replaceChildren()
     for (const name of Object.keys(files)) {
         const row = document.createElement('div')
@@ -67,6 +166,7 @@ function renderFiles() {
         button.className = 'file' + (name === current ? ' selected' : '')
         button.textContent = name
         button.onclick = () => select(name)
+        fileActions(row,name,button)
         const entryButton = document.createElement('button')
         entryButton.className = 'entry-toggle' + (name === entry ? ' is-entry' : '')
         entryButton.textContent = name === entry ? '●' : '○'
@@ -74,7 +174,7 @@ function renderFiles() {
         entryButton.setAttribute('aria-label',`Set ${name} as entry file`)
         entryButton.setAttribute('aria-pressed',String(name === entry))
         if(name.endsWith('.obj')){entryButton.disabled=true;entryButton.title='OBJ model asset';entryButton.setAttribute('aria-label',`${name} model asset`)}
-        entryButton.onclick = () => { save(); invalidateCompile(); entry = name; persist(); renderFiles(); status(`Entry: ${name}`) }
+        entryButton.onclick = () => setEntry(name)
         row.append(button,entryButton)
         $('files').append(row)
     }
@@ -85,6 +185,7 @@ function renderFiles() {
         const button = document.createElement('button')
         button.textContent = name === 'main.asm' ? 'Z80 assembly' : name
         button.onclick = () => select(name)
+        if (name !== 'main.asm') fileActions(tab,name,button)
         button.setAttribute('aria-pressed',String(name === current))
         const close = document.createElement('button')
         close.className = 'close'
@@ -93,8 +194,8 @@ function renderFiles() {
         close.onclick = () => {
             save()
             opened = opened.filter(file => file !== name)
-            if (!opened.length) opened.push(entry)
-            if (current === name) select(opened[0])
+            if (!opened.length && (entry || Object.keys(files)[0])) opened.push(entry ?? Object.keys(files)[0])
+            if (current === name) select(opened[0] ?? null)
             else renderFiles()
         }
         tab.append(button)
@@ -111,7 +212,7 @@ function renderFiles() {
 function updateControls() {
     $('pause').hidden = !started || !runner || runner.done
     $('pause').textContent = running ? 'Pause' : 'Resume'
-    $('run').disabled = compiling
+    $('run').disabled = compiling || !entry
     $('run').textContent = compiling ? 'Compiling…' : 'Compile'
     $('execute').disabled = compiling || !runner || running
 }
@@ -121,6 +222,7 @@ function sizeStatus(prefix) {
 }
 function stop() { running = false; releaseAll(); updateControls() }
 async function build() {
+    if (!entry) return
     save()
     invalidateCompile()
     const generation = compileGeneration
@@ -212,8 +314,10 @@ $('new-file').onclick = () => {
     if (!/^[A-Za-z_]\w*\.(tip|asm|z80|obj)$/.test(name) || name === 'main.asm') { status('Use a .tip, .obj, .asm, or .z80 name. main.asm is generated.',true); return }
     save()
     if (!Object.hasOwn(files,name)) files[name] = ''
+    if (!entry && !name.endsWith('.obj')) entry = name
     select(name)
     persist()
+    updateControls()
 }
 $('open').onchange = async event => {
     const selected = Array.from(event.target.files)
@@ -230,10 +334,12 @@ $('open').onchange = async event => {
     const sources = names.filter(name => name.endsWith('.tip'))
     const active = sources[0] ?? names[0]
     if (names.length > 1 && sources.length === 1) entry = active
+    if (!entry) entry = sources[0] ?? names.find(name => !name.endsWith('.obj')) ?? null
     // Do not overwrite a replacement with the old textarea value during select.
     if (names.includes(current)) $('source').value = files[current]
     select(active)
     persist()
+    updateControls()
     status(names.length === 1 ? `Opened ${active}` : `Opened ${names.length} files`)
     event.target.value = ''
 }
@@ -275,7 +381,7 @@ document.addEventListener('keydown',event => {
 })
 window.addEventListener('keyup',event => { if (inputs.has(`keyboard${event.code}`)) input(`keyboard${event.code}`,0,false) })
 $('calculator').addEventListener('focusout',event => { if (!$('calculator').contains(event.relatedTarget)) releaseAll() })
-window.addEventListener('blur',() => { releaseAll(); if (running) { stop(); status('Paused') } })
+window.addEventListener('blur',() => { closeFileMenu(); releaseAll(); if (running) { stop(); status('Paused') } })
 document.addEventListener('visibilitychange',() => { if (document.hidden) stop() })
 function paintBlank() { ctx.fillStyle = '#fff'; ctx.fillRect(0,0,96,64) }
 function paint() {
@@ -303,8 +409,9 @@ function frame(time) {
     requestAnimationFrame(frame)
 }
 // Loading the first file must not overwrite it with the initially empty textarea.
-$('source').value = files[entry]
-select(entry)
+$('source').value = files[current] ?? ''
+select(current)
 persist()
+updateControls()
 paintBlank()
 requestAnimationFrame(frame)

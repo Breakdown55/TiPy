@@ -12,7 +12,7 @@
     <div class="editor">
       <nav id="tabs" aria-label="Open files"></nav>
       <textarea id="source" aria-label="Source code" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
-      <div class="toolbar"><button id="run">Compile</button><button id="execute" disabled>Run</button><button id="pause" hidden>Pause</button><span id="status" role="status">Ready</span></div>
+      <div class="toolbar"><button id="run">Compile</button><button id="execute" disabled>Run</button><button id="pause" hidden>Pause</button><span id="status" role="status">Ready</span><button id="undo-delete" hidden>Undo delete</button></div>
     </div>
   </section>
   <section id="calculator" tabindex="0" aria-label="Calculator. Arrow keys, Control for second, Shift for alpha.">
@@ -20,5 +20,9 @@
     <div id="keypad" aria-label="Calculator buttons"></div>
   </section>
 </main>
+<div id="file-menu" role="menu" aria-label="File actions" hidden>
+  <button id="file-menu-entry" type="button" role="menuitem">Set as entry</button>
+  <button id="file-menu-delete" type="button" role="menuitem">Delete</button>
+</div>
 <script type="module" src="app.js"></script>
 </body></html>
