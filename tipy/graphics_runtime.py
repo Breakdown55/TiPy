@@ -587,6 +587,10 @@ def graphics_assembly(used):
                 "mesh_unit_transform" in used,
             )
         )
+        if used & {"mesh_game_begin", "mesh_game_end", "mesh_frame_step", "mesh_clear_rows"}:
+            from .game_runtime import routines as game_routines
+
+            groups += game_routines()
         if "mesh_shadow" in used:
             from .shadow_runtime import routines as shadow_routines
 

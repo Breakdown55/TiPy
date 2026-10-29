@@ -14,6 +14,10 @@ MATRIX_ENTRIES = {
     "apply_matrix": "mat_apply",
 }
 INTRINSICS = {
+    "mesh_game_begin": ([], [], "void", None),
+    "mesh_game_end": ([], [], "void", None),
+    "mesh_frame_step": ([], [], "i16", None),
+    "mesh_clear_rows": (["y", "height"], ["i16"] * 2, "void", None),
     "mesh_mul": (["a", "b"], ["i16"] * 2, "i16", None),
     "mesh_init": (["fov", "near", "far"], ["i16"] * 3, "void", [75, 2, 120]),
     "mesh_fov": (["fov"], ["i16"], "void", None),

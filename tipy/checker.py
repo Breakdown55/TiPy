@@ -16,6 +16,8 @@ def check(tree):
     checked = deepcopy(tree)
     from .render_quality import prepare as prepare_render_quality
     prepare_render_quality(checked)
+    from .game_api import install as install_game_helpers
+    install_game_helpers(checked)
     from .graphics_library import install as install_graphics
     install_graphics(checked)
     from .classes import prepare as lower_classes

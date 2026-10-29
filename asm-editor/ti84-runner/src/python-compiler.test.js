@@ -23,6 +23,7 @@ function execute(source, measurements) {
     assert.equal(processResult.status,0,processResult.stderr)
     const result = JSON.parse(processResult.stdout)
     const runner = new Ti84Runner(result.assembly)
+    if(measurements?.initialCpuMode!==undefined)runner.writePort(0x20,measurements.initialCpuMode)
     const spanTable=runner.assembly.asm.scopes[0].symbols.get("__gfx_solid_fast_span_tables")
     if(spanTable)assert.equal(spanTable.value&255,0,"Span lookup tables must be page aligned")
     let minStack=65535
@@ -3059,23 +3060,23 @@ test('Gallery walks through the doorway, blocks divider walls and the imported p
     const asset=readFileSync(resolve('../../examples/lumen_gallery.obj'),'utf8')
     const original=readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8')
     for(const pose of [{z:3,yaw:32,stop:8,blocked:false},{z:10,yaw:32,stop:-2,blocked:true},{z:0,yaw:32,stop:-12,blocked:true}]){
-        const source=original.replace('int player_z = 10 * 16',`int player_z = ${pose.z} * 16`).replace('int yaw = 16',`int yaw = ${pose.yaw}`)
+        const source=original.replace('first_person(x=-18, z=10, yaw=45)',`first_person(x=-18, z=${pose.z}, yaw=90)`)
         const m={project:true,optimization:'aggressive',assets:{'lumen_gallery.obj':asset},guardGraph:true,trackStack:true,maxSlices:30000,
             afterFrameKeys:Array.from({length:120},(_,i)=>i===119?[15]:[4])}
         const v=execute(source,m)
-        if(pose.blocked)assert.ok(v.player_x<=pose.stop*16,`Stopped by collider at ${pose.stop}`)
-        else assert.ok(v.player_x>pose.stop*16,'Walk through the gap into the east room')
-        assert.equal(v.player_z,pose.z*16)
+        if(pose.blocked)assert.ok(v.__tipy_game_1_x<=pose.stop*16,`Stopped by collider at ${pose.stop}`)
+        else assert.ok(v.__tipy_game_1_x>pose.stop*16,'Walk through the gap into the east room')
+        assert.equal(v.__tipy_game_1_z,pose.z*16)
         assert.ok(m.bytes<=24169);assert.ok(m.stackBytes<1024)
     }
 })
 
 test('Gallery picks up its crystal and can finish at the west entrance',()=>{
-    const source=readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8').replace('int player_x = -18 * 16','int player_x = 14 * 16').replace('int player_z = 10 * 16','int player_z = -8 * 16')
+    const source=readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8').replace('first_person(x=-18, z=10, yaw=45)','first_person(x=14, z=-8, yaw=45)')
     const m={project:true,optimization:'aggressive',assets:{'lumen_gallery.obj':readFileSync(resolve('../../examples/lumen_gallery.obj'),'utf8')},guardGraph:true,trackStack:true,maxSlices:30000,
         onFrame(r,result,count){
             const set=(name,value)=>{const a=r.assembly.asm.scopes[0].symbols.get(result.symbols[name].label).value;r.machine.memory[a]=value&255;r.machine.memory[a+1]=(value>>8)&255}
-            if(count===1){set('player_x',-20*16);set('player_z',10*16)}
+            if(count===1){set('__tipy_game_1_x',-20*16);set('__tipy_game_1_z',10*16)}
             if(count===2)r.setKey(15,true)
         }}
     const v=execute(source,m)
@@ -3174,7 +3175,7 @@ test('Gallery forward diagonal motion keeps a constant camera direction and bala
             const symbols=r.assembly.asm.scopes[0].symbols,mem=r.machine.memory
             const word=a=>{const v=mem[a]|mem[a+1]<<8;return v>32767?v-65536:v}
             const read=name=>word(symbols.get(result.symbols[name].label).value)
-            poses.push({x:read('player_x'),z:read('player_z'),side:word(symbols.get('__gfx_mesh_center').value),basis:Array.from({length:9},(_,i)=>word(symbols.get('__gfx_mesh_basis').value+i*2))})
+            poses.push({x:read('__tipy_game_1_x'),z:read('__tipy_game_1_z'),side:word(symbols.get('__gfx_mesh_center').value),basis:Array.from({length:9},(_,i)=>word(symbols.get('__gfx_mesh_basis').value+i*2))})
         }}
     execute(readFileSync(resolve('../../examples/lumen_gallery.tip'),'utf8'),m)
     const totals=poses.map(p=>p.x+p.z),side=poses.map(p=>p.side)
@@ -3214,4 +3215,52 @@ bool outside=collides(walls,${3*scale+1},0,coordinate_scale=${scale})`,{project:
     execute(prefix+'camera()\n'+draw,ordinary)
     assert.ok(scaled.screen.some(Boolean))
     assert.deepEqual(scaled.screen,ordinary.screen)
+})
+
+
+test('Game helpers preserve fractional world coordinates and independent player bindings',()=>{
+    const v=execute(`int first=first_person(x=-1.5,z=2.25,yaw=45)
+int second=first_person(x=10,z=-6,yaw=90)
+bool close=player_near(first,-1.5,2.25,radius=0.5)
+bool boundary=player_near(first,-2,2.25,radius=0.5)
+bool distant=player_near(second,-1.5,2.25)
+bool other=player_near(second,10,-6)`,{project:true,guardGraph:true,trackStack:true})
+    assert.deepEqual([v.close,v.boundary,v.distant,v.other],[1,0,0,1])
+})
+
+test('Clear rectangle clips to the LCD and preserves neighboring pixels',()=>{
+    const source=`clear_rect(-5,-4,110,7)
+clear_rect(90,60,20,10)
+clear_rect(-8,20,10,3)
+clear_rect(0,30,96,0)
+clear_rect(0,64,96,5)
+render()`
+    const m={project:true,guardGraph:true,trackStack:true,seedGraph:new Uint8Array(768).fill(255)}
+    execute(source,m)
+    for(let y=0;y<64;y++)for(let x=0;x<96;x++){
+        const cleared=y<3 || x>=90&&y>=60 || x<2&&y>=20&&y<23
+        assert.equal(m.screen[y*96+x],cleared?0:1,`Pixel ${x},${y}`)
+    }
+    assert.ok(!m.assembly.includes('__heap_start:'))
+})
+
+test('Game helpers stop the frame timer and restore the initial CPU mode on normal and fatal exits',()=>{
+    const scene=`int gallery=load_scene("level.obj",background="room")
+int player=first_person()
+update_player(player,gallery)
+clear()
+render()
+`
+    const asset='o room\nv -4 -4 -8\nv 4 -4 -8\nv 0 4 -8\nf 1 2 3\n'
+    for(const initialCpuMode of [0,1]){
+        let runner
+        const m={project:true,guardGraph:true,trackStack:true,initialCpuMode,assets:{'level.obj':asset},onFrame(r){runner=r}}
+        execute(scene,m)
+        assert.equal(runner.clockHz,initialCpuMode?15000000:6000000)
+        assert.equal(runner.frameTimer.clock,0)
+        runner=null
+        assert.throws(()=>execute(scene+'assert False',m),/Runtime error/)
+        assert.equal(runner.clockHz,initialCpuMode?15000000:6000000)
+        assert.equal(runner.frameTimer.clock,0)
+    }
 })

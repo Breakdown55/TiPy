@@ -3199,6 +3199,13 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
         code.extend(["__heap_start:", f"        defs {_heap_bytes},0", "__heap_end:"])
     code.append("__program_end:")
     assembly = optimize("\n".join(code) + "\n")
+    if tree.get("game_runtime"):
+        # Fatal errors unwind directly to the main caller. Release the game
+        # timer and restore its original CPU mode on that path as well.
+        assembly = assembly.replace(
+            "        ld sp,(__list_main_sp)\n        ld ix,(__list_main_ix)\n        ret",
+            "        call __native_stop_frame_timer\n        call __gfx_mesh_game_end\n        ld sp,(__list_main_sp)\n        ld ix,(__list_main_ix)\n        ret",
+        )
     if "__gfx_solid_fast_span_tables:" in assembly:
         from .assembly_size import estimate
 
