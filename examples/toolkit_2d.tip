@@ -1,22 +1,22 @@
 # A toolkit loop: input, movement, drawing and presentation stay explicit.
-import gfx
+import egx
 from geometry import Vector2, Rect
 from timing import Clock
 
-gfx.init()
+egx.init()
 position = Vector2(42, 28)
 box = Rect(0, 0, 8, 8)
 clock = Clock()
 
-while not gfx.key_down("clear"):
+while not egx.key_down("clear"):
     int dt = clock.tick(60)
-    int dx = int(gfx.key_down("right")) - int(gfx.key_down("left"))
-    int dy = int(gfx.key_down("down")) - int(gfx.key_down("up"))
+    int dx = int(egx.key_down("right")) - int(egx.key_down("left"))
+    int dy = int(egx.key_down("down")) - int(egx.key_down("up"))
     position.move_ip(dx, dy)
 
-    gfx.clear()
-    gfx.draw_rect(position.x, position.y, box.width, box.height)
-    gfx.draw_text("ARROWS: MOVE", 1, 1)
-    gfx.flip()
+    egx.clear()
+    egx.draw_rect(position.x, position.y, box.width, box.height)
+    egx.draw_text("ARROWS: MOVE", 1, 1)
+    egx.flip()
 
-gfx.quit()
+egx.quit()

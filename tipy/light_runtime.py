@@ -4,7 +4,7 @@ from .camera_math import NativeRoutine, invoke
 from .list_runtime import add, sub, word, byte
 
 
-def routines(points=True, quads=False, centroids=False, unit_transform=False):
+def routines(points=True, quads=False, centroids=False, unit_transform=False, model_transform=False):
     normal_offset = 6 if quads else 4
     out = [
         "__gfx_light_count: dw 0\n__gfx_light_points: dw 0",
@@ -137,7 +137,7 @@ def routines(points=True, quads=False, centroids=False, unit_transform=False):
                 "v",
                 invoke(
                     "mesh_vertex_dot",
-                    add("@__gfx_mesh_rotation", axis * 6),
+                    add("@__gfx_model_linear" if model_transform else "@__gfx_mesh_rotation", axis * 6),
                     "@__gfx_mesh_vertex",
                 ),
             )

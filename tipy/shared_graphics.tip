@@ -1,0 +1,19 @@
+# Easy GX conveniences use the same native model matrix as GX meshes.
+# Text, clear, camera and lights keep their screen/world coordinates.
+def __egx_point_on(int x, int y):
+    pixel_on(__tipy_native_model_axis(x,y,0,0), __tipy_native_model_axis(x,y,0,1))
+
+def __egx_point_off(int x, int y):
+    pixel_off(__tipy_native_model_axis(x,y,0,0), __tipy_native_model_axis(x,y,0,1))
+
+def __egx_point_flip(int x, int y):
+    flip_pixel(__tipy_native_model_axis(x,y,0,0), __tipy_native_model_axis(x,y,0,1))
+
+def __egx_line(int x1, int y1, int x2, int y2):
+    line(__tipy_native_model_axis(x1,y1,0,0), __tipy_native_model_axis(x1,y1,0,1),
+         __tipy_native_model_axis(x2,y2,0,0), __tipy_native_model_axis(x2,y2,0,1))
+
+def __egx_corner_rect(int x1, int x2, int y1, int y2, int width, bool filled):
+    int left=min(x1,x2)
+    int top=min(y1,y2)
+    __tipy_native_model_rect(left,top,abs(x2-x1)+1,abs(y2-y1)+1,width,filled)

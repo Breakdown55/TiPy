@@ -3315,6 +3315,144 @@ test('Toolkit source modules are editable and independent record instances do no
     assert.ok(!m.assembly.includes('__heap_start:'))
 })
 
+test('GX and Easy GX share a bounded model stack without allocating a heap',()=>{
+    const m={project:true,guardGraph:true,trackStack:true}
+    execute(`import egx
+import gx
+egx.clear()
+egx.push_matrix()
+egx.translate(5,7)
+egx.pixel_on(1,2)
+gx.push_matrix()
+egx.translate(3,0)
+egx.pixel_on(1,2)
+egx.pop_matrix()
+egx.pixel_on(2,2)
+gx.pop_matrix()
+egx.pixel_on(1,2)
+egx.render()`,m)
+    for(const [x,y] of [[6,9],[9,9],[7,9],[1,2]])assert.equal(m.screen[y*96+x],1)
+    assert.equal(m.screen.reduce((a,b)=>a+b,0),4)
+    assert.ok(!m.assembly.includes('__heap_start:'))
+    for(const source of ['gx.pop_matrix()','for i in range(9):\n    gx.push_matrix()']){
+        assert.throws(()=>execute('import gx\n'+source,{project:true}),/Model matrix stack/)
+    }
+})
+
+test('Shared model transforms affect meshes and pop restores camera-independent geometry',()=>{
+    const header=`import egx
+import gx
+int model=egx.mesh([(-3,-3,0),(3,-3,0),(0,3,0)],faces=[(0,1,2,8)])
+egx.init_camera(75,2,90)
+egx.camera(0,0,24,0,0,0)
+egx.clear()
+`
+    const draw='egx.draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)\negx.render()'
+    const transformed={project:true,guardGraph:true,trackStack:true},explicit={project:true,guardGraph:true,trackStack:true}
+    execute(header+'egx.push_matrix()\negx.translate(4,2,0)\negx.scale(1.5)\n'+draw+'\ngx.pop_matrix()\negx.clear()\n'+draw,transformed)
+    execute(header+'egx.draw_mesh(model,x=4,y=2,size=384,cull=False,shaded=False,depth_test=False,outline=True)\negx.render()\negx.clear()\n'+draw,explicit)
+    assert.deepEqual(transformed.frames,explicit.frames)
+    assert.ok(transformed.frames[0].some(Boolean))
+    assert.ok(!transformed.assembly.includes('__heap_start:'))
+})
+
+test('Easy GX alone and mixed GX overlays use the same camera and transformed 2D geometry',()=>{
+    const m={project:true,guardGraph:true,trackStack:true}
+    const v=execute(`import egx
+import gx
+egx.init_camera(75,2,90)
+egx.camera(3,4,24,3,4,0)
+int eye_x=egx.camera_x()
+int eye_y=egx.camera_y()
+egx.clear()
+gx.push_matrix()
+egx.translate(10,12)
+egx.draw_rect(0,0,6,4)
+gx.pop_matrix()
+egx.draw_line(0,0,2,0)
+egx.render()`,m)
+    assert.deepEqual([v.eye_x,v.eye_y],[3,4])
+    for(const [x,y] of [[10,12],[15,15],[0,0],[2,0]])assert.equal(m.screen[y*96+x],1)
+    assert.equal(m.screen[11*96+10],0)
+    assert.equal(m.screen[16*96+10],0)
+    const alone={project:true,guardGraph:true}
+    execute('import egx\negx.init()\negx.clear()\negx.draw_rect(4,5,6,4)\negx.draw_text("OK",1,20)\negx.flip()\negx.quit()',alone)
+    assert.equal(alone.screen[5*96+4],1)
+    assert.equal(alone.clockHz,6000000)
+    assert.ok(!alone.assembly.includes('__heap_start:'))
+})
+
+test('GX XYZ lines use the same camera and model matrix as meshes',()=>{
+    const header='import gx\nimport egx\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.clear()\n'
+    const a={project:true,guardGraph:true},b={project:true,guardGraph:true}
+    execute(header+'gx.push_matrix()\negx.translate(4,0,0)\negx.line(-3,0,0,3,0,0)\negx.pop_matrix()\negx.render()',a)
+    execute(header+'egx.line(1,0,0,7,0,0)\negx.render()',b)
+    assert.deepEqual(a.screen,b.screen)
+    assert.ok(a.screen.some(Boolean))
+})
+
+test('Shared rotation and uniform scale apply in composition order on all mesh axes',()=>{
+    const header='import gx\nimport egx\nint m=egx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,8)])\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.clear()\n'
+    for(const [axis,parameter] of [['x','pitch'],['y','yaw'],['z','roll']]){
+        const a={project:true,guardGraph:true,trackStack:true},b={project:true,guardGraph:true,trackStack:true}
+        execute(header+`egx.rotate_${axis}(1.570796)\negx.draw_mesh(m,cull=False,shaded=False,depth_test=False)\negx.render()`,a)
+        execute(header+`egx.draw_mesh(m,${parameter}=64,cull=False,shaded=False,depth_test=False)\negx.render()`,b)
+        assert.deepEqual(a.screen,b.screen,axis)
+    }
+})
+
+test('Transformed Easy GX curves and rectangle borders fit without a heap',()=>{
+    const m={project:true,guardGraph:true,trackStack:true}
+    execute('import egx\nimport gx\negx.clear()\negx.push_matrix()\negx.translate(20,20)\negx.scale(2)\negx.draw_circle(0,0,3,filled=False)\negx.pop_matrix()\negx.draw_rect(40,10,8,8,thickness=2,filled=False)\negx.render()',m)
+    for(const [x,y] of [[26,20],[14,20],[20,26],[20,14],[40,10],[41,11]])assert.equal(m.screen[y*96+x],1)
+    assert.equal(m.screen[20*96+20],0)
+    assert.equal(m.screen[13*96+43],0)
+    assert.ok(!m.assembly.includes('__heap_start:'))
+})
+
+test('Model stack does not restore camera state and transformed shadows match translated geometry',()=>{
+    const camera={project:true,guardGraph:true,trackStack:true}
+    const v=execute('import egx\nimport gx\negx.push_matrix()\negx.translate(2,3)\negx.camera(3,4,24,3,4,0)\ngx.pop_matrix()\nint x=egx.camera_x()\nint y=egx.camera_y()',camera)
+    assert.deepEqual([v.x,v.y],[3,4])
+    const header='import gx\nimport egx\nint m=egx.mesh([(-3,0,-2),(3,0,-2),(0,5,2)],faces=[(0,1,2,8)])\negx.init_camera(75,2,90)\negx.camera(0,14,24,0,0,0)\negx.clear()\n'
+    const a={project:true,guardGraph:true,trackStack:true},b={project:true,guardGraph:true,trackStack:true}
+    execute(header+'egx.push_matrix()\negx.translate(4,0,0)\negx.draw_shadow(m,10,24,8,floor_y=0)\ngx.pop_matrix()\negx.render()',a)
+    execute(header+'egx.draw_shadow(m,10,24,8,floor_y=0,x=4)\negx.render()',b)
+    assert.deepEqual(a.screen,b.screen)
+    assert.ok(a.screen.some(Boolean))
+    const translated={project:true,guardGraph:true,trackStack:true},origin={project:true,guardGraph:true,trackStack:true}
+    execute(header+'egx.translate(-120,0,0)\negx.draw_shadow(m,10,24,8,floor_y=0,x=120)\negx.render()',translated)
+    execute(header+'egx.draw_shadow(m,10,24,8,floor_y=0)\negx.render()',origin)
+    assert.deepEqual(translated.screen,origin.screen)
+})
+
+test('Mixed GX example fits native RAM and renders entirely on the calculator CPU',()=>{
+    const m={project:true,optimization:'aggressive',guardGraph:true,trackStack:true}
+    execute(readFileSync(resolve('../../examples/gx_egx.tip'),'utf8'),m)
+    assert.ok(m.bytes<=24169)
+    assert.ok(!m.assembly.includes('__heap_start:'))
+    assert.ok(m.screen.some(Boolean))
+})
+
+test('Shared transforms rotate lighting normals and point-light sample positions consistently',()=>{
+    const header='import egx\nimport gx\nint m=egx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,16)])\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.no_lights()\negx.ambient_light(4)\negx.point_light(10,20,20,radius=80,intensity=12)\negx.clear()\n'
+    const a={project:true,guardGraph:true,trackStack:true},b={project:true,guardGraph:true,trackStack:true}
+    execute(header+'egx.push_matrix()\negx.rotate_y(1.570796)\negx.draw_mesh(m,cull=False,depth_test=False)\ngx.pop_matrix()\negx.render()',a)
+    execute(header+'egx.draw_mesh(m,yaw=64,cull=False,depth_test=False)\negx.render()',b)
+    assert.deepEqual(a.screen,b.screen)
+    assert.ok(a.screen.some(Boolean))
+})
+
+test('Combined model and instance scales reject unsafe Q8 coefficients',()=>{
+    const source='import egx\nint m=egx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,8)])\negx.scale(2)\negx.draw_mesh(m,size=512,cull=False,shaded=False,depth_test=False)'
+    assert.throws(()=>execute(source,{project:true,guardGraph:true,trackStack:true}),/Runtime error/)
+})
+
+test('Matrix stack errors remain distinct from assertions and support RuntimeError handlers',()=>{
+    const v=execute('import egx\nint caught=0\ntry:\n    egx.pop_matrix()\nexcept RuntimeError:\n    caught=1\ntry:\n    assert False\nexcept AssertionError:\n    caught+=2',{project:true})
+    assert.equal(v.caught,3)
+})
+
 test('Scalar records preserve computed boolean fields and byte argument widening',()=>{
     const source=`import time
 class Flags:
@@ -3340,22 +3478,22 @@ int count=flags.count`
 
 test('Pygame-level draw helpers and GX framebuffer access share pixels without a heap',()=>{
     const m={project:true,guardGraph:true,trackStack:true}
-    const v=execute(`import gfx
+    const v=execute(`import egx
 import gx
-gfx.clear()
-int width=3+int(gfx.key_down("right"))
-gfx.draw_rect(4,5,width,2)
-gfx.draw_rect(4,8,0,3)
-gfx.draw_circle(15,10,2,filled=False)
-gfx.draw_line(20,20,22,22)
+egx.clear()
+int width=3+int(egx.key_down("right"))
+egx.draw_rect(4,5,width,2)
+egx.draw_rect(4,8,0,3)
+egx.draw_circle(15,10,2,filled=False)
+egx.draw_line(20,20,22,22)
 gx.set_buffer_byte(0,0xAA)
 int packed=gx.get_buffer_byte(0)
-bool a=gfx.get_pixel(0,0)
-bool b=gfx.get_pixel(1,0)
-bool clipped=gfx.get_pixel(-1,0)
-bool inside=gfx.get_pixel(5,5)
-bool outside=gfx.get_pixel(5,8)
-gfx.render()`,m)
+bool a=egx.get_pixel(0,0)
+bool b=egx.get_pixel(1,0)
+bool clipped=egx.get_pixel(-1,0)
+bool inside=egx.get_pixel(5,5)
+bool outside=egx.get_pixel(5,8)
+egx.render()`,m)
     assert.deepEqual([v.packed,v.a,v.b,v.clipped,v.inside,v.outside],[170,1,0,0,1,0])
     assert.ok(!m.assembly.includes('__heap_start:'))
     assert.equal(m.screen[20*96+20],1)
@@ -3363,15 +3501,15 @@ gfx.render()`,m)
 })
 
 test('GX view matrices render the same mesh as the convenience camera',()=>{
-    const header=`import gfx
+    const header=`import egx
 import gx
-int model=gx.mesh([(-6,-6,0),(6,-6,0),(6,6,0),(-6,6,0)],faces=[(0,1,2,7),(0,2,3,7)])
+int model=egx.mesh([(-6,-6,0),(6,-6,0),(6,6,0),(-6,6,0)],faces=[(0,1,2,7),(0,2,3,7)])
 gx.set_projection(75,2,90)
 `
-    const draw='gfx.clear()\ngx.draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)\ngx.present()'
+    const draw='egx.clear()\negx.draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)\ngx.render()'
     const explicit={project:true,guardGraph:true,trackStack:true},convenient={project:true,guardGraph:true,trackStack:true}
     execute(header+'gx.load_view_matrix(0,0,24,256,0,0,0,256,0,0,0,-256)\n'+draw,explicit)
-    execute(header+'gfx.camera(0,0,24,0,0,0)\n'+draw,convenient)
+    execute(header+'egx.camera(0,0,24,0,0,0)\n'+draw,convenient)
     assert.deepEqual(explicit.screen,convenient.screen)
     assert.ok(explicit.screen.some(Boolean))
     for(const source of ['import gx\ngx.get_buffer_byte(-1)','import gx\ngx.set_buffer_byte(768,0)','import gx\ngx.set_buffer_byte(0,256)','import gx\ngx.load_view_matrix(0,0,0,257,0,0,0,256,0,0,0,-256)']){
@@ -3381,7 +3519,7 @@ gx.set_projection(75,2,90)
 
 test('Raw framebuffer writes retain observable draw order across presents',()=>{
     const m={project:true,guardGraph:true}
-    execute('import gx\ngx.clear()\ngx.set_buffer_byte(0,0x80)\ngx.present()\ngx.set_buffer_byte(0,0)\ngx.present()',m)
+    execute('import gx\ngx.clear()\ngx.set_buffer_byte(0,0x80)\ngx.render()\ngx.set_buffer_byte(0,0)\ngx.render()',m)
     assert.equal(m.frames.length,2)
     assert.equal(m.frames[0][0],1)
     assert.equal(m.frames[1][0],0)
@@ -3390,17 +3528,17 @@ test('Raw framebuffer writes retain observable draw order across presents',()=>{
 
 test('Toolkit Clock reports milliseconds and limits frames without owning the application loop',()=>{
     const m={project:true,guardGraph:true,trackStack:true,maxSlices:30000}
-    const v=execute(`import gfx
+    const v=execute(`import egx
 from timing import Clock
-gfx.init()
+egx.init()
 clock=Clock()
 int elapsed=0
 for frame in range(20):
     elapsed=clock.tick(60)
-    gfx.clear()
-    gfx.pixel_on(frame,10)
-    gfx.flip()
-gfx.quit()`,m)
+    egx.clear()
+    egx.pixel_on(frame,10)
+    egx.flip()
+egx.quit()`,m)
     const times=m.frameTimes.slice(1).map((time,i)=>time-m.frameTimes[i])
     const mean=times.reduce((a,b)=>a+b,0)/times.length
     assert.ok(mean>220000&&mean<280000,`60 FPS timing at 15 MHz: ${mean} T-states`)
@@ -3413,7 +3551,7 @@ gfx.quit()`,m)
 test('Graphics session init and quit are idempotent and restore the original CPU mode',()=>{
     for(const initialCpuMode of [0,1]){
         const m={project:true,initialCpuMode}
-        execute('import gfx\ngfx.quit()\ngfx.init()\ngfx.init()\ngfx.quit()\ngfx.quit()',m)
+        execute('import egx\negx.quit()\negx.init()\negx.init()\negx.quit()\negx.quit()',m)
         assert.equal(m.clockHz,initialCpuMode?15000000:6000000)
     }
 })
@@ -3422,38 +3560,137 @@ test('Graphics session init and quit are idempotent and restore the original CPU
 test('Scene visibility and parameterized drawing work in ordinary user functions',()=>{
     const asset='o prop\nv -3 0 0\nv 3 0 0\nv 3 5 0\nv -3 5 0\nf 1 2 3 4\n'
     const m={project:true,assets:{'model.obj':asset},guardGraph:true,trackStack:true,maxSlices:10000}
-    execute(`import gfx
-int group=gfx.load_scene("model.obj",unlit=["prop"])
-gfx.init_camera(75,2,90)
-gfx.camera(0,8,24,0,2,0)
+    execute(`import egx
+int group=egx.load_scene("model.obj",unlit=["prop"])
+egx.init_camera(75,2,90)
+egx.camera(0,8,24,0,2,0)
 def draw(int light_x,int light_z):
-    gfx.draw_scene(group,shadow_light=(light_x,24,light_z))
+    egx.draw_scene(group,shadow_light=(light_x,24,light_z))
 def hide():
-    gfx.set_visible(group,"prop",False)
-gfx.clear()
+    egx.set_visible(group,"prop",False)
+egx.clear()
 draw(10,8)
-gfx.render()
+egx.render()
 hide()
-gfx.clear()
+egx.clear()
 draw(10,8)
-gfx.render()`,m)
+egx.render()`,m)
     assert.ok(m.frames[0].some(Boolean))
     assert.equal(m.frames[1].some(Boolean),false)
 })
 
 test('Drawing helper keyword arguments execute once in source order',()=>{
     const m={project:true,guardGraph:true}
-    const v=execute(`import gfx
+    const v=execute(`import egx
 int calls=[0]
 def next_value()->int:
     calls[0]+=1
     return calls[0]
-gfx.clear()
-gfx.draw_circle(radius=next_value(),x=next_value(),y=next_value())
+egx.clear()
+egx.draw_circle(radius=next_value(),x=next_value(),y=next_value())
 int count=calls[0]
-gfx.render()`,m)
+egx.render()`,m)
     assert.equal(v.count,3)
     const expected={project:true}
     execute('clear()\n__tipy_native_circle(2,3,1,True)\nrender()',expected)
     assert.deepEqual(m.screen,expected.screen)
+})
+
+test('GX primitives fill indexed triangles and share EGX overlays without a heap',()=>{
+    const m={project:true,guardGraph:true,trackStack:true}
+    execute(`import gx
+import egx
+gx.clear()
+gx.draw(gx.TRIANGLES,[(10,10),(40,10),(40,30),(10,30)],[0,1,2,0,2,3])
+egx.pixel_on(1,1)
+gx.render()`,m)
+    assert.equal(m.screen.reduce((a,b)=>a+b,0),601)
+    assert.equal(m.screen[10*96+10],1)
+    assert.equal(m.screen[29*96+39],1)
+    assert.equal(m.screen[30*96+40],0)
+    assert.ok(!m.assembly.includes('__heap_start:'))
+    assert.ok(!m.assembly.includes('__gfx_solid_depth: defs'))
+})
+
+test('GX primitives cull clockwise screen faces, dither and render line pairs',()=>{
+    const m={project:true,guardGraph:true}
+    execute(`import gx
+gx.clear()
+gx.cull(True)
+gx.shade(128)
+gx.draw(gx.TRIANGLES,[(10,10),(40,10),(40,30),(10,30)],[0,1,2,0,2,3])
+gx.draw(gx.TRIANGLES,[(50,10),(50,30),(80,10)])
+gx.shade(0)
+gx.draw(gx.LINES,[(0,0),(5,0)])
+gx.render()`,m)
+    assert.equal(m.screen.reduce((a,b)=>a+b,0),306)
+    assert.equal(m.screen[15*96+55],0)
+})
+
+test('GX primitives project and clip XYZ triangles through the shared camera',()=>{
+    const a={project:true,guardGraph:true,trackStack:true},b={project:true,guardGraph:true}
+    const setup='import gx\nimport egx\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.clear()\n'
+    execute(setup+'gx.draw(gx.TRIANGLES,[(-6,-6,0),(6,-6,0),(0,6,0)],dimensions=3)\ngx.render()',a)
+    execute(setup+'int m=egx.mesh([(-6,-6,0),(6,-6,0),(0,6,0)],faces=[(0,1,2,0)])\negx.draw_mesh(m,cull=False,shaded=False,depth_test=False)\negx.render()',b)
+    assert.deepEqual(a.screen,b.screen)
+    assert.ok(a.screen.some(Boolean))
+})
+
+test('GX primitives preserve depth across submissions and let XY overlays bypass it',()=>{
+    const a={project:true,guardGraph:true},b={project:true,guardGraph:true}
+    const setup='import gx\nimport egx\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\ngx.clear()\n'
+    const draws='gx.shade(255)\ngx.draw(gx.TRIANGLES,[(-6,-6,4),(6,-6,4),(0,6,4)],dimensions=3)\ngx.shade(0)\ngx.draw(gx.TRIANGLES,[(-6,-6,0),(6,-6,0),(0,6,0)],dimensions=3)\ngx.render()'
+    execute(setup+'gx.depth_test(True)\n'+draws,a)
+    execute(setup+draws,b)
+    assert.equal(a.screen[32*96+48],0)
+    assert.equal(b.screen[32*96+48],1)
+})
+
+test('GX primitives use reusable runtime buffers and share affine transforms with EGX',()=>{
+    const m={project:true,guardGraph:true,trackStack:true}
+    const v=execute(`import gx
+import egx
+points=[(0,0),(8,0),(0,8)]
+indices=[0,1,2]
+gx.clear()
+egx.translate(10,10)
+gx.draw(gx.TRIANGLES,points,indices)
+gx.load_matrix(1,0,0,30,0,1,0,10,0,0,1,0,0,0,0,1)
+egx.draw_rect(0,0,4,4)
+int length=len(points)
+gx.render()`,m)
+    assert.equal(v.length,3)
+    assert.equal(m.screen[11*96+11],1)
+    assert.equal(m.screen[11*96+31],1)
+})
+
+test('GX primitives report malformed streams and recover after a caught error',()=>{
+    for(const body of ['gx.vertex(1,2)','gx.end()','gx.begin(gx.TRIANGLES)\ngx.begin(gx.LINES)','gx.begin(gx.TRIANGLES)\ngx.vertex(1,2)\ngx.end()','gx.begin(gx.TRIANGLES)\ngx.vertex(1,2)\ngx.vertex(1,2,3)']){
+        assert.throws(()=>execute('import gx\n'+body,{project:true}),/GX/)
+    }
+    const m={project:true,guardGraph:true}
+    const v=execute('import gx\nint caught=0\ntry:\n    gx.end()\nexcept RuntimeError:\n    caught=1\ngx.draw(gx.LINES,[(1,1),(5,1)])\ngx.render()',m)
+    assert.equal(v.caught,1)
+    assert.equal(m.screen[96+3],1)
+})
+
+test('GX boundary clipping and mixed EGX meshes preserve white erase operations',()=>{
+    const m={project:true,guardGraph:true}
+    execute('import gx\ngx.clear()\ngx.draw(gx.TRIANGLES,[(-30000,-30000),(30000,-30000),(0,30000)])\ngx.render()',m)
+    assert.equal(m.screen.reduce((a,b)=>a+b,0),6144)
+    const mixed={project:true,guardGraph:true,optimization:'aggressive'}
+    execute(`import gx
+import egx
+egx.init_camera(75,2,90)
+egx.camera(0,0,24,0,0,0)
+int model=egx.mesh([(-6,-6,0),(6,-6,0),(0,6,0)],faces=[(0,1,2,0)])
+gx.clear()
+egx.draw_mesh(model,cull=False,shaded=False,depth_test=False)
+gx.shade(255)
+gx.draw(gx.LINES,[(40,32),(56,32)])
+gx.draw(gx.TRIANGLES,[(46,28),(50,28),(48,32)])
+gx.render()`,mixed)
+    assert.equal(mixed.screen[32*96+48],0)
+    assert.equal(mixed.screen[29*96+48],0)
+    assert.ok(mixed.screen.some(Boolean))
 })

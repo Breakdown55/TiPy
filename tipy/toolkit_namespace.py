@@ -1,4 +1,4 @@
-"""Both public rendering namespaces resolve to the same graphics operations."""
+"""GX and Easy GX share one native graphics pipeline."""
 
 COMMON = {
     "clear",
@@ -44,33 +44,47 @@ COMMON = {
     "point_light",
     "directional_light",
 }
-ALIASES = {
-    "gfx": {name: name for name in COMMON},
-    "gx": {name: name for name in COMMON},
-}
-ALIASES["gfx"].update(
-    {
+TRANSFORMS = {
         "init": "__tipy_native_mesh_session_begin",
         "quit": "__tipy_native_mesh_session_end",
-        "flip": "render",
-        "draw_line": "__tipy_toolkit_line",
-        "draw_rect": "__tipy_toolkit_rect",
-        "draw_circle": "__tipy_toolkit_circle",
-        "draw_text": "print",
-    }
-)
-ALIASES["gx"].update(
-    {
-        "load_view_matrix": "__tipy_native_mesh_load_view",
-        "set_projection": "init_camera",
-        "mul_fixed": "__tipy_native_mesh_mul",
-        "present": "render",
-        "get_buffer_byte": "__tipy_native_mesh_buffer_read",
-        "set_buffer_byte": "__tipy_native_mesh_buffer_write",
-        "camera_x": "__tipy_native_mesh_eye_x",
-        "camera_y": "__tipy_native_mesh_eye_y",
-        "camera_z": "__tipy_native_mesh_eye_z",
-    }
-)
-for members in ALIASES.values():
-    members["get_pixel"] = "__tipy_native_mesh_get_pixel"
+        **{
+            name: "__tipy_matrix_" + name
+            for name in (
+                "translate",
+                "scale",
+                "rotate",
+                "rotate_x",
+                "rotate_y",
+                "rotate_z",
+                "reset_matrix",
+            )
+        },
+        "push_matrix": "__tipy_native_model_push",
+        "pop_matrix": "__tipy_native_model_pop",
+}
+ALIASES = {"egx": {
+    **{name: name for name in COMMON},
+    **TRANSFORMS,
+    "get_pixel": "__tipy_native_mesh_get_pixel",
+    "camera_x": "__tipy_native_mesh_eye_x",
+    "camera_y": "__tipy_native_mesh_eye_y",
+    "camera_z": "__tipy_native_mesh_eye_z",
+    "flip": "render",
+    "draw_line": "__tipy_toolkit_line",
+    "draw_rect": "__tipy_toolkit_rect",
+    "draw_circle": "__tipy_toolkit_circle",
+    "draw_text": "print",
+}}
+ALIASES["gx"] = {
+    "clear": "clear", "render": "render",
+    "begin": "__tipy_native_gx_begin", "vertex": "__gx_vertex", "end": "__tipy_native_gx_end",
+    "draw": "__gx_draw", "shade": "__tipy_native_gx_shade",
+    "depth_test": "__tipy_native_gx_depth_test", "cull": "__tipy_native_gx_cull",
+    "load_matrix": "__gx_load_matrix",
+    **{name: TRANSFORMS[name] for name in ("push_matrix", "pop_matrix", "reset_matrix")},
+    "load_view_matrix": "__tipy_native_mesh_load_view", "set_projection": "init_camera",
+    "get_buffer_byte": "__tipy_native_mesh_buffer_read", "set_buffer_byte": "__tipy_native_mesh_buffer_write",
+    "mul_fixed": "__tipy_native_mesh_mul",
+    "TRIANGLES": "__gx_triangles", "LINES": "__gx_lines",
+}
+CONSTANTS = {"gx": {"TRIANGLES": 0, "LINES": 1}}

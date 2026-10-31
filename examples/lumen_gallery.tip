@@ -1,58 +1,58 @@
 # Arrows: walk/turn. Hold 2nd + left/right to strafe. CLEAR exits.
 # Find the crystal in the east room, then return to the west entrance.
-import gfx
+import egx
 from timing import Clock
 from motion import FirstPerson
 from lighting import OrbitLight
 
 set_render_quality("aggressive")
-gfx.init()
-gfx.init_camera(fov=75, near=2, far=90)
+egx.init()
+egx.init_camera(fov=75, near=2, far=90)
 
-int gallery = gfx.load_scene(
+int gallery = egx.load_scene(
     "lumen_gallery.obj", background="room", floor_y=-8,
     brightness={"doorway": 14, "panel": 5, "crystal": 2},
     unlit=["panel", "crystal"]
 )
-int walls = gfx.scene_collisions(gallery)
+int walls = egx.scene_collisions(gallery)
 player = FirstPerson(x=-18, z=10, yaw=45)
 sun = OrbitLight(radius=24, height=24, period=16)
 clock = Clock()
 bool collected = False
 bool won = False
 
-while not gfx.key_down("clear"):
+while not egx.key_down("clear"):
     int dt = clock.tick()
     sun.update(dt)
     if not won:
-        int turn = int(gfx.key_down("right")) - int(gfx.key_down("left"))
-        int walk = int(gfx.key_down("up")) - int(gfx.key_down("down"))
+        int turn = int(egx.key_down("right")) - int(egx.key_down("left"))
+        int walk = int(egx.key_down("up")) - int(egx.key_down("down"))
         int strafe = 0
-        if gfx.key_down("2nd"):
+        if egx.key_down("2nd"):
             strafe = turn
             turn = 0
         player.move(walk, strafe, turn, dt, walls)
         if not collected and player.near(14, -8):
             collected = True
-            gfx.set_visible(gallery, "crystal", False)
+            egx.set_visible(gallery, "crystal", False)
         if collected and player.near(-18, 10):
             won = True
 
-    gfx.clear()
+    egx.clear()
     if won:
-        gfx.print("YOU WIN", 27, 24)
-        gfx.print("CLEAR: EXIT", 15, 39)
+        egx.print("YOU WIN", 27, 24)
+        egx.print("CLEAR: EXIT", 15, 39)
     else:
         player.look()
-        gfx.no_lights()
-        gfx.ambient_light(14)
-        gfx.point_light(sun.x, sun.height, sun.z, radius=96, intensity=8)
-        gfx.draw_scene(gallery, shadow_light=(sun.x, sun.height, sun.z))
-        gfx.clear_rect(0, 0, 96, 9)
+        egx.no_lights()
+        egx.ambient_light(14)
+        egx.point_light(sun.x, sun.height, sun.z, radius=96, intensity=8)
+        egx.draw_scene(gallery, shadow_light=(sun.x, sun.height, sun.z))
+        egx.clear_rect(0, 0, 96, 9)
         if collected:
-            gfx.print("RETURN WEST", 1, 1)
+            egx.print("RETURN WEST", 1, 1)
         else:
-            gfx.print("FIND CRYSTAL", 1, 1)
-    gfx.render()
+            egx.print("FIND CRYSTAL", 1, 1)
+    egx.render()
 
-gfx.quit()
+egx.quit()

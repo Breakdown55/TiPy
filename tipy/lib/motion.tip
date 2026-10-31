@@ -1,4 +1,4 @@
-import gfx
+import egx
 
 
 def heading(int angle) -> int:
@@ -27,10 +27,10 @@ class FirstPerson:
             return position
         int candidate = position + amount
         if horizontal:
-            if gfx.collides(walls, candidate, other, coordinate_scale=16):
+            if egx.collides(walls, candidate, other, coordinate_scale=16):
                 return position
         else:
-            if gfx.collides(walls, other, candidate, coordinate_scale=16):
+            if egx.collides(walls, other, candidate, coordinate_scale=16):
                 return position
         return candidate
 
@@ -49,7 +49,7 @@ class FirstPerson:
         self._z = self.slide(self._z, self._x, step_z, False, walls)
 
     def look(self):
-        gfx.camera(self._x, 0, self._z,
+        egx.camera(self._x, 0, self._z,
                    self._x + heading(self._yaw) * 2, 0, self._z - heading(self._yaw + 32) * 2,
                    coordinate_scale=16)
 

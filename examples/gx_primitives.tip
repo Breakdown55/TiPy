@@ -1,0 +1,30 @@
+# EGX provides conveniences. GX submits explicit primitives to the same buffer.
+import gx
+import egx
+
+egx.init()
+gx.clear()
+gx.shade(128)
+gx.cull(False)
+gx.depth_test(False)
+
+# A rectangle represented by two indexed XY triangles. Constant buffers are
+# emitted without allocating lists in the calculator's heap.
+gx.draw(gx.TRIANGLES,
+        [(6, 12), (36, 12), (36, 42), (6, 42)],
+        [0, 1, 2, 0, 2, 3])
+
+# Immediate XYZ vertices use the same camera as EGX models.
+egx.init_camera(fov=75, near=2, far=90)
+egx.camera(0, 0, 24, 0, 0, 0)
+gx.shade(0)
+gx.begin(gx.TRIANGLES)
+gx.vertex(3, -6, 0)
+gx.vertex(13, -6, 0)
+gx.vertex(8, 6, 0)
+gx.end()
+
+# EGX text and raw GX drawing are displayed together by either render().
+egx.draw_text("GX + EGX", 24, 54)
+gx.render()
+egx.quit()

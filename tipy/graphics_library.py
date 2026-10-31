@@ -28,8 +28,8 @@ def install(tree):
         name=pending.pop()
         if name in visited or name not in user_functions:continue
         visited.add(name);active.append(user_functions[name]);pending.update(n['name'] for n in walk(user_functions[name]) if n.get('kind') in {'call','name'})
-    matrix=any(n.get('kind')=='call' and n['name'] in MATRIX_NAMES for n in walk(active))
-    camera=any(n.get('kind')=='call' and n['name'] in CAMERA_PUBLIC for n in walk(active))
+    matrix=tree.get('shared_model',False) or any(n.get('kind')=='call' and n['name'] in MATRIX_NAMES for n in walk(active))
+    camera=tree.get('shared_model',False) or any(n.get('kind')=='call' and n['name'] in CAMERA_PUBLIC for n in walk(active))
     if camera:
         from .wireframe import batch_lines
         batch_lines(tree)

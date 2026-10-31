@@ -25,6 +25,7 @@ def routines(
     tight_frustum=False,
     fractional_camera=False,
     direction_only=False,
+    model_transform=False,
 ):
     need_instance = extended or solid and unit_transform
     out = ["""__gfx_mesh_ready: dw 0
@@ -401,6 +402,7 @@ __gfx_mesh_gain: defs 512,0"""]
             "outline",
         ),
         (
+            *(["model_x", "model_y", "model_z"] if model_transform else []),
             "sx",
             "cx",
             "sy",
@@ -429,6 +431,11 @@ __gfx_mesh_gain: defs 512,0"""]
         routine.write("@__gfx_solid_depth_enabled", "depth_test")
     if blank_spans:
         routine.emit("xor a", "ld (__gfx_solid_transparent_white),a")
+    if model_transform:
+        for i, axis in enumerate("xyz"):
+            routine.set("model_" + axis, invoke("model_axis", "x", "y", "z", i))
+        for axis in "xyz":
+            routine.set(axis, "model_" + axis)
     if need_instance:
         for i, n in enumerate(("x", "y", "z", "size")):
             routine.write(add("@__gfx_mesh_instance", i * 2), n)
@@ -473,19 +480,20 @@ __gfx_mesh_gain: defs 512,0"""]
     else:
         routine.set("radius", invoke("mesh_imul", word(add("model", 6)), "size"))
     routine.set("a", word(add("@__gfx_mesh_center", 4)))
-    routine.if_(
-        ("slt", "a", word("@__gfx_mesh_near")),
-        lambda: routine.if_(
-            ("ult", "radius", sub(word("@__gfx_mesh_near"), "a")), lambda: routine.ret()
-        ),
-    )
-    routine.if_(
-        ("slt", word("@__gfx_mesh_far"), "a"),
-        lambda: routine.if_(
-            ("ult", "radius", sub("a", word("@__gfx_mesh_far"))), lambda: routine.ret()
-        ),
-    )
-    if tight_frustum:
+    if not model_transform:
+        routine.if_(
+            ("slt", "a", word("@__gfx_mesh_near")),
+            lambda: routine.if_(
+                ("ult", "radius", sub(word("@__gfx_mesh_near"), "a")), lambda: routine.ret()
+            ),
+        )
+        routine.if_(
+            ("slt", word("@__gfx_mesh_far"), "a"),
+            lambda: routine.if_(
+                ("ult", "radius", sub("a", word("@__gfx_mesh_far"))), lambda: routine.ret()
+            ),
+        )
+    if tight_frustum and not model_transform:
         # FOV <= 75 has |x/z| < 1.25 and |y/z| < 1. The expanded
         # sphere and six-unit padding make whole-unit tests conservative.
         positive_z = routine.label()
@@ -631,6 +639,8 @@ __gfx_mesh_gain: defs 512,0"""]
 
         routine.while_(("ult", "i", 18), matrix_row)
         routine.mark(transformed)
+    if model_transform:
+        routine.expr(invoke("model_mesh_compose", "size"))
     if compiled_vertices:
         # Specialized coordinate products are shared across every vertex of a
         # small static model, using the same general model/view matrix.

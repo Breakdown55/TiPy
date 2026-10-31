@@ -502,13 +502,18 @@ __gfx_{name}_loop:
 
 def graphics_assembly(used):
     used = set(used)
+    if used & {"model_rect", "model_circle"}:
+        used.update({"line", "h_line"})
     routines = []
     camera_entries = {
         name
         for name in used
-        if name.startswith(("cam_", "mat_", "model_", "mesh_", "solid_"))
+        if name.startswith(("cam_", "mat_", "model_", "mesh_", "solid_", "gx_"))
     }
-    solid = "mesh_faces" in used and bool(used & {"mesh_draw", "mesh_shadow"})
+    gx = bool(used & {"gx_vertex2", "gx_vertex3"})
+    solid = gx or "mesh_faces" in used and bool(used & {"mesh_draw", "mesh_shadow"})
+    if gx:
+        used.update({"mesh_gx_support", "ink"})
     if solid:
         camera_entries.add("solid_clear")
     if any(name.startswith("mesh_") for name in used):
@@ -548,7 +553,7 @@ def graphics_assembly(used):
             + matrix_routines()
             + camera_routines(batch_capacity=capacity)
             + wireframe_routines(
-                capacity, outlines, "mesh_draw" in used and "cam_fast_batch" not in used
+                capacity, outlines, "mesh_draw" in used and "cam_fast_batch" not in used and not gx
             )
             + mesh_routines(
                 capacity,
@@ -566,6 +571,7 @@ def graphics_assembly(used):
                 "mesh_tight_frustum" in used,
                 bool(fractional_bits),
                 bool(fractional_bits) and "mesh_look" not in used,
+                "model_shared" in used,
             )
             + solid_routines(
                 extended,
@@ -585,8 +591,24 @@ def graphics_assembly(used):
                 quads,
                 centroids,
                 "mesh_unit_transform" in used,
+                "model_shared" in used,
             )
         )
+        if "model_shared" in used:
+            from .shared_model_runtime import routines as shared_model_routines
+            groups += shared_model_routines(solid and (
+                "solid_no_cull" not in used or "solid_no_legacy_light" not in used
+                or bool(used & {"solid_point_light", "solid_directional_light", "solid_directional_coeff"})
+            ))
+            if used & {"model_rect", "model_circle"}:
+                from .shared_shapes_runtime import routines as shared_shape_routines
+                groups += shared_shape_routines()
+        if any(name.startswith("gx_") for name in used):
+            from .gx_runtime import routines as gx_routines
+            groups += gx_routines("model_shared" in used, bool(fractional_bits), not no_depth, "gx_vertex3" in used, "mesh_blank_spans" in used)
+        if "mesh_line" in used:
+            from .shared_model_runtime import line_routines
+            groups += line_routines("model_shared" in used, bool(fractional_bits))
         if used & {"mesh_game_begin", "mesh_game_end", "mesh_frame_step"}:
             from .game_runtime import routines as game_routines
 
@@ -620,6 +642,7 @@ def graphics_assembly(used):
                 ),
                 "shadow_grounded" in used,
                 bool(fractional_bits),
+                "model_shared" in used,
             )
         if fractional_bits:
             from .fractional_camera import routines as fractional_routines

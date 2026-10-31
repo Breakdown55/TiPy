@@ -10,6 +10,32 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class ToolkitTests(unittest.TestCase):
+    def test_easy_gx_import_forms_and_shared_backend(self):
+        for source in (
+            "import egx\negx.clear()\negx.pixel_on(4,5)\negx.flip()",
+            "from egx import clear, pixel_on, flip\nclear()\npixel_on(4,5)\nflip()",
+            "import egx as e\ne.clear()\ne.pixel_on(4,5)\ne.render()",
+        ):
+            with self.subTest(source=source):
+                actual = compile_source(source, optimization="reference")
+                expected = compile_source(
+                    "import egx\negx.clear()\negx.pixel_on(4,5)\negx.render()",
+                    optimization="reference",
+                )
+                self.assertEqual(actual["assembly"], expected["assembly"])
+
+    def test_unused_shared_transforms_do_not_pull_in_a_matrix_or_heap(self):
+        result = compile_source(
+            "import egx\ndef unused():\n    egx.translate(3,4)\n    egx.push_matrix()\negx.pixel_on(1,2)"
+        )
+        self.assertNotIn("__gfx_model:", result["assembly"])
+        self.assertNotIn("__heap_start:", result["assembly"])
+
+    def test_uniform_scale_and_transform_arity_are_checked(self):
+        for call in ("scale(1,2)", "translate()", "rotate_y(1,2)", "push_matrix(1)"):
+            with self.subTest(call=call), self.assertRaises(CompileError):
+                compile_source("import egx\negx." + call)
+
     def test_static_records_preserve_declared_types(self):
         definition = (
             "class Box:\n"
@@ -126,11 +152,11 @@ class ToolkitTests(unittest.TestCase):
 
     def test_both_graphics_levels_compile_to_the_same_backend(self):
         a = compile_source(
-            "import gfx\ngfx.clear()\ngfx.pixel_on(4,5)\ngfx.render()",
+            "import egx\nimport gx\negx.clear()\negx.pixel_on(4,5)\negx.render()",
             optimization="reference",
         )
         b = compile_source(
-            "import gx\ngx.clear()\ngx.pixel_on(4,5)\ngx.present()",
+            "import gx\nimport egx\ngx.clear()\negx.pixel_on(4,5)\ngx.render()",
             optimization="reference",
         )
         self.assertEqual(a["assembly"], b["assembly"])

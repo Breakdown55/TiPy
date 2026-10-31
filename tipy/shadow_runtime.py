@@ -19,6 +19,7 @@ def routines(
     fixed_scale=None,
     grounded=False,
     fractional_camera=False,
+    model_transform=False,
 ):
     routine = NativeRoutine(
         "mesh_shadow",
@@ -47,6 +48,7 @@ def routines(
             "world_y",
             "world_z",
             "old_depth",
+            *(["model_x", "model_y", "model_z"] if model_transform else []),
         ),
     )
     invalid = routine.label()
@@ -58,7 +60,7 @@ def routines(
         routine.emit("call __gfx_shadow_coordinate", f"jp nc,{target}")
 
     for name in ("light_x", "light_y", "light_z", "floor_y", "x", "y", "z"):
-        if name not in checked_coordinates:
+        if name not in checked_coordinates and not (model_transform and name in {"x", "y", "z"}):
             check_coordinate(name, invalid)
     routine.if_(("slt", "max_distance", 0), lambda: routine.emit(f"jp {invalid}"))
     routine.if_(("slt", 240, "max_distance"), lambda: routine.emit(f"jp {invalid}"))
@@ -68,7 +70,8 @@ def routines(
         routine.if_(
             ("negative", "height"), lambda: routine.set("height", sub(0, "height"))
         )
-        routine.if_(("slt", "max_distance", "height"), lambda: routine.ret())
+        if not model_transform:
+            routine.if_(("slt", "max_distance", "height"), lambda: routine.ret())
     routine.set(
         "scale", sub("light_y", "floor_y") if fixed_scale is None else fixed_scale
     )
@@ -131,8 +134,14 @@ def routines(
                 )
         for offset, axis in enumerate("xyz"):
             routine.set("world_" + axis, add(word(add("source", offset * 2)), axis))
-            if axis != "y":
+            if axis != "y" and not model_transform:
                 check_coordinate(None, finished)
+        if model_transform:
+            for offset, axis in enumerate("xyz"):
+                routine.set("model_" + axis, invoke("model_axis", "world_x", "world_y", "world_z", offset))
+            for axis in "xyz":
+                routine.set("world_" + axis, "model_" + axis)
+                check_coordinate("world_" + axis, finished)
         routine.set("height", sub("world_y", "floor_y"))
         routine.emit("ld a,h", "or a", f"jp nz,{finished}")
         routine.set("distance", sub("light_y", "world_y"))

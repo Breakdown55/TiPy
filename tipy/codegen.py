@@ -171,6 +171,7 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
     mesh_geometry = list(mesh_packets(tree["body"]))
     compiled_mesh_vertices = (
         not tree.get("mesh_vertices_disabled")
+        and not tree.get("shared_model")
         and has_live_mesh(tree["body"])
         and bool(mesh_geometry)
         and all(
@@ -3107,7 +3108,7 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             ):
                 pixels_used.add("shadow_grounded")
 
-        if mesh_calls and all(
+        if not tree.get("shared_model") and mesh_calls and all(
             all(fixed_argument(node, index) == 0 for index in (4, 5, 6))
             and fixed_argument(node, 7) == 256
             for node in mesh_calls
@@ -3134,8 +3135,19 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             pixels_used.add("solid_no_depth")
         elif mesh_calls and not all(flag(n, 11, True) for n in mesh_calls):
             pixels_used.add("solid_dynamic_depth")
+        if pixels_used & {"gx_vertex2", "gx_vertex3"}:
+            gx_depth = [n for n in walk(tree) if n.get("kind") == "native_graphics" and n.get("name") == "gx_depth_test"]
+            if "gx_vertex3" in pixels_used and gx_depth and not all(flag(n, 0, False) for n in gx_depth):
+                pixels_used.discard("solid_no_depth")
+                pixels_used.add("solid_dynamic_depth")
+            elif not mesh_calls or all(flag(n, 11, False) for n in mesh_calls):
+                pixels_used.add("solid_no_depth")
+            else:
+                pixels_used.add("solid_dynamic_depth")
         if tree.get("mesh_basic_spans"):
             pixels_used.add("mesh_basic_spans")
+        if tree.get("shared_model"):
+            pixels_used.add("model_shared")
         from .render_quality import apply as apply_render_quality
 
         code.append(

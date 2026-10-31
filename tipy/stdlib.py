@@ -6,7 +6,7 @@ from .errors import CompileError
 MEMBERS = {"time": {"sleep","frame_ticks","stop_frame_timer"}, "random": {"randint", "seed"},
            "math": {"radians", "sin", "cos"}}
 from .graphics_library import PUBLIC
-from .toolkit_namespace import ALIASES
+from .toolkit_namespace import ALIASES, CONSTANTS
 MEMBERS['py5']=PUBLIC|{'line','BLACK','WHITE','CLOSE','OPEN'}
 MEMBERS.update({name:set(members) for name,members in ALIASES.items()})
 
@@ -46,11 +46,23 @@ def resolve(tree, bindings):
                         raise CompileError(f"Unsupported {module} member {item['name']!r}", item)
                     item.update(kind="call" if module=='py5' or module in ALIASES else "stdlib", name=ALIASES[module][item['name']] if module in ALIASES else item['name'] if module=='py5' else module + "." + item["name"])
                     del item["base"]
+                    if module in {"gx", "egx"}:item["shared_graphics"] = True
             elif item.get("kind") == "call" and "." in scope.get(item["name"], ""):
                 target=scope[item['name']];module,member=target.split('.',1)
                 item.update(kind='call' if module=='py5' or module in ALIASES else 'stdlib',name=ALIASES[module][member] if module in ALIASES else member if module=='py5' else target)
+                if module in {"gx", "egx"}:item["shared_graphics"] = True
             constants={'BLACK':0,'WHITE':255,'CLOSE':True,'OPEN':False}
             constant=None
+            module_constants = None
+            if item.get('kind')=='attribute' and item['base'].get('kind')=='name':
+                module = scope.get(item['base']['name'])
+                module_constants = CONSTANTS.get(module, {})
+                if item['name'] in module_constants:
+                    constant=item['name'];constants=module_constants
+            elif item.get('kind')=='name' and '.' in scope.get(item['name'],''):
+                module,member=scope[item['name']].split('.',1)
+                if member in CONSTANTS.get(module, {}):
+                    constant=member;constants=CONSTANTS[module]
             if item.get('kind')=='attribute' and item['base'].get('kind')=='name' and scope.get(item['base']['name'])=='py5':
                 if item['name'] not in constants:raise CompileError('Unsupported py5 attribute',item)
                 constant=item['name']

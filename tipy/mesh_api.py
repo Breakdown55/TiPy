@@ -21,7 +21,11 @@ def install(tree):
     from .graphics_library import walk
 
     nodes = list(walk(tree))
-    if not any(n.get("kind") == "call" and n.get("name") in PUBLIC for n in nodes):
+    for node in nodes:
+        if node.get("shared_graphics") and node.get("name") == "line" and len(node["arguments"]) == 6:
+            node["name"] = "__tipy_native_mesh_line"
+    shared_camera = any(n.get("shared_graphics") and n.get("name") in {"init_camera", "camera", "set_fov"} for n in nodes)
+    if not shared_camera and not any(n.get("kind") == "call" and n.get("name") in PUBLIC for n in nodes):
         return
     functions = {n["name"]: n for n in tree["body"] if n.get("kind") == "function"}
     active = [n for n in tree["body"] if n.get("kind") != "function"]
@@ -358,7 +362,7 @@ def install(tree):
                 "directional_light",
                 "point_light",
             }
-            or mesh_active
+            or (mesh_active or n.get("shared_graphics"))
             and name in {"init_camera", "camera", "set_fov"}
             or name == "camera" and any(argument.get("kind") == "keyword" and argument.get("name") == "coordinate_scale" for argument in n["arguments"])
         ):

@@ -9,7 +9,7 @@ const assert = require('node:assert/strict')
         const errors=[]
         page.on('pageerror',error=>errors.push(error.message))
         await page.goto('http://127.0.0.1:8084')
-        for(const name of ['toolkit_2d.tip','pipeline_control.tip']){
+        for(const name of ['toolkit_2d.tip','pipeline_control.tip','gx_egx.tip']){
             await page.locator('#open').setInputFiles(resolve('../../examples',name))
             await page.waitForFunction(name=>document.querySelector('#status').textContent===`Opened ${name}`,name)
             await page.locator('#files .file').filter({hasText:name}).click({button:'right'})
@@ -33,12 +33,14 @@ const assert = require('node:assert/strict')
                 await page.keyboard.up('Escape')
             }else{
                 await page.waitForFunction(()=>document.querySelector('#status').textContent.startsWith('Finished · '))
-                const row=await page.locator('#lcd').evaluate(canvas=>Array.from(canvas.getContext('2d').getImageData(0,0,8,1).data).filter((_,i)=>i%4===0))
-                assert.deepEqual(row,[0,255,0,255,0,255,0,255])
-                await page.screenshot({path:'dist/toolkit-pipeline-browser.png',fullPage:true})
+                if(name==='pipeline_control.tip'){
+                    const row=await page.locator('#lcd').evaluate(canvas=>Array.from(canvas.getContext('2d').getImageData(0,0,8,1).data).filter((_,i)=>i%4===0))
+                    assert.deepEqual(row,[0,255,0,255,0,255,0,255])
+                }
+                await page.screenshot({path:name==='pipeline_control.tip'?'dist/toolkit-pipeline-browser.png':'dist/gx-egx-browser.png',fullPage:true})
             }
         }
         assert.deepEqual(errors,[])
-        console.log('PASS: editable source libraries, pygame-level drawing/input/clock loop, GX view matrix/framebuffer access, native compile/run/exit')
+        console.log('PASS: standalone Easy GX, held input, shared GX/Easy GX transforms, GX view matrix/framebuffer access, native compile/run/exit')
     }finally{await browser.close()}
 })().catch(error=>{console.error(error);process.exitCode=1})

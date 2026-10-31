@@ -20,6 +20,10 @@ def check(tree):
     install_scenes(checked)
     from .static_records import prepare as replace_static_records
     replace_static_records(checked)
+    from .gx_api import install as install_gx
+    install_gx(checked)
+    from .shared_graphics import prepare as prepare_shared_graphics
+    prepare_shared_graphics(checked)
     from .toolkit_api import install as install_toolkit
     install_toolkit(checked)
     from .legacy_game_api import install as install_game_helpers
@@ -1053,6 +1057,8 @@ def check(tree):
         elif kind=='call' and item['name'].startswith('__tipy_matrix_'):
             from .camera_api import MATRIX_ENTRIES
             name=item['name'][len('__tipy_matrix_'):];args=item['arguments'];original=list(args)
+            from .graphics_library import SIGNATURES
+            if len(args) not in SIGNATURES[name]:raise CompileError(f'Invalid arguments to {name}',item)
             if any(a.get('kind')=='keyword' for a in args):raise CompileError('Use positional matrix arguments',item)
             for arg in args:
                 if expression(arg)[0] not in {'i16','u8','fixed','float','i32'}:raise CompileError('Matrix arguments must be numbers',arg)
@@ -1061,6 +1067,7 @@ def check(tree):
             if name=='scale' and len(args)==1:args.extend([args[0],args[0]])
             elif name=='scale' and len(args)==2:args.append(number(1))
             item.update(kind='native_matrix',name=MATRIX_ENTRIES[name],type='void')
+            if name == 'scale' and item.get('shared_graphics'):item['name']='model_scale'
             if name.startswith('rotate'):
                 from .camera_api import constant_rotation
                 item['axis']={'rotate':2,'rotate_z':2,'rotate_x':0,'rotate_y':1}[name]
