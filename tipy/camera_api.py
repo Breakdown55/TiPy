@@ -69,6 +69,7 @@ INTRINSICS = {
     "mesh_buffer_write": (["index", "value"], ["i16"] * 2, "void", None),
     "mesh_clear_rows": (["y", "height"], ["i16"] * 2, "void", None),
     "mesh_mul": (["a", "b"], ["i16"] * 2, "i16", None),
+    "mesh_scalar_mul": (["a", "b"], ["i16"] * 2, "i16", None),
     "mesh_init": (["fov", "near", "far"], ["i16"] * 3, "void", [75, 2, 120]),
     "mesh_fov": (["fov"], ["i16"], "void", None),
     "mesh_look": (

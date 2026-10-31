@@ -18,8 +18,12 @@ def check(tree):
     prepare_render_quality(checked)
     from .scene_api import install as install_scenes
     install_scenes(checked)
+    from .egx_objects import prepare as prepare_egx_objects
+    prepare_egx_objects(checked)
     from .static_records import prepare as replace_static_records
     replace_static_records(checked)
+    from .egx_shapes import install as install_egx_shapes
+    install_egx_shapes(checked)
     from .gx_api import install as install_gx
     install_gx(checked)
     from .shared_graphics import prepare as prepare_shared_graphics
@@ -194,6 +198,10 @@ def check(tree):
                 item=args[0];value=deepcopy(item);item.clear();item.update(kind="wide_cast",value=value,type="i32",owned=True,line=value["line"],column=value["column"]);t="i32";c=None
             if expected=="float" and t in {"i16","u8","fixed","i32"}:
                 item=args[0];value=deepcopy(item);item.clear();item.update(kind="float_cast",value=value,source_type=t,type="float",owned=True,line=value["line"],column=value["column"]);t="float";c=None
+            if expected=="fixed" and t in {"i16","u8"} and args[0].get("egx_numeric_property"):
+                if c is not None and not -128<=c<=127:
+                    raise CompileError("EGX rotation/scale values must fit fixed-point range -128..127.996",args[0])
+                item=args[0];value=deepcopy(item);item.clear();item.update(kind="to_fixed",value=value,type="fixed",line=value["line"],column=value["column"]);t="fixed";c=None
             return t,c
         finally:expression_depth-=1
 
@@ -345,6 +353,16 @@ def check(tree):
     def _expression(item, allow_min_magnitude=False, allow_void=False, expected_element=None):
         kind = item["kind"]
         constant = None
+        if kind=='call' and item['name'] in {'__egx_fixed_bits','__egx_angle','__egx_fixed_mul'}:
+            name=item['name'];args=item['arguments']
+            if len(args)!=(2 if name=='__egx_fixed_mul' else 1):raise CompileError('Invalid internal EGX numeric conversion',item)
+            for arg in args:
+                arg['egx_numeric_property']=True
+                t,c=expression(arg,expected_element='fixed')
+                if t!='fixed':raise CompileError('EGX rotations and scale require numeric values',arg)
+            item.update(kind='raw_fixed' if name=='__egx_fixed_bits' else 'egx_angle' if name=='__egx_angle' else 'egx_fixed_mul',type='fixed' if name=='__egx_fixed_mul' else 'i16')
+            if name!='__egx_fixed_mul':item['value']=args[0]
+            return item['type'],None
         if kind=='argument_check':
             target=normalize(item['expected_type']);source,value=expression(item['value'])
             compatible(target,source,value,item)
@@ -1472,6 +1490,8 @@ def check(tree):
         reachable = True
         for statement in body:
             kind = statement["kind"]
+            if statement.get('egx_numeric_property') and 'value' in statement:
+                statement['value']['egx_numeric_property']=True
             if kind=="release_temp":
                 symbol=context["locals"][statement["name"]];statement["type"]=symbol["type"];bind(statement,symbol);continue
             if kind=="pattern_assign":
@@ -1479,13 +1499,16 @@ def check(tree):
             if kind=="attribute_assign":
                 target=statement["target"];t,_=expression(target["base"])
                 if not is_object(t):raise CompileError("Attribute assignment requires an object",statement)
-                fields=classes[t[7:-1]]["fields"];name=target["name"]
+                meta=classes[t[7:-1]];fields=meta["fields"];name=target["name"]
+                initializing=context['function'] and context['function'].get('method_class')==meta['name'] and context['function']['name'].endswith('___init__')
+                if name in meta.get('readonly_fields',[]) and not initializing:raise CompileError(f'{name} is fixed at construction; use scale to resize the object',statement)
                 if name not in fields:raise CompileError(f"Cannot infer field type for {name!r}",statement)
+                if meta.get('egx_shape') and name in {'rotation_x','rotation_y','rotation_z','scale'}:statement['value']['egx_numeric_property']=True
                 expected=fields[name];actual,c=expression(statement["value"],expected_element=expected)
                 if any(is_object(t) for t in all_types(expected)):checked["tracing_heap"]=True
                 compatible(expected,actual,c,statement)
                 target.update(type=expected,index={"kind":"number","value":list(fields).index(name),"type":"i16"})
-                if statement["operator"]!="=" and expected not in {"i16","u8"}:raise CompileError("Compound field assignment requires integers",statement)
+                if statement["operator"]!="=" and expected not in {"i16","u8"} and not(expected=='fixed' and statement['operator'] in {'+=','-=','*='}):raise CompileError("Unsupported compound field assignment",statement)
                 statement.update(kind="object_assign",type=expected);continue
             if kind=="yield":
                 function=context["function"]
@@ -1886,6 +1909,7 @@ def check(tree):
                     raise CompileError(f"{name!r} is already a function name", statement)
                 symbol = lookup(name,statement,writing=True) if context["function"] and name in context["function"].get("captures",[]) else context["locals"].get(name)
                 expected = symbol["type"] if symbol and symbol["type"] != "auto" else statement.get("inferred_type")
+                if statement.get('egx_numeric_property'):statement['value']['egx_numeric_property']=True
                 if expected and expected.endswith("[]"): expected = expected[:-2]
                 source_type, constant = expression(statement["value"], expected_element=expected)
                 if symbol is None:

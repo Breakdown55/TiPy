@@ -6,7 +6,7 @@ const ctx = canvas.getContext('2d', { alpha: false })
 const image = ctx.createImageData(96, 64)
 const status = document.querySelector('#status')
 const pauseButton = document.querySelector('#pause')
-let runner, source, running = false, last = 0, frame = 0
+let runner, source, running = false, autoPaused = false, viewActive = true, last = 0, frame = 0
 const held = new Map()
 function paint() {
     for (let i = 0; i < 6144; i++) {
@@ -26,6 +26,7 @@ function key(token, code, down) {
     for (const value of current) runner.setKey(value, true)
 }
 function stop(label = 'Stopped', resumable = false) {
+    autoPaused = false
     running = false; cancelAnimationFrame(frame); release(); paint()
     if (!resumable) runner = null
     status.textContent = label; pauseButton.textContent = 'Resume'
@@ -44,10 +45,19 @@ function tick(now) {
 }
 function resume() {
     if (!runner || runner.done || running) return
+    autoPaused = false
     canvas.focus()
     running = true; last = 0; status.textContent = 'Running'; pauseButton.textContent = 'Pause'
     pauseButton.disabled = false
     frame = requestAnimationFrame(tick)
+}
+function pauseAutomatically() {
+    if (!running) return
+    stop('Paused', true)
+    autoPaused = true
+}
+function resumeAutomatically() {
+    if (autoPaused && viewActive && !document.hidden) resume()
 }
 function run(assembly, filename) {
     stop(); source = { assembly, filename }
@@ -62,6 +72,11 @@ function run(assembly, filename) {
 window.addEventListener('message', ({ data }) => {
     if (data.type === 'run' && typeof data.assembly === 'string') run(data.assembly, data.filename)
     if (data.type === 'stop') stop()
+    if (data.type === 'viewState') {
+        viewActive = data.active
+        if (data.active) resumeAutomatically()
+        else pauseAutomatically()
+    }
 })
 document.querySelector('#pause').onclick = () => running ? stop('Paused', true) : resume()
 document.querySelector('#restart').onclick = () => { if (source) run(source.assembly, source.filename) }
@@ -77,8 +92,12 @@ canvas.addEventListener('keyup', event => {
     event.preventDefault(); event.stopPropagation(); key('key:' + event.code, code, false)
 })
 canvas.addEventListener('blur', release)
-window.addEventListener('blur', () => { if (running) stop('Paused — Resume to continue', true) })
-document.addEventListener('visibilitychange', () => { if (document.hidden && running) stop('Paused — Resume to continue', true) })
+window.addEventListener('blur', pauseAutomatically)
+window.addEventListener('focus', resumeAutomatically)
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) pauseAutomatically()
+    else resumeAutomatically()
+})
 for (const [label, code] of KEYS) {
     const button = document.createElement('button')
     button.textContent = label

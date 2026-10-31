@@ -2,7 +2,7 @@
   "name": "tipy",
   "displayName": "TiPy",
   "description": "TiPy language tools, native Z80 compilation, and a ROM-free TI-84 Plus emulator.",
-  "version": "0.2.2",
+  "version": "0.2.16",
   "publisher": "Breakdown55",
   "license": "GPL-3.0-only",
   "repository": {
@@ -54,7 +54,11 @@
         "extensions": [
           ".tip"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./media/tipy_logo.png",
+          "dark": "./media/tipy_logo.png"
+        }
       }
     ],
     "grammars": [

@@ -1,6 +1,6 @@
 {
   "modules": {
-    "gx": "Lower-level graphics API exposing triangle/line submission, explicit flat shade, culling, depth, matrices, and raw buffer access. Shares the framebuffer, camera, and model transform with egx. Shapes, text, OBJ loading, input, and lights belong to egx.",
+    "gx": "Lower-level graphics API exposing custom indexed meshes, triangle/line submission, explicit flat shade, culling, depth, matrices, and raw buffer access. Shares the framebuffer, camera, and model transform with egx. Shapes, text, OBJ loading, input, and lights belong to egx.",
     "egx": "Easy GX: convenient shapes, text, camera setup, OBJ models, lighting, scenes, and input. Works on its own. Mix with gx for explicit primitives; both share the framebuffer, native camera, model transform, and depth buffer.",
     "py5": "Python-style drawing facade with fill/stroke settings, shape construction, and geometry transforms. TiPy supports the listed subset; this is not the full desktop py5 library.",
     "time": "Calculator timing functions for blocking sleep and a wrapping 128 Hz frame-tick counter.",
@@ -136,7 +136,12 @@
     "cull": "Enables or disables back-face culling for subsequent GX triangles; defaults to False. Clockwise screen-coordinate faces are front-facing. Lines are unaffected.",
     "load_matrix": "Replaces the shared model matrix with sixteen row-major numeric entries. The final affine row must be literal 0,0,0,1; translation is m03,m13,m23. Affects subsequent GX vertices and EGX geometry. Use push_matrix()/pop_matrix() to restore the previous transform.",
     "TRIANGLES": "Primitive mode for gx.begin() or gx.draw(): each independent group of three vertices defines one filled triangle.",
-    "LINES": "Primitive mode for gx.begin() or gx.draw(): each independent pair of vertices defines one line segment. Lines are drawn as overlays without depth testing."
+    "LINES": "Primitive mode for gx.begin() or gx.draw(): each independent pair of vertices defines one line segment. Lines are drawn as overlays without depth testing.",
+    "egx.cube": "Draws a built-in cube centered at (x,y,z). size is the edge length in world units (1..40); a runtime size outside that range draws nothing. Supports lighting, outlines and the shared transform stack. yaw/pitch/roll use 256 steps per full turn. No vertex or face lists are needed.",
+    "egx.plane": "Draws a two-sided built-in plane parallel to XZ and centered at (x,y,z). width and depth are positive constant world dimensions, baked into shared geometry. Use placement, rotation or the shared transform stack to animate it. brightness is 0..16; yaw/pitch/roll use 256 steps per turn.",
+    "egx.draw_model": "Draws a model loaded with load_obj(), with placement, rotation, lighting, outlines and optional depth testing. Shares camera, framebuffer and transforms with GX. Use gx.mesh and gx.draw_mesh for custom vertex/face geometry.",
+    "egx.Cube": "Creates a reusable cube with world position, rotation_x/y/z in radians, uniform scale and drawing settings. Call draw() to draw its current state; clear() and render() remain explicit. size is the edge length, 1..40. Geometry is shared; simple non-escaping objects use static fields.",
+    "egx.Plane": "Creates a reusable two-sided XZ plane. width, depth and brightness are fixed at construction; position, radian rotations, scale and drawing flags can change. draw() draws without clearing or presenting the frame. Geometry is shared."
   },
   "containers": {
     "list": {

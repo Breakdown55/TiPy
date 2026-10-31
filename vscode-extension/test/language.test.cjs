@@ -24,7 +24,7 @@ test('ordinary keywords and variable types appear in language suggestions', () =
 test('native API completion respects module aliases and actual exports', () => {
     const source = 'import egx as e\nimport random\ne.'
     const result = entries(source, 2, 'e', catalog)
-    assert(result.some(item => item.name === 'draw_mesh' && item.params.includes('model')))
+    assert(result.some(item => item.name === 'draw_model' && item.params.includes('model')))
     assert(result.some(item => item.name === 'push_matrix' && item.params === ''))
     assert(!entries(source, 2, 'random', catalog).some(item => item.name === 'choice'))
     assert(entries(source, 2, 'random', catalog).some(item => item.name === 'randint'))
@@ -92,9 +92,27 @@ test('GX completion exposes primitives and keeps conveniences in EGX', () => {
     const source = 'import gx\nimport egx'
     const low = entries(source, 2, 'gx', catalog)
     const easy = entries(source, 2, 'egx', catalog)
-    for (const name of ['begin', 'vertex', 'end', 'draw', 'shade', 'depth_test', 'cull', 'load_matrix', 'TRIANGLES', 'LINES', 'render']) assert(low.some(item => item.name === name), name)
-    for (const name of ['draw_rect', 'print', 'input', 'load_obj', 'draw_mesh', 'translate', 'present']) assert(!low.some(item => item.name === name), name)
+    for (const name of ['begin', 'vertex', 'end', 'draw', 'shade', 'depth_test', 'cull', 'load_matrix', 'mesh', 'draw_mesh', 'TRIANGLES', 'LINES', 'render']) assert(low.some(item => item.name === name), name)
+    for (const name of ['draw_rect', 'print', 'input', 'load_obj', 'cube', 'plane', 'translate', 'present']) assert(!low.some(item => item.name === name), name)
     assert(easy.some(item => item.name === 'draw_rect'))
+    assert(easy.some(item => item.name === 'cube'))
+    assert(easy.some(item => item.name === 'plane'))
+    assert(!easy.some(item => ['mesh','draw_mesh'].includes(item.name)))
     assert.equal(low.find(item => item.name === 'TRIANGLES').kind, 'constant')
     assert.match(low.find(item => item.name === 'vertex').description, /Submits an XY vertex/)
+})
+
+test('reusable EGX objects offer constructor hints, fields, methods and alias completion', () => {
+    const source='import egx as e\nfrom egx import Plane as Ground\ncube=e.Cube(size=12)\ncopy=cube\nfloor=Ground(36,28)\n'
+    for(const receiver of ['cube','copy']) {
+        const items=entries(source,5,receiver,catalog)
+        assert(items.some(item=>item.name==='rotation_y' && item.kind==='property' && /radians/.test(item.description)))
+        assert(items.some(item=>item.name==='scale' && item.kind==='property'))
+        assert(items.some(item=>item.name==='draw' && item.params===''))
+        assert(!items.some(item=>item.name==='width'))
+    }
+    assert(entries(source,5,'floor',catalog).some(item=>item.name==='width' && /Read-only/.test(item.description)))
+    assert(entries(source,5,'e',catalog).some(item=>item.name==='Cube' && item.kind==='class' && item.params.includes('size=12')))
+    assert(entries(source,5,'e',catalog).some(item=>item.name==='cube' && item.kind==='function'))
+    assert.equal(analyze(source).symbols.find(item=>item.name==='cube').type,'egx.Cube')
 })

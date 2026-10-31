@@ -692,7 +692,7 @@ __gfx_wf_udiv_next:
         )
         routine._store("flags")
         clipped = routine.label()
-        routine.emit("ld a,l", "or a", f"jp nz,{clipped}")
+        routine.emit("bit 7,l", f"jp nz,{skip}", "ld a,l", "or a", f"jp nz,{clipped}")
         for pointer in ("pa", "pb"):
             routine.expr(add(pointer, 6))
             for _ in range(2):

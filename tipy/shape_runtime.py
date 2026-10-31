@@ -1,5 +1,8 @@
 """Native clipped curves and scanline polygons. No host drawing calls.
 
+Circles use Bresenham stepping or viewport-clipped arcs selected by cost.
+The clipped path bounds work by the shorter visible screen dimension.
+
 Ellipse membership uses exact unsigned 64-bit products. Polygon intersections
 use unsigned 16x16 multiplication and 32/16 division, including i16 extremes.
 """
@@ -69,7 +72,40 @@ def _extent(ellipse):
         for i in reversed(range(4 if ellipse else 2)):
             r.expr('lhs'+str(i) if ellipse else 'square'+str(i));r.emit('push hl');r.expr('rhs'+str(i) if ellipse else 'remaining'+str(i));r.emit('ex de,hl','pop hl','or a','sbc hl,de',f'jp c,{smaller}',f'jp nz,{larger}')
         r.mark(smaller);r.set('lo','mid');r.emit(f'jp {equal}');r.mark(larger);r.set('hi',sub('mid',1));r.mark(equal)
-    r.while_(('ult','lo','hi'),search);r.ret('lo');return r.finish()
+    r.while_(('ult','lo','hi'),search)
+    r.ret('lo')
+    return r.finish()
+
+
+def _bresenham_circle():
+    """Standard eight-way midpoint/Bresenham circle, emitted as native Z80."""
+    r = ShapeRoutine("circle_bresenham", ("cx", "cy", "radius", "filled"), ("x", "y", "error"))
+    r.set("x", 0); r.set("y", "radius"); r.set("error", sub(3, add("radius", "radius")))
+    def four(value):
+        return add(add(value, value), add(value, value))
+    def point(x, y):
+        r.expr(x); r.emit("push hl"); r.expr(y)
+        r.emit("ex de,hl", "pop hl", "call __gfx_ink_pixel")
+    def filled():
+        for dx, dy in (("x", "y"), ("y", "x")):
+            for y in (add("cy", dy), sub("cy", dy)):
+                r.expr(invoke("h_line", sub("cx", dx), y, add("cx", dx), y))
+    def outlined():
+        for dx, dy in (("x", "y"), ("y", "x")):
+            for x in (add("cx", dx), sub("cx", dx)):
+                for y in (add("cy", dy), sub("cy", dy)):
+                    point(x, y)
+    def row():
+        r.if_(("ne", "filled", 0), filled, outlined)
+        def diagonal():
+            r.set("error", add("error", add(four(sub("x", "y")), 10)))
+            r.set("y", sub("y", 1))
+        r.if_(("slt", "error", 0), lambda: r.set("error", add("error", add(four("x"), 6))), diagonal)
+        r.set("x", add("x", 1))
+    r.while_(("slt", "x", add("y", 1)), row)
+    r.ret()
+    return r.finish()
+
 
 
 def _curve(ellipse):
@@ -189,7 +225,9 @@ def assembly(used):
     if used & {'sat_add','stroke'} and not used & {'circle','ellipse'}:out.append(_sat_add())
     if used & {'circle','ellipse'}:
         out.extend([_sat_add(),_multiply(False)])
-        if 'circle' in used:out.extend([_extent(False),_curve(False)])
+        if 'circle' in used:
+            from .circle_arc_runtime import circle, extent, sqrt32, vertical_line
+            out.extend([_bresenham_circle(), circle(), extent(), sqrt32(), vertical_line()])
         if 'ellipse' in used:out.extend([_multiply(True),_extent(True),_curve(True)])
     if 'polygon' in used:
         if not used & {'circle','ellipse'}:out.append(_multiply(False))

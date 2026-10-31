@@ -26,6 +26,8 @@ def prepare(tree):
         parent=classes.get(n["bases"][0]) if n["bases"] else None
         if n["bases"] and parent is None:raise CompileError("The base class must be declared first",n)
         meta={"name":n["name"],"fields":dict(parent["fields"]) if parent else {},"methods":dict(parent["methods"]) if parent else {},"base":n["bases"][0] if parent else None}
+        meta["egx_shape"] = n.get("egx_shape", False)
+        meta["readonly_fields"] = n.get("readonly_fields", [])
         classes[n["name"]]=meta
         for f in n["body"]:
             if f["kind"]=="pass":continue

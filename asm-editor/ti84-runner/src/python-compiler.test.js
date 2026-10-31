@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { Ti84Runner } from './hardware.js'
 
 function execute(source, measurements) {
@@ -16,6 +16,8 @@ function execute(source, measurements) {
     if(measurements?.noFrustum)args[1]='import tipy.project as _p; _original_frustum=_p.generate; _p.generate=lambda tree,symbols: _original_frustum({**tree,"mesh_frustum_disabled":True},symbols); '+args[1]
     if(measurements?.fullFont)args[1]='import tipy.text_runtime as _t; _full_text=_t.assembly; _t.assembly=lambda used,glyphs=None:_full_text(used,None); '+args[1]
     if(measurements?.opaqueReference)args[1]='from tipy import drawing_optimizer as _drawing; _drawing.annotate_blank_meshes=lambda tree: None; '+args[1]
+    if(measurements?.circleVariant)args[1]=`from experiments.circle_benchmark import install; install(${JSON.stringify(measurements.circleVariant)}); `+args[1]
+    if(measurements?.circleArc)args[1]='from experiments.circle_arc import install; install(); '+args[1]
     const processResult = spawnSync(python,args,{
         cwd: resolve('../..'), input: measurements?.assets?JSON.stringify({...measurements.assets,'main.tip':source}):source, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024
     })
@@ -74,14 +76,16 @@ function execute(source, measurements) {
         }
         runner.runSlice()
     }
-    assert.equal(runner.done,true,'Generated program must return')
-    assert.equal(runner.machine.z80.regs.sp,0,'RET should pop the sentinel after a balanced expression stack')
-    assert.equal(runner.machine.z80.regs.ix,0,'Functions must restore the caller frame pointer')
-    assert.equal(runner.machine.z80.regs.iy,0x89f0,'Functions must preserve the calculator flags pointer')
+    if(!measurements?.allowIncomplete||runner.done){
+        assert.equal(runner.done,true,'Generated program must return')
+        assert.equal(runner.machine.z80.regs.sp,0,'RET should pop the sentinel after a balanced expression stack')
+        assert.equal(runner.machine.z80.regs.ix,0,'Functions must restore the caller frame pointer')
+        assert.equal(runner.machine.z80.regs.iy,0x89f0,'Functions must preserve the calculator flags pointer')
+    }
     if(measurements?.guardGraph){assert.equal(runner.machine.memory[0x933f],0xa5);assert.equal(runner.machine.memory[0x9640],0x5a)}
     if(depthGuards)assert.deepEqual([runner.machine.memory[depth-1],runner.machine.memory[depth+6144]],depthGuards,'Depth writes must stay inside the buffer')
     if(measurements?.trackStack){assert.ok(minStack>=0x9d95+runner.machineBytes,'Native stack must stay above program code/data');measurements.stackBytes=65536-minStack}
-    if (measurements) Object.assign(measurements, { bytes: runner.machineBytes, tStates: runner.machine.tStateCount,
+    if (measurements) Object.assign(measurements, { completed:runner.done, bytes: runner.machineBytes, tStates: runner.machine.tStateCount,
         screen: runner.lcd.pixels.slice(), graph: runner.machine.memory.slice(0x9340,0x9640),
         report: result.optimization_report, assembly: result.assembly, frames,frameTimes,clockHz:runner.clockHz })
     const values = {},mem=runner.machine.memory,memo=new Map()
@@ -851,17 +855,45 @@ function expectedCurve(cx,cy,rx,ry,filled) {
         return value
     })
 }
-test('New native circles and ellipses exactly rasterize filled and outline shapes with clipping',()=>{
+function expectedBresenham(cx,cy,radius,filled,full=false) {
+    const result=new Uint8Array(768)
+    const on=(x,y)=>{if(x>=0&&x<96&&y>=0&&y<64)result[y*12+(x>>3)]|=128>>(x&7)}
+    if(radius<0)return result
+    // Independent midpoint formulation: d = 1-r, with the decision made after
+    // increasing x, rather than the production 3-2r update before increasing x.
+    let x=0,y=radius,d=1-radius
+    while(x<=y){
+        for(const [dx,dy] of [[x,y],[y,x]]){
+            if(filled){for(const row of [cy-dy,cy+dy])if(row>=0&&row<64)for(let col=Math.max(0,cx-dx);col<=Math.min(95,cx+dx);col++)on(col,row)}
+            else for(const col of [cx-dx,cx+dx])for(const row of [cy-dy,cy+dy])on(col,row)
+        }
+        x++
+        if(d<0)d+=2*x+1
+        else{y--;d+=2*(x-y)+1}
+    }
+    return result
+}
+test('Native Bresenham circles and exact ellipses clip filled and outlined shapes safely',()=>{
     for(const [cx,cy,rx,ry] of [[25,20,8,8],[0,0,9,5],[94,62,13,4],[30,30,0,8],[30,30,8,0],[10,10,0,0],[48,32,-1,2],[32767,20,32767,12],[-32768,0,32767,32767],[48,32,32767,32767]])for(const filled of [false,true]) {
         const m={maxSlices:20000}
         execute(`clear()\n__tipy_native_ellipse(${cx},${cy},${rx},${ry},${filled?'True':'False'})\nrender()`,m)
         assert.deepEqual(m.graph,expectedCurve(cx,cy,rx,ry,filled),`ellipse ${[cx,cy,rx,ry,filled]}`)
         if(rx===ry&&rx>=0) {
             const circle={maxSlices:20000};execute(`clear()\n__tipy_native_circle(${cx},${cy},${rx},${filled?'True':'False'})\nrender()`,circle)
-            assert.deepEqual(circle.graph,m.graph)
+            assert.deepEqual(circle.graph,expectedBresenham(cx,cy,rx,filled))
             assert.doesNotMatch(circle.assembly,/__heap_start:|__gfx_mul32:|__gfx_ellipse:/)
         }
     }
+})
+test('Bresenham circles cover small radii, viewport edges and white erasure',()=>{
+    for(const [cx,cy,radius] of [[48,32,1],[48,32,2],[48,32,10],[0,0,10],[95,63,20],[-8,32,12],[158,20,63],[-63,20,63],[48,32,63],[48,32,64],[32767,-32768,10]])for(const filled of [false,true]){
+        const m={guardGraph:true,maxSlices:20000}
+        execute(`clear()\n__tipy_native_circle(${cx},${cy},${radius},${filled?'True':'False'})\nrender()`,m)
+        assert.deepEqual(m.graph,expectedBresenham(cx,cy,radius,filled),`circle ${[cx,cy,radius,filled]}`)
+    }
+    const erased={guardGraph:true}
+    execute('background(BLACK)\n__tipy_native_ink(0)\n__tipy_native_circle(48,32,10,True)\nrender()',erased)
+    assert.deepEqual(erased.graph,Uint8Array.from(expectedBresenham(48,32,10,true),value=>255^value))
 })
 function expectedPolygon(points,filled,closed=true) {
     const pixels=new Uint8Array(6144)
@@ -3342,15 +3374,15 @@ egx.render()`,m)
 test('Shared model transforms affect meshes and pop restores camera-independent geometry',()=>{
     const header=`import egx
 import gx
-int model=egx.mesh([(-3,-3,0),(3,-3,0),(0,3,0)],faces=[(0,1,2,8)])
+int model=gx.mesh([(-3,-3,0),(3,-3,0),(0,3,0)],faces=[(0,1,2,8)])
 egx.init_camera(75,2,90)
 egx.camera(0,0,24,0,0,0)
 egx.clear()
 `
-    const draw='egx.draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)\negx.render()'
+    const draw='gx.draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)\negx.render()'
     const transformed={project:true,guardGraph:true,trackStack:true},explicit={project:true,guardGraph:true,trackStack:true}
     execute(header+'egx.push_matrix()\negx.translate(4,2,0)\negx.scale(1.5)\n'+draw+'\ngx.pop_matrix()\negx.clear()\n'+draw,transformed)
-    execute(header+'egx.draw_mesh(model,x=4,y=2,size=384,cull=False,shaded=False,depth_test=False,outline=True)\negx.render()\negx.clear()\n'+draw,explicit)
+    execute(header+'gx.draw_mesh(model,x=4,y=2,size=384,cull=False,shaded=False,depth_test=False,outline=True)\negx.render()\negx.clear()\n'+draw,explicit)
     assert.deepEqual(transformed.frames,explicit.frames)
     assert.ok(transformed.frames[0].some(Boolean))
     assert.ok(!transformed.assembly.includes('__heap_start:'))
@@ -3392,11 +3424,11 @@ test('GX XYZ lines use the same camera and model matrix as meshes',()=>{
 })
 
 test('Shared rotation and uniform scale apply in composition order on all mesh axes',()=>{
-    const header='import gx\nimport egx\nint m=egx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,8)])\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.clear()\n'
+    const header='import gx\nimport egx\nint m=gx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,8)])\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.clear()\n'
     for(const [axis,parameter] of [['x','pitch'],['y','yaw'],['z','roll']]){
         const a={project:true,guardGraph:true,trackStack:true},b={project:true,guardGraph:true,trackStack:true}
-        execute(header+`egx.rotate_${axis}(1.570796)\negx.draw_mesh(m,cull=False,shaded=False,depth_test=False)\negx.render()`,a)
-        execute(header+`egx.draw_mesh(m,${parameter}=64,cull=False,shaded=False,depth_test=False)\negx.render()`,b)
+        execute(header+`egx.rotate_${axis}(1.570796)\ngx.draw_mesh(m,cull=False,shaded=False,depth_test=False)\negx.render()`,a)
+        execute(header+`gx.draw_mesh(m,${parameter}=64,cull=False,shaded=False,depth_test=False)\negx.render()`,b)
         assert.deepEqual(a.screen,b.screen,axis)
     }
 })
@@ -3414,7 +3446,7 @@ test('Model stack does not restore camera state and transformed shadows match tr
     const camera={project:true,guardGraph:true,trackStack:true}
     const v=execute('import egx\nimport gx\negx.push_matrix()\negx.translate(2,3)\negx.camera(3,4,24,3,4,0)\ngx.pop_matrix()\nint x=egx.camera_x()\nint y=egx.camera_y()',camera)
     assert.deepEqual([v.x,v.y],[3,4])
-    const header='import gx\nimport egx\nint m=egx.mesh([(-3,0,-2),(3,0,-2),(0,5,2)],faces=[(0,1,2,8)])\negx.init_camera(75,2,90)\negx.camera(0,14,24,0,0,0)\negx.clear()\n'
+    const header='import gx\nimport egx\nint m=gx.mesh([(-3,0,-2),(3,0,-2),(0,5,2)],faces=[(0,1,2,8)])\negx.init_camera(75,2,90)\negx.camera(0,14,24,0,0,0)\negx.clear()\n'
     const a={project:true,guardGraph:true,trackStack:true},b={project:true,guardGraph:true,trackStack:true}
     execute(header+'egx.push_matrix()\negx.translate(4,0,0)\negx.draw_shadow(m,10,24,8,floor_y=0)\ngx.pop_matrix()\negx.render()',a)
     execute(header+'egx.draw_shadow(m,10,24,8,floor_y=0,x=4)\negx.render()',b)
@@ -3435,16 +3467,16 @@ test('Mixed GX example fits native RAM and renders entirely on the calculator CP
 })
 
 test('Shared transforms rotate lighting normals and point-light sample positions consistently',()=>{
-    const header='import egx\nimport gx\nint m=egx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,16)])\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.no_lights()\negx.ambient_light(4)\negx.point_light(10,20,20,radius=80,intensity=12)\negx.clear()\n'
+    const header='import egx\nimport gx\nint m=gx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,16)])\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.no_lights()\negx.ambient_light(4)\negx.point_light(10,20,20,radius=80,intensity=12)\negx.clear()\n'
     const a={project:true,guardGraph:true,trackStack:true},b={project:true,guardGraph:true,trackStack:true}
-    execute(header+'egx.push_matrix()\negx.rotate_y(1.570796)\negx.draw_mesh(m,cull=False,depth_test=False)\ngx.pop_matrix()\negx.render()',a)
-    execute(header+'egx.draw_mesh(m,yaw=64,cull=False,depth_test=False)\negx.render()',b)
+    execute(header+'egx.push_matrix()\negx.rotate_y(1.570796)\ngx.draw_mesh(m,cull=False,depth_test=False)\ngx.pop_matrix()\negx.render()',a)
+    execute(header+'gx.draw_mesh(m,yaw=64,cull=False,depth_test=False)\negx.render()',b)
     assert.deepEqual(a.screen,b.screen)
     assert.ok(a.screen.some(Boolean))
 })
 
 test('Combined model and instance scales reject unsafe Q8 coefficients',()=>{
-    const source='import egx\nint m=egx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,8)])\negx.scale(2)\negx.draw_mesh(m,size=512,cull=False,shaded=False,depth_test=False)'
+    const source='import gx\nimport egx\nint m=gx.mesh([(-3,-2,-1),(4,-2,1),(0,4,2)],faces=[(0,1,2,8)])\negx.scale(2)\ngx.draw_mesh(m,size=512,cull=False,shaded=False,depth_test=False)'
     assert.throws(()=>execute(source,{project:true,guardGraph:true,trackStack:true}),/Runtime error/)
 })
 
@@ -3503,10 +3535,10 @@ egx.render()`,m)
 test('GX view matrices render the same mesh as the convenience camera',()=>{
     const header=`import egx
 import gx
-int model=egx.mesh([(-6,-6,0),(6,-6,0),(6,6,0),(-6,6,0)],faces=[(0,1,2,7),(0,2,3,7)])
+int model=gx.mesh([(-6,-6,0),(6,-6,0),(6,6,0),(-6,6,0)],faces=[(0,1,2,7),(0,2,3,7)])
 gx.set_projection(75,2,90)
 `
-    const draw='egx.clear()\negx.draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)\ngx.render()'
+    const draw='egx.clear()\ngx.draw_mesh(model,cull=False,shaded=False,depth_test=False,outline=True)\ngx.render()'
     const explicit={project:true,guardGraph:true,trackStack:true},convenient={project:true,guardGraph:true,trackStack:true}
     execute(header+'gx.load_view_matrix(0,0,24,256,0,0,0,256,0,0,0,-256)\n'+draw,explicit)
     execute(header+'egx.camera(0,0,24,0,0,0)\n'+draw,convenient)
@@ -3631,7 +3663,7 @@ test('GX primitives project and clip XYZ triangles through the shared camera',()
     const a={project:true,guardGraph:true,trackStack:true},b={project:true,guardGraph:true}
     const setup='import gx\nimport egx\negx.init_camera(75,2,90)\negx.camera(0,0,24,0,0,0)\negx.clear()\n'
     execute(setup+'gx.draw(gx.TRIANGLES,[(-6,-6,0),(6,-6,0),(0,6,0)],dimensions=3)\ngx.render()',a)
-    execute(setup+'int m=egx.mesh([(-6,-6,0),(6,-6,0),(0,6,0)],faces=[(0,1,2,0)])\negx.draw_mesh(m,cull=False,shaded=False,depth_test=False)\negx.render()',b)
+    execute(setup+'int m=gx.mesh([(-6,-6,0),(6,-6,0),(0,6,0)],faces=[(0,1,2,0)])\ngx.draw_mesh(m,cull=False,shaded=False,depth_test=False)\negx.render()',b)
     assert.deepEqual(a.screen,b.screen)
     assert.ok(a.screen.some(Boolean))
 })
@@ -3683,9 +3715,9 @@ test('GX boundary clipping and mixed EGX meshes preserve white erase operations'
 import egx
 egx.init_camera(75,2,90)
 egx.camera(0,0,24,0,0,0)
-int model=egx.mesh([(-6,-6,0),(6,-6,0),(0,6,0)],faces=[(0,1,2,0)])
+int model=gx.mesh([(-6,-6,0),(6,-6,0),(0,6,0)],faces=[(0,1,2,0)])
 gx.clear()
-egx.draw_mesh(model,cull=False,shaded=False,depth_test=False)
+gx.draw_mesh(model,cull=False,shaded=False,depth_test=False)
 gx.shade(255)
 gx.draw(gx.LINES,[(40,32),(56,32)])
 gx.draw(gx.TRIANGLES,[(46,28),(50,28),(48,32)])
@@ -3693,4 +3725,370 @@ gx.render()`,mixed)
     assert.equal(mixed.screen[32*96+48],0)
     assert.equal(mixed.screen[29*96+48],0)
     assert.ok(mixed.screen.some(Boolean))
+})
+
+test('EGX built-in cube and plane match raw GX geometry without a heap',()=>{
+    const setup='import gx\nimport egx\negx.init_camera(75,2,90)\negx.camera(0,14,38,0,0,0)\negx.no_lights()\negx.ambient_light(5)\negx.directional_light(-1,2,3,intensity=10)\negx.clear()\n'
+    const faces='[(4,5,6),(4,6,7),(1,0,3),(1,3,2),(0,4,7),(0,7,3),(5,1,2),(5,2,6),(3,7,6),(3,6,2),(0,1,5),(0,5,4)]'
+    for(const side of [12,13]){
+        const low=-Math.floor(side/2),high=side+low
+        const vertices=[[low,low,low],[high,low,low],[high,high,low],[low,high,low],[low,low,high],[high,low,high],[high,high,high],[low,high,high]]
+        const a={project:true,optimization:'aggressive',guardGraph:true,trackStack:true},b={...a}
+        execute(setup+`egx.cube(${side},x=2,yaw=32,pitch=12)\negx.render()`,a)
+        execute(setup+`int model=gx.mesh(${JSON.stringify(vertices)},faces=${faces})\ngx.draw_mesh(model,x=2,yaw=32,pitch=12,depth_test=False,outline=True)\negx.render()`,b)
+        assert.deepEqual(a.graph,b.graph);assert.ok(a.screen.some(Boolean));assert.ok(!a.assembly.includes('__heap_start:'))
+    }
+    const plane={project:true,optimization:'aggressive',guardGraph:true,trackStack:true},raw={...plane}
+    execute(setup+'egx.plane(36,28,y=-10,brightness=14,shaded=False)\negx.render()',plane)
+    execute(setup+'int model=gx.mesh([(-18,0,-14),(-18,0,14),(18,0,14),(18,0,-14)],faces=[(0,1,2,14),(0,2,3,14)])\ngx.draw_mesh(model,y=-10,cull=False,shaded=False,depth_test=False,outline=True)\negx.render()',raw)
+    assert.deepEqual(plane.graph,raw.graph);assert.ok(plane.screen.some(Boolean))
+    const dynamic={project:true,optimization:'aggressive',guardGraph:true,trackStack:true},unit={...dynamic}
+    execute(setup+'int side=12\negx.cube(side)\negx.render()',dynamic)
+    execute(setup+`int model=gx.mesh([(-8,-8,-8),(8,-8,-8),(8,8,-8),(-8,8,-8),(-8,-8,8),(8,-8,8),(8,8,8),(-8,8,8)],faces=${faces})\ngx.draw_mesh(model,size=192,depth_test=False,outline=True)\negx.render()`,unit)
+    assert.deepEqual(dynamic.graph,unit.graph)
+})
+
+test('EGX shapes preserve argument order and compose with shared transforms',()=>{
+    const a={project:true,optimization:'aggressive',guardGraph:true,trackStack:true},b={...a}
+    const setup='import egx\negx.init_camera(75,2,90)\negx.camera(0,0,32,0,0,0)\negx.clear()\n'
+    execute(setup+'egx.push_matrix()\negx.translate(3,2,0)\negx.cube(12)\negx.pop_matrix()\negx.render()',a)
+    execute(setup+'egx.cube(12,x=3,y=2)\negx.render()',b)
+    assert.deepEqual(a.graph,b.graph)
+    const values=execute(setup+'int events=[]\ndef mark(int value) -> int:\n    events.append(value)\n    return value\negx.cube(x=mark(1),size=mark(12),y=mark(2))\negx.render()',{project:true,optimization:'aggressive',guardGraph:true,maxSlices:12000})
+    assert.deepEqual(values.events,[1,12,2])
+})
+
+test('EGX reusable shape records preserve radians, independent state and aliases without per-frame allocation',()=>{
+    const setup='import egx\negx.init_camera(75,2,90)\negx.camera(0,14,38,0,0,0)\negx.no_lights()\negx.ambient_light(5)\negx.directional_light(-1,2,3,intensity=10)\n'
+    const objects={project:true,optimization:'reference',guardGraph:true,trackStack:true},immediate={...objects}
+    const values=execute(setup+`cube=egx.Cube(size=12)\nother=egx.Cube(size=8,x=-10)\nfloor=egx.Plane(width=36,depth=28,y=-10,brightness=14,shaded=False)\ncube.rotation_y=1.5703125\ncube.rotation_x=0.0\nother.visible=False\ncopy=cube\ncopy.x=2\nint observed=cube.x\nfor frame in range(6):\n    egx.clear()\n    floor.draw()\n    cube.draw()\n    other.draw()\n    egx.render()`,objects)
+    execute(setup+'for frame in range(6):\n    egx.clear()\n    egx.plane(36,28,y=-10,brightness=14,shaded=False)\n    egx.cube(12,x=2,yaw=64)\n    egx.render()',immediate)
+    assert.deepEqual(objects.frames,immediate.frames)
+    assert.equal(values.observed,2)
+    assert.equal(values.other.x,-10)
+    assert.equal(values.other.rotation_y,0)
+    assert.ok(!objects.assembly.includes('__heap_start:'))
+    assert.equal(objects.frames.length,6)
+})
+
+test('EGX object mutations and functional drawing remain composable',()=>{
+    const setup='import gx\nimport egx\negx.init_camera(75,2,90)\negx.camera(0,0,32,0,0,0)\negx.clear()\n'
+    const objects={project:true,optimization:'aggressive',guardGraph:true,trackStack:true},raw={...objects}
+    const values=execute(setup+'cube=egx.Cube(12)\ncube.rotation_y+=0.03\ncube.rotation_y-=0.03\ncube.scale=2\ncube.scale*=0.75\ncube.x=3\ncube.draw()\negx.plane(20,16,y=-12,shaded=False)\ngx.shade(0)\ngx.draw(gx.LINES,[(0,0),(10,0)])\negx.render()',objects)
+    execute(setup+'int model=gx.mesh([(-6,-6,-6),(6,-6,-6),(6,6,-6),(-6,6,-6),(-6,-6,6),(6,-6,6),(6,6,6),(-6,6,6)],faces=[(4,5,6),(4,6,7),(1,0,3),(1,3,2),(0,4,7),(0,7,3),(5,1,2),(5,2,6),(3,7,6),(3,6,2),(0,1,5),(0,5,4)])\ngx.draw_mesh(model,x=3,size=384,depth_test=False,outline=True)\negx.plane(20,16,y=-12,shaded=False)\ngx.shade(0)\ngx.draw(gx.LINES,[(0,0),(10,0)])\negx.render()',raw)
+    assert.deepEqual(objects.graph,raw.graph)
+    assert.equal(values.cube.scale,384)
+    assert.ok(!objects.assembly.includes('__heap_start:'))
+})
+
+test('Escaping EGX objects preserve reference identity and fixed fields with the ordinary record ABI',()=>{
+    const v=execute('import egx\ncube=egx.Cube()\nother=cube\nbool same=cube is other\nother.x=9\nother.rotation_y+=0.5\nother.scale=2\nother.scale*=0.75\nint x=cube.x\nint observed_scale=int(cube.scale)\nbool rotation_ok=cube.rotation_y==0.5\nbool scale_ok=cube.scale==1.5',{project:true,optimization:'reference',trackStack:true})
+    assert.equal(v.same,1);assert.equal(v.x,9);assert.equal(v.observed_scale,1)
+    assert.equal(v.rotation_ok,1);assert.equal(v.scale_ok,1)
+})
+
+test('EGX object constructors evaluate dynamic keyword arguments in source order',()=>{
+    const v=execute('import egx\nint events=[]\ndef mark(int value) -> int:\n    events.append(value)\n    return value\ncube=egx.Cube(y=mark(3),size=mark(12),x=mark(2))\nint x=cube.x\nint y=cube.y\nint size=cube.size',{project:true,optimization:'reference',trackStack:true})
+    assert.deepEqual(v.events,[3,12,2]);assert.equal(v.x,2);assert.equal(v.y,3);assert.equal(v.size,12)
+})
+
+test('Filled cube outlines hide back edges and coplanar seams while wireframe stays complete',()=>{
+    const setup='import egx\negx.init_camera(75,2,90)\negx.camera(0,0,40,0,0,0)\negx.clear()\n'
+    for(const optimization of ['reference','aggressive']) {
+        const m={project:true,optimization,guardGraph:true,trackStack:true}
+        execute(setup+'egx.cube(12,shaded=False)\negx.render()\negx.clear()\negx.cube(12,filled=False)\negx.render()',m)
+        const filled=m.frames[0],wire=m.frames[1]
+        const points=Array.from(filled).flatMap((value,index)=>value?[[index%96,Math.floor(index/96)]]:[])
+        assert.ok(points.length>20)
+        const left=Math.min(...points.map(p=>p[0])),right=Math.max(...points.map(p=>p[0]))
+        const top=Math.min(...points.map(p=>p[1])),bottom=Math.max(...points.map(p=>p[1]))
+        let wireInterior=0
+        for(let y=top+1;y<bottom;y++)for(let x=left+1;x<right;x++) {
+            assert.equal(filled[y*96+x],0,'a white front face must not contain back edges or triangle seams')
+            wireInterior+=wire[y*96+x]
+        }
+        assert.ok(wireInterior>0,'wireframe deliberately keeps the rear cube edges')
+    }
+})
+
+test('Filled cube visible face borders agree with an explicit front-and-side model',()=>{
+    const setup='import gx\nimport egx\negx.init_camera(75,2,90)\negx.camera(0,0,40,0,0,0)\negx.clear()\n'
+    const actual={project:true,optimization:'aggressive',guardGraph:true,trackStack:true},expected={...actual}
+    execute(setup+'egx.cube(12,yaw=32,shaded=False)\negx.render()',actual)
+    execute(setup+'int model=gx.mesh([(-6,-6,-6),(6,-6,-6),(6,6,-6),(-6,6,-6),(-6,-6,6),(6,-6,6),(6,6,6),(-6,6,6)],faces=[(4,5,6),(4,6,7),(0,4,7),(0,7,3)])\ngx.draw_mesh(model,yaw=32,shaded=False,depth_test=False,outline=True)\negx.render()',expected)
+    assert.deepEqual(actual.graph,expected.graph)
+    const noOutline={project:true,optimization:'aggressive'}
+    execute(setup+'egx.cube(12,shaded=False,outline=False)\negx.render()',noOutline)
+    assert.ok(!noOutline.assembly.includes('__gfx_solid_outline_vertices:'))
+})
+
+test('EGX radian rotation crosses multiple complete turns without arithmetic jumps',()=>{
+    const v=execute('import egx\ncube=egx.Cube()\nint forward=[]\nint backward=[]\nfor step in range(512):\n    forward.append(__egx_angle(cube.rotation_y))\n    cube.rotation_y+=0.03\ncube.rotation_y=0\nfor step in range(512):\n    backward.append(__egx_angle(cube.rotation_y))\n    cube.rotation_y-=0.03',{project:true,optimization:'reference',trackStack:true,maxSlices:12000})
+    for(let i=0;i<512;i++) {
+        const expected=Math.floor((i*8*10430+32768)/65536)&255
+        assert.equal(v.forward[i],expected,`forward step ${i}`)
+        assert.equal(v.backward[i],(-expected)&255,`backward step ${i}`)
+        if(i)assert.ok(((v.forward[i]-v.forward[i-1])&255)<=2,'no jump at a fixed-point integer boundary')
+    }
+})
+
+test('Public fixed multiplication supports full signed scalar inputs beyond matrix coefficients',()=>{
+    const cases=[[513,10430],[640,10430],[1024,10430],[512,640],[768,640],[-768,640],[-32768,10430],[32767,-32768],[0,32767],[256,256]]
+    const source='import gx\nint values=[]\n'+cases.map(([a,b])=>`values.append(gx.mul_fixed(${a},${b}))`).join('\n')
+    const v=execute(source,{project:true,optimization:'reference',trackStack:true})
+    const expected=cases.map(([a,b])=>{const mag=Math.floor((Math.abs(a*b)+128)/256);const raw=(a*b<0?-mag:mag)&65535;return raw&32768?raw-65536:raw})
+    assert.deepEqual(v.values,expected)
+})
+
+test('Moving circle frame benchmark preserves styled pixels and held input',()=>{
+    const source=`import egx
+int x = 10
+int y = 10
+for frame in range(8):
+    egx.clear()
+    egx.circle(x,y,20)
+    if key_down("right"):
+        x += 5
+    if key_down("left"):
+        x -= 5
+    if key_down("up"):
+        y -= 5
+    if key_down("down"):
+        y += 5
+    egx.render()`
+    const measurements={project:true,optimization:'aggressive',guardGraph:true,heldKeys:[3]}
+    const values=execute(source,measurements)
+    const times=measurements.frameTimes.slice(1).map((value,index)=>value-measurements.frameTimes[index])
+    const mean=times.reduce((a,b)=>a+b,0)/times.length
+    console.log('Moving circle mean T-states/frame:',mean,'6 MHz FPS:',6000000/mean,'15 MHz FPS:',15000000/mean,'bytes:',measurements.bytes)
+    assert.equal(values.x,50)
+    assert.equal(values.y,10)
+    assert.equal(measurements.frames.length,8)
+    assert.ok(measurements.frames[7].some(Boolean))
+    assert.ok(mean < 230000, 'Moving a Bresenham circle should stay below 230k T-states per frame at 6 MHz')
+})
+
+test('Stack-formatted print matches literal pixels for scalar values, clipping and control characters',()=>{
+    for(const [value,expected] of [
+        ['f"x: {x}, y: {y}"','x: -32768, y: 32767'],
+        ['f"{flag} {not flag} {x+1}"','True False -32767'],
+        ['f"A{x}\\nB{y}\\t{flag}"','A-32768\nB32767\tTrue'],
+        ['f"{byte_value} {zero}"','255 0'],
+    ]){
+        const m={optimization:'reference',guardGraph:true,trackStack:true},reference={guardGraph:true}
+        execute(`int x=-32768\nint y=32767\nbool flag=True\nu8 byte_value=255\nint zero=0\nclear()\nprint(${value},-2,5)\nrender()`,m)
+        execute(`clear()\nprint(${JSON.stringify(expected)},-2,5)\nrender()`,reference)
+        assert.deepEqual(m.graph,reference.graph)
+        assert.ok(!m.assembly.includes('__heap_start:'),'simple immediate formatting should not need a heap')
+    }
+})
+
+test('Formatted print keeps general formatting and effectful coordinates on the managed path',()=>{
+    for(const source of [
+        'int x=-12\nprint(f"{x:06d}",0,0)',
+        'def coordinate() -> int:\n    print("N",60,20)\n    return 0\nint x=12\nprint(f"{x}",coordinate(),0)',
+        'def value() -> int:\n    print("N",60,20)\n    return 12\nprint(f"{value()}",0,0)',
+        'int x=12\nprint(f"'+ 'A'.repeat(130) +'{x}",0,0)',
+    ]){
+        const m={optimization:'reference',guardGraph:true}
+        execute(source+'\nrender()',m)
+        assert.ok(m.assembly.includes('__heap_start:'))
+        assert.ok(m.screen.some(Boolean))
+    }
+})
+
+test('Native string search bounds and byte case loops agree with CPython',()=>{
+    const fixtures=[
+        ['', '',0,32767],['','a',0,1],['abc','',4,5],['abc','',2,1],
+        ['ababa','aba',0,5],['ababa','aba',1,5],['ababa','ba',-4,-1],
+        ['abc','a',-32768,32767],['abc','c',0,-1],['abc','',-1,32767],
+        ['aaaaaaaZ','aaZ',0,8],['aaaaaaaZ','Z',0,8],['a\0b\0c','\0',0,5],
+        ['abc','abcd',0,3],['abc','a',32767,32767],['abc','',-5,-4],
+        ['abc','c',0,32767],['abc','c',-2,3],['ababa','aba',0,0],
+    ]
+    const python=process.env.TIPY_PYTHON||'python'
+    const ref=spawnSync(python,['-c','import json,sys; cases=json.load(sys.stdin); print(json.dumps([[getattr(s,m)(n,a,b) for m in ("find","rfind","count","startswith","endswith")] for s,n,a,b in cases]))'],{input:JSON.stringify(fixtures),encoding:'utf8'})
+    assert.equal(ref.status,0,ref.stderr)
+    const objects=fixtures.map(row=>row[0]),needles=fixtures.map(row=>row[1]),starts=fixtures.map(row=>row[2]),stops=fixtures.map(row=>row[3])
+    const source=`str texts=${JSON.stringify(objects)}\nstr needles=${JSON.stringify(needles)}\nint starts=${JSON.stringify(starts)}\nint stops=${JSON.stringify(stops)}\nint results=[]\nfor i in range(len(texts)):\n    str text=texts[i]\n    str needle=needles[i]\n    int start=starts[i]\n    int stop=stops[i]\n    results.append(text.find(needle,start,stop))\n    results.append(text.rfind(needle,start,stop))\n    results.append(text.count(needle,start,stop))\n    results.append(int(text.startswith(needle,start,stop)))\n    results.append(int(text.endswith(needle,start,stop)))`
+    const v=execute(source,{optimization:'reference',trackStack:true,maxSlices:12000})
+    assert.deepEqual(v.results,JSON.parse(ref.stdout).flat().map(Number))
+    const chars=String.fromCharCode(...Array.from({length:128},(_,i)=>i))
+    const cases=execute(`str text=${JSON.stringify(chars)}\nstr alias=text\nstr upper=text.upper()\nstr lower=text.lower()\nstr capital=text.capitalize()\nstr title=text.title()\nstr swap=text.swapcase()`,{optimization:'reference',trackStack:true})
+    assert.equal(cases.text,chars);assert.equal(cases.alias,chars)
+    assert.equal(cases.upper,chars.replace(/[a-z]/g,c=>c.toUpperCase()))
+    assert.equal(cases.lower,chars.replace(/[A-Z]/g,c=>c.toLowerCase()))
+    assert.equal(cases.capital,chars[0].toUpperCase()+chars.slice(1).toLowerCase())
+    assert.equal(cases.title,chars.toLowerCase().replace(/[a-z]+/g,word=>word[0].toUpperCase()+word.slice(1)))
+    assert.equal(cases.swap,chars.replace(/[A-Za-z]/g,c=>/[A-Z]/.test(c)?c.toLowerCase():c.toUpperCase()))
+})
+
+test('Fast string builders preserve empty values, aliases, repetition bounds and effect order',()=>{
+    const v=execute(`str a="Alpha"\nstr b="Beta"\nstr alias=a\nstr result=a+"/"+b+"!"\nstr again=result\nstr parts=["",a,"",b,""]\nstr joined="-".join(parts)\nstr empty_parts=[]\nstr empty="/".join(empty_parts)\nstr empty_upper=empty.upper()\nstr empty_lower=empty.lower()\nstr negative=a*-32768\nstr zero=a*0\nstr reversed_repeat=3*"ab"\nstr empty_repeat=""*32767\nint x=-32768\nbool flag=True\nstr label=f"{x}:{flag}"\nstr label_alias=label\nx=32767\nlabel=f"{x}:{not flag}"\nstr concat_label="x="+str(x)+"/"+str(flag)\nstr first=result[:3]\nstr reverse=result[::-1]\nstr missing=result[20:1]\n`,{optimization:'reference',trackStack:true})
+    assert.equal(v.result,'Alpha/Beta!');assert.equal(v.again,v.result);assert.equal(v.alias,'Alpha')
+    assert.equal(v.joined,'-Alpha--Beta-');assert.equal(v.empty,'');assert.equal(v.empty_upper,'');assert.equal(v.empty_lower,'')
+    assert.equal(v.negative,'');assert.equal(v.zero,'');assert.equal(v.empty_repeat,'');assert.equal(v.reversed_repeat,'ababab')
+    assert.equal(v.label_alias,'-32768:True');assert.equal(v.label,'32767:False');assert.equal(v.concat_label,'x=32767/True')
+    assert.equal(v.first,'Alp');assert.equal(v.reverse,'!ateB/ahplA');assert.equal(v.missing,'')
+    const effects=execute(`def make_label(int x) -> str:\n    return "x="+str(x)\ndef run() -> str:\n    text="A"\n    def change() -> str:\n        nonlocal text\n        text="B"\n        return "!"\n    return text+change()+text\nstr label=make_label(-123)\nstr ordered=run()`,{optimization:'reference',trackStack:true})
+    assert.equal(effects.label,'x=-123');assert.equal(effects.ordered,'A!B')
+    const boundary=execute('str value="x"*4096\nint length=len(value)',{optimization:'reference',trackStack:true})
+    assert.equal(boundary.length,4096);assert.equal(boundary.value.length,4096)
+    const errors=execute(`int oversized=0\ntry:\n    str value="x"*4097\nexcept MemoryError:\n    oversized=1\n`,{optimization:'reference'})
+    assert.equal(errors.oversized,1)
+})
+
+test('String operation benchmark measures repeated native workloads',{skip:process.env.TIPY_STRING_BENCHMARK!=='1'},()=>{
+    const cases=[
+        ['fstring','int x=123\nint y=-45','result=f"x: {x}, y: {y}"','x: 123, y: -45'],
+        ['join','str parts=["alpha","beta","gamma","delta"]\nstr separator=", "','result=separator.join(parts)','alpha, beta, gamma, delta'],
+        ['upper','str text="Abc def 0123456789!"','result=text.upper()','ABC DEF 0123456789!'],
+        ['lower','str text="AbC DEF 0123456789!"','result=text.lower()','abc def 0123456789!'],
+        ['find','str text="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaZ"\nstr needle="aaZ"','int result=text.find(needle)',30],
+        ['startswith','str text="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaZ"\nstr needle="Z"','bool result=text.startswith(needle)',0],
+        ['endswith','str text="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaZ"\nstr needle="Z"','bool result=text.endswith(needle)',1],
+        ['repeat','str text="ab"','result=text*30','ab'.repeat(30)],
+        ['slice','str text="abcdefghijklmnopqrstuvwxyz0123456789"','result=text[2:30]','cdefghijklmnopqrstuvwxyz0123'],
+        ['concat','str text="Hello"\nstr other="World"','result=text+" "+other+"!"','Hello World!'],
+    ]
+    const rows=[]
+    for(const [name,setup,body,expected] of cases){
+        const m={optimization:'reference',maxSlices:12000,trackStack:true}
+        const source=`${setup}\n${typeof expected==='string'?'str result=""\n':''}for iteration in range(20):\n    ${body}\n`
+        const values=execute(source,m)
+        assert.equal(values.result,expected,name)
+        rows.push({name,tStates:m.tStates,bytes:m.bytes,result:values.result,assembly:m.assembly})
+    }
+    console.table(rows.map(({assembly,result,...row})=>row))
+    writeFileSync(`dist/string-benchmark-${process.env.TIPY_STRING_BENCHMARK_LABEL||'current'}.json`,JSON.stringify(rows,null,2))
+})
+
+test('Moving circle text benchmark isolates formatting and drawing',{skip:process.env.TIPY_TEXT_BENCHMARK!=='1'},()=>{
+    const rows=[]
+    for(const [name,text] of [['none','pass'],['literal','print("x: 15, y: 10",5,5)'],['formatted','print(f"x: {x}, y: {y}",5,5)'],['format-only','str label=f"x: {x}, y: {y}"']]){
+        const source=`import time as t\nimport egx\nint x=10\nint y=10\nfor frame in range(12):\n    egx.clear()\n    egx.circle(x,y,20)\n    if key_down("right"):\n        x+=5\n    if key_down("left"):\n        x-=5\n    if key_down("up"):\n        y-=5\n    if key_down("down"):\n        y+=5\n    ${text}\n    egx.render()`
+        const m={project:true,optimization:'aggressive',guardGraph:true,heldKeys:[3]}
+        const values=execute(source,m)
+        assert.equal(values.x,70)
+        const times=m.frameTimes.slice(1).map((time,i)=>time-m.frameTimes[i])
+        const mean=times.reduce((a,b)=>a+b,0)/times.length
+        rows.push({name,tStates:mean,fps6:6000000/mean,fps15:15000000/mean,bytes:m.bytes})
+    }
+    console.table(rows)
+    writeFileSync('dist/circle-text-benchmark.json',JSON.stringify(rows,null,2))
+})
+
+test('Circle algorithm comparison measures native speed and pixel differences',{skip:process.env.TIPY_CIRCLE_BENCHMARK!=='1'},()=>{
+    const originalSource=`import egx
+int x = 10
+int y = 10
+egx.render()
+for frame in range(8):
+    egx.clear()
+    egx.circle(x,y,20)
+    if key_down("right"):
+        x += 5
+    if key_down("left"):
+        x -= 5
+    if key_down("up"):
+        y -= 5
+    if key_down("down"):
+        y += 5
+    egx.render()`
+    const report=[]
+    for(const variant of ['original','bresenham','current']){
+        const m={project:true,optimization:'aggressive',guardGraph:true,heldKeys:[3],...(variant==='current'?{}:{circleVariant:variant})}
+        const result=execute(originalSource,m)
+        const times=m.frameTimes.slice(1).map((time,i)=>time-m.frameTimes[i])
+        const warm=times.slice(1).reduce((a,b)=>a+b,0)/(times.length-1)
+        assert.equal(result.x,50)
+        const errors=Array.from(m.screen).flatMap((value,index)=>value?[Math.abs(Math.hypot(index%96-45,Math.floor(index/96)-10)-10)]:[])
+        report.push({variant,coldTStates:times[0],warmTStates:warm,fps6:6000000/warm,fps15:15000000/warm,bytes:m.bytes,radialMeanError:errors.reduce((a,b)=>a+b,0)/errors.length,radialMaxError:Math.max(...errors),pixels:Array.from(m.screen),accuracy:[]})
+    }
+    for(const radius of [5,10,20]){
+        const masks=[]
+        for(const variant of ['original','bresenham','current']){
+            const m={project:true,optimization:'aggressive',guardGraph:true,...(variant==='current'?{}:{circleVariant:variant})}
+            execute(`import egx\negx.clear()\negx.circle(48,32,${radius*2})\negx.render()`,m)
+            masks.push(Array.from(m.screen))
+        }
+        for(let i=0;i<masks.length;i++){
+            let difference=0,intersection=0,union=0
+            for(let p=0;p<6144;p++){
+                difference+=Number(masks[0][p]!==masks[i][p]);intersection+=Number(masks[0][p]&&masks[i][p]);union+=Number(masks[0][p]||masks[i][p])
+            }
+            report[i].accuracy.push({radius,differingPixels:difference,iou:union?intersection/union:1,blackPixels:masks[i].reduce((a,b)=>a+b,0)})
+            if(i===2)assert.deepEqual(masks[i],masks[1],'Current radius-10 renderer must match Bresenham')
+        }
+    }
+    writeFileSync('dist/circle-benchmark.json',JSON.stringify(report,null,2))
+    console.table(report.map(({pixels,accuracy,...m})=>({...m,differingPixelsR10:accuracy.find(a=>a.radius===10).differingPixels,iouR10:accuracy.find(a=>a.radius===10).iou})))
+})
+
+test('Viewport circle arc candidate matches independent Bresenham pixels',{skip:process.env.TIPY_CIRCLE_SWEEP!=='1'},()=>{
+    for(const [cx,cy,radius] of [[48,32,0],[48,32,10],[0,0,63],[48,32,64],[48,-248,256],[-4088,32,4096],[48,-32759,32767],[32767,32,32767]])for(const filled of [false,true]){
+        const m={project:true,circleArc:true,guardGraph:true,maxSlices:20000}
+        execute(`clear()\n__tipy_native_circle(${cx},${cy},${radius},${filled?'True':'False'})\nrender()`,m)
+        assert.deepEqual(m.graph,expectedBresenham(cx,cy,radius,filled,true),`arc ${[cx,cy,radius,filled]}`)
+    }
+    for(const [cx,cy,radius] of [[48,32,64],[48,-248,256]])for(const filled of [false,true]){
+        const m={project:true,circleVariant:'full_bresenham',guardGraph:true,maxSlices:20000}
+        execute(`clear()\n__tipy_native_circle(${cx},${cy},${radius},${filled?'True':'False'})\nrender()`,m)
+        assert.deepEqual(m.graph,expectedBresenham(cx,cy,radius,filled,true))
+    }
+})
+
+test('Circle size sweep benchmarks centered and clipped primitives',{skip:process.env.TIPY_CIRCLE_SWEEP!=='1'},()=>{
+    const report=process.env.TIPY_CIRCLE_SWEEP_VARIANT?JSON.parse(readFileSync('dist/circle-sweep.json','utf8')):{dense:[],stress:[],timing:'T-states include clear, one native filled/outline draw, and render; stress full walks are capped at 40M T-states.'}
+    const variants=process.env.TIPY_CIRCLE_SWEEP_VARIANT?[process.env.TIPY_CIRCLE_SWEEP_VARIANT]:['original','full_bresenham','arc']
+    report.dense=report.dense.filter(row=>!variants.includes(row.variant));report.stress=report.stress.filter(row=>!variants.includes(row.variant))
+    const configuration=variant=>variant==='arc'?{circleArc:true}:variant==='adaptive'?{}:{circleVariant:variant}
+    const source=`int radius=0
+int pose=0
+int style=0
+int cx=48
+int cy=32
+render()
+for radius in range(129):
+    for pose in range(2):
+        cy=32
+        if pose==1:
+            cy=8-radius
+        for style in range(2):
+            clear()
+            __tipy_native_circle(cx,cy,radius,style!=0)
+            render()`
+    const lcd=packed=>Uint8Array.from({length:6144},(_,i)=>(packed[Math.floor(i/96)*12+((i%96)>>3)]>>(7-(i%8)))&1)
+    for(const variant of variants){
+        const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:100000,...configuration(variant)}
+        execute(source,m)
+        assert.equal(m.frames.length,517)
+        let frame=1
+        for(let radius=0;radius<=128;radius++)for(let pose=0;pose<2;pose++)for(let style=0;style<2;style++){
+            const cx=48,cy=pose?8-radius:32
+            const expected=variant==='original'?expectedCurve(cx,cy,radius,radius,!!style):expectedBresenham(cx,cy,radius,!!style,true)
+            assert.deepEqual(m.frames[frame],lcd(expected),`${variant} ${[radius,pose,style]}`)
+            const cycles=m.frameTimes[frame]-m.frameTimes[frame-1]
+            report.dense.push({variant,radius,pose:pose?'top-cap':'centered',filled:!!style,tStates:cycles,fps6:6000000/cycles,fps15:15000000/cycles,bytes:m.bytes,pixelErrors:0})
+            frame++
+        }
+        console.log('Dense radius 0..128 sweep passed:',variant)
+        writeFileSync('dist/circle-sweep.json',JSON.stringify(report,null,2))
+    }
+    for(const radius of [256,512,1024,4096,16384,32767])for(const pose of ['centered','top-cap','left-arc'])for(const filled of [false,true]){
+        const cx=pose==='left-arc'?8-radius:48,cy=pose==='top-cap'?8-radius:32
+        for(const variant of variants){
+            const m={project:true,optimization:'aggressive',guardGraph:true,maxSlices:400,allowIncomplete:true,...configuration(variant)}
+            execute(`render()\nclear()\n__tipy_native_circle(${cx},${cy},${radius},${filled?'True':'False'})\nrender()`,m)
+            const cycles=m.frames.length>1?m.frameTimes[1]-m.frameTimes[0]:m.tStates-m.frameTimes[0]
+            let errors=null
+            if(m.completed){
+                const expected=variant==='original'?expectedCurve(cx,cy,radius,radius,filled):expectedBresenham(cx,cy,radius,filled,true)
+                assert.deepEqual(m.graph,expected,`${variant} stress ${[radius,pose,filled]}`);errors=0
+            }
+            report.stress.push({variant,radius,pose,filled,completed:m.completed,tStates:cycles,fps6:6000000/cycles,fps15:15000000/cycles,bytes:m.bytes,pixelErrors:errors})
+        }
+        writeFileSync('dist/circle-sweep.json',JSON.stringify(report,null,2))
+        console.log('Stress case passed:',radius,pose,filled?'filled':'outline')
+    }
 })

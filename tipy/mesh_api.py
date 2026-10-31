@@ -312,13 +312,15 @@ def install(tree):
                             center = -center
                         face_data.append(center & 255)
             if faces and not edges:
-                seen_edges = set()
-                for f in faces:
-                    for a, b in ((f[0], f[1]), (f[1], f[2]), (f[2], f[0])):
+                edge_faces = {}
+                for indices, shade, normal in records:
+                    for a, b in zip(indices, indices[1:] + indices[:1]):
                         edge = tuple(sorted((a, b)))
-                        if edge not in seen_edges:
-                            edges.append(edge)
-                            seen_edges.add(edge)
+                        edge_faces.setdefault(edge, []).append((tuple(normal), shade))
+                # Coplanar triangle seams are implementation details, not shape
+                # borders. Explicit edge lists remain under the caller's control.
+                edges = [edge for edge, normals in edge_faces.items()
+                         if not (len(normals) == 2 and normals[0] == normals[1])]
                 if len(edges) > 192:
                     raise CompileError(
                         "Triangulated mesh exceeds the 192-edge limit", n

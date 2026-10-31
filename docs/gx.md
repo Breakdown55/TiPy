@@ -5,6 +5,65 @@ models, lights, scenes, input, and application helpers. They share a drawing
 buffer, the native mesh camera, model transforms, and the depth buffer.
 Either `gx.render()` or `egx.render()` displays the combined drawing buffer.
 
+## Built-in EGX shapes and custom GX geometry
+
+```python
+import egx
+
+egx.init_camera()
+egx.camera(0, 14, 38, 0, 0, 0)
+egx.clear()
+egx.plane(36, 28, y=-10, brightness=14, shaded=False)
+egx.cube(12, yaw=32, pitch=12)
+egx.render()
+```
+
+`cube(size=12, ...)` draws a centered cube; size is its edge length in world
+units, from 1 to 40. Runtime size is supported; values outside that range draw
+nothing. `plane(width=24, depth=24, ...)` draws a centered, two-sided XZ plane.
+Plane dimensions are positive compile-time integers; the sum of their rounded
+up half-extents must be at most 60. Both support x/y/z, yaw/pitch/roll, filled,
+shaded, outline, depth_test and constant brightness (0..16). Defaults are filled,
+shaded and outlined, with depth testing off. Rotations use 256 steps per turn,
+as in the native model renderer. Shared translate/rotate/scale transforms also
+apply; transform-stack rotation functions continue to use radians.
+
+Built-in geometry is packed and reused at compile time, with no per-frame list
+construction. For custom vertex and face lists, use `gx.mesh(...)` and
+`gx.draw_mesh(model, ...)`. These raw geometry APIs are absent from EGX.
+`egx.load_obj(...)` and `egx.draw_model(model, ...)` remain the convenient path
+for OBJ assets; scenes and lights remain in EGX.
+
+### Reusable shape objects
+
+```python
+cube = egx.Cube(size=12)
+floor = egx.Plane(width=36, depth=28, y=-10, shaded=False)
+cube.rotation_y = 0.8
+cube.outline = True
+
+egx.clear()
+floor.draw()
+cube.draw()
+egx.render()
+```
+
+Objects expose x/y/z, rotation_x/y/z, scale, visible, filled, shaded, outline,
+and depth_test. Object rotations use **radians**; immediate cube/plane yaw,
+pitch and roll retain their existing 256-step convention. Rotations and scale
+use native Q8.8 storage (about 1/256 precision, -128..127.996 range). Integers
+can be assigned to these properties; a nonpositive scale hides the shape.
+`cube.size` can change. Plane width/depth and material brightness are fixed at
+construction; use scale for uniform resizing. Constructors accept position
+and drawing flags as keywords; set rotation/scale properties afterward.
+
+`draw()` only draws: it does not clear, present, move the camera, update lights
+or change the shared model transform. It allocates no per-frame lists or
+geometry. Simple non-escaping module-level objects and their direct attribute
+aliases use static scalar fields. Escaping objects retain TiPy's ordinary
+object ABI and its RAM costs. `egx.cube()` and `egx.plane()` remain available
+and can be mixed with object drawing and GX submissions.
+
 ## Primitive submission
 
 ```python

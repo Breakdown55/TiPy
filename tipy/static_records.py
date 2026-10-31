@@ -92,7 +92,6 @@ def prepare(tree):
                 "lambda",
                 "comprehension",
                 "string",
-                "decimal",
                 "none",
             }:
                 return False
@@ -152,7 +151,6 @@ def prepare(tree):
                     "lambda",
                     "comprehension",
                     "string",
-                    "decimal",
                 }
                 for node, _, _ in walk(statement["value"])
             ):
@@ -170,7 +168,7 @@ def prepare(tree):
             if len(fields) != len(set(fields)):
                 continue
             if any(
-                parameter["type"] not in {"int", "i16"}
+                parameter["type"] not in {"int", "i16", "bool"}
                 for parameter in init["params"][1:]
             ):
                 continue
@@ -248,7 +246,7 @@ def prepare(tree):
             node.get("kind") not in {"keyword", "number", "boolean", "negate"}
             for argument in value["arguments"]
             for node, _, _ in walk(argument)
-        ):
+        ) and not classes[value["name"]][0].get("egx_shape"):
             continue
         # A method may mutate scalar fields, but it must not hand out self.
         for method in methods.values():
@@ -278,6 +276,8 @@ def prepare(tree):
                 "methods": methods,
                 "fields": fields,
                 "constants": {},
+                "egx_shape": classes[value["name"]][0].get("egx_shape", False),
+                "readonly_fields": classes[value["name"]][0].get("readonly_fields", []),
                 "prefix": f"$record_{len(records)}",
             }
     if not records:
@@ -331,6 +331,8 @@ def prepare(tree):
         return result
 
     def field(record, name, origin, writing=False):
+        if writing and name in record.get("readonly_fields", []):
+            raise CompileError(f"{name} is fixed at construction; use scale to resize the object", origin)
         if name not in record["fields"]:
             raise CompileError("Unknown record field " + name, origin)
         if not writing and name in record["constants"]:
@@ -338,6 +340,7 @@ def prepare(tree):
         return {
             "kind": "name",
             "name": f"{record['prefix']}_{name}",
+            "egx_numeric_property": record.get("egx_shape") and name in {"rotation_x", "rotation_y", "rotation_z", "scale"},
             **location(origin),
         }
 
@@ -411,11 +414,14 @@ def prepare(tree):
                     "right": expression,
                     **location(value),
                 }
+                if value["operator"] == "*=" and destination.get("egx_numeric_property"):
+                    expression = {"kind": "call", "name": "__egx_fixed_mul", "arguments": [expression["left"], expression["right"]], **location(value)}
             return {
                 "kind": "assign",
                 "name": destination["name"],
                 "value": expression,
                 "static_field": True,
+                "egx_numeric_property": destination.get("egx_numeric_property", False),
                 **location(value),
             }
         return {
@@ -426,14 +432,22 @@ def prepare(tree):
     initializers = {}
     for name, record in records.items():
         init = record["methods"]["__init__"]
-        bindings, _ = bind(record["declaration"]["value"], init["params"][1:])
-        for value in bindings.values():
+        bindings, order = bind(record["declaration"]["value"], init["params"][1:])
+        argument_snapshots = []
+        parameters = {p['name']:p for p in init['params'][1:]}
+        for parameter_name in order:
+            value = bindings[parameter_name]
+            if record.get('egx_shape') and fold(value).get('kind') not in {'number','boolean'}:
+                temp = f"{record['prefix']}_argument_{parameter_name}"
+                argument_snapshots.append({'kind':'declare','name':temp,'type':parameters[parameter_name]['type'],'value':deepcopy(value),**location(value)})
+                bindings[parameter_name] = {'kind':'name','name':temp,**location(value)}
+        for parameter in init["params"][1:]:
+            value = bindings[parameter["name"]]
             literal = fold(value)
-            if (
-                literal.get("kind") != "number"
-                or not -32768 <= literal["value"] <= 32767
-            ):
-                raise CompileError("Record constructor argument must be an i16", value)
+            if record.get('egx_shape') and literal.get('kind')=='name':continue
+            valid = literal.get("kind") == ("boolean" if parameter["type"] == "bool" else "number")
+            if not valid or literal.get("kind") == "number" and not -32768 <= literal["value"] <= 32767:
+                raise CompileError("Invalid scalar record constructor argument", value)
         writes = {
             node["target"]["name"]
             for method in record["methods"].values()
@@ -447,7 +461,7 @@ def prepare(tree):
             if node.get("kind") == "attribute_assign"
             and node["target"].get("base", {}).get("name") == name
         )
-        statements = []
+        statements = argument_snapshots
         for statement in init["body"]:
             if statement["kind"] == "pass":
                 continue
@@ -458,6 +472,7 @@ def prepare(tree):
             if attribute not in writes and expression.get("kind") in {
                 "number",
                 "boolean",
+                "decimal",
             }:
                 record["constants"][attribute] = expression
             statements.append(
@@ -467,6 +482,7 @@ def prepare(tree):
                     "inferred": True,
                     "value": expression,
                     "static_field": True,
+                    "egx_numeric_property": record.get("egx_shape") and attribute in {"rotation_x", "rotation_y", "rotation_z", "scale"},
                     **location(record["declaration"]),
                 }
             )

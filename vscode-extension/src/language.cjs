@@ -111,9 +111,13 @@ function analyze(source) {
             const container = /^(?:\[|list\()/.test(value) || /\[\]/.test(declaration) ? 'list' : /^(?:["']|str\()/.test(value) || /^str\s/.test(declaration) ? 'str' : /^\{|^dict\(/.test(value) ? 'dict' : null
             const explicitType = declaration === m[1] ? undefined : declaration.slice(0, declaration.lastIndexOf(m[1])).trim()
             const inferredType = inferType(value, symbols)
+            const instance = m[2].match(/^([\w.]+)\(/)?.[1] || symbols.filter(s=>s.name===value).at(-1)?.instance
+            const [moduleName, memberName] = (instance || '').split('.')
+            const binding = imports[moduleName]
+            const nativeShape = binding?.module === 'egx' && ['Cube', 'Plane'].includes(memberName || binding.member) ? `egx.${memberName || binding.member}` : undefined
             // TiPy permits `int values = [1, 2]`; [] establishes the array.
-            const type = container === 'list' && explicitType && !explicitType.endsWith('[]') ? `${explicitType}[]` : explicitType || inferredType
-            if (!['if', 'while', 'return'].includes(m[1])) symbols.push({ name: m[1], kind: 'variable', type, inferred: !explicitType && !!type, signature: type ? `${m[1]}: ${type}` : declaration, container, instance: m[2].match(/^([\w.]+)\(/)?.[1], row, column: line.indexOf(m[1]), indent })
+            const type = container === 'list' && explicitType && !explicitType.endsWith('[]') ? `${explicitType}[]` : explicitType || inferredType || nativeShape
+            if (!['if', 'while', 'return'].includes(m[1])) symbols.push({ name: m[1], kind: 'variable', type, inferred: !explicitType && !!type, signature: type ? `${m[1]}: ${type}` : declaration, container, instance, row, column: line.indexOf(m[1]), indent })
         } else if ((m = line.match(/^\s*for\s+([\w, ]+)\s+in\s/))) {
             for (const name of m[1].split(',').map(s => s.trim())) symbols.push({ name, kind: 'variable', signature: name, row, column: line.indexOf(name), indent: indent + 4 })
         }
@@ -154,6 +158,7 @@ function entries(source, row, receiver, catalog, sources = {}) {
             const imported = parsed.imports[first]
             if (imported) {
                 const className = second || imported.member
+                if (catalog.objects?.[`${imported.module}.${className}`]) return catalog.objects[`${imported.module}.${className}`]
                 return (analyze(sources[imported.module] || '').classes[className] || []).map(s => ({ ...s, description: helperDescription(imported.module, `${className}.${s.name}`, catalog, sources) || s.description }))
             }
             if (parsed.classes[type]) return parsed.classes[type]

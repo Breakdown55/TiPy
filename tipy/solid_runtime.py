@@ -28,6 +28,7 @@ def routines(
     shadows=False,
     legacy_light=True,
     unit_transform=False,
+    outlines=False,
 ):
     out = [
         "__gfx_solid_guard_before: db 165\n__gfx_solid_depth: defs 6144,0\n__gfx_solid_guard_after: db 90",
@@ -257,18 +258,42 @@ __gfx_solid_pattern: db 0""",
         routine.if_(("eq", "v", 0), depth)
     routine.ret("flags")
     out.append(routine.finish())
-    routine = NativeRoutine("solid_prepare", ("count",), ("i", "p"))
-    routine.set("i", 0)
-    routine.set("p", "@__gfx_wf_records")
-
-    def prepare():
-        routine.write(add("@__gfx_solid_flags", "i"), invoke("solid_project", "p"), 1)
-        routine.set("p", add("p", 12))
-        routine.set("i", add("i", 1))
-
-    routine.while_(("ult", "i", "count"), prepare)
-    routine.ret()
-    out.append(routine.finish())
+    # Carry vertex/table cursors in registers; only the projector call needs
+    # saved registers. Bit 7 is free in clip outcodes and marks hidden vertices.
+    mark_hidden = ("        or 128" if outlines and depth_enabled else
+                   "        push hl\n        ld de,10\n        add hl,de\n        set 7,(hl)\n        pop hl" if outlines else "")
+    out.append(f"""__gfx_solid_prepare:
+        push ix
+        ld ix,0
+        add ix,sp
+        ld b,(ix+4)
+        ld a,b
+        or a
+        jr z,__gfx_solid_prepare_done
+        ld hl,__gfx_wf_records
+        ld de,__gfx_solid_flags
+__gfx_solid_prepare_loop:
+        push bc
+        push de
+        push hl
+        push hl
+        call __gfx_solid_project
+        pop bc
+        ld a,l
+        pop hl
+{mark_hidden}
+        pop de
+        ld (de),a
+        inc de
+        push de
+        ld de,12
+        add hl,de
+        pop de
+        pop bc
+        djnz __gfx_solid_prepare_loop
+__gfx_solid_prepare_done:
+        pop ix
+        ret""")
     out.append(_span() if depth_enabled else _flat_span())
 
     routine = NativeRoutine(
@@ -358,6 +383,7 @@ __gfx_solid_pattern: db 0""",
             shadows,
             legacy_light,
             unit_transform,
+            outlines,
         )
     )
     if not depth_enabled:
@@ -1341,6 +1367,7 @@ def _draw(
     shadows=False,
     legacy_light=True,
     unit_transform=False,
+    outlines=False,
 ):
     normal_offset = 6 if quads else 4
     routine = NativeRoutine(
@@ -1483,6 +1510,18 @@ def _draw(
 
         if culling:
             routine.if_(("ne", "cull", 0), cull)
+        if outlines:
+            routine.expr('face');routine.emit('ex de,hl')
+            routine.expr('n');routine.emit('ld b,l')
+            mark_vertex = routine.label()
+            routine.mark(mark_vertex)
+            routine.emit('ld a,(de)','inc de','ld l,a','ld h,0','push de')
+            if depth_enabled:
+                routine.emit('ld de,__gfx_solid_flags')
+            else:
+                routine.emit('add hl,hl','add hl,hl','ld d,h','ld e,l',
+                             'add hl,hl','add hl,de','ld de,__gfx_wf_records+10')
+            routine.emit('add hl,de','res 7,(hl)','pop de',f'djnz {mark_vertex}')
         routine.set("shade", byte(add("face", 4 if quads else 3)))
         if shadows:
             ordinary = routine.label()

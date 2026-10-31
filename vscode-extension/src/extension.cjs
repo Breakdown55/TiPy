@@ -19,8 +19,6 @@ function activate(context) {
     const builtinSources = {}
     const config = uri => vscode.workspace.getConfiguration('tipy', uri)
     const emitter = new vscode.EventEmitter()
-    const assemblyUri = vscode.Uri.parse('tipy-assembly:/output.z80')
-    const assemblyChanged = new vscode.EventEmitter()
     const register = (name, callback) => vscode.commands.registerCommand(name, async (...args) => {
         try { return await callback(...args) }
         catch (error) { output.appendLine(error.stack || error.message); vscode.window.showErrorMessage(`TiPy: ${error.message}`); return undefined }
@@ -94,9 +92,21 @@ function activate(context) {
             const sizes = measureAssembly(result.assembly)
             const latest = await collectProject(entry.fsPath, vscode.workspace.textDocuments)
             if (JSON.stringify(latest.files) !== JSON.stringify(project.files)) throw new Error('Source changed during compilation. Compile again to use the latest edits.')
+            const outputFolder = vscode.workspace.getWorkspaceFolder(entry)?.uri.fsPath || project.folder
+            const assemblyUri = vscode.Uri.file(path.join(outputFolder, path.basename(project.entry, '.tip') + '.z80'))
+            const openAssembly = vscode.workspace.textDocuments.find(document => document.uri.toString() === assemblyUri.toString())
+            if (openAssembly?.isDirty) throw new Error(`Save or revert edits to ${path.basename(assemblyUri.fsPath)} before compiling again.`)
+            await vscode.workspace.fs.writeFile(assemblyUri, Buffer.from(result.assembly, 'utf8'))
             diagnostics.clear()
-            lastCompilation = { ...result, ...sizes, entry: project.entry, uri: entry.toString() }
-            assemblyChanged.fire(assemblyUri)
+            lastCompilation = { ...result, ...sizes, entry: project.entry, uri: entry.toString(), assemblyUri }
+            const assemblyTabOpen = vscode.window.tabGroups.all.some(group => group.tabs.some(tab => tab.input?.uri?.toString() === assemblyUri.toString()))
+            if (!assemblyTabOpen) {
+                const previousEditor = vscode.window.activeTextEditor
+                await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(assemblyUri), { viewColumn: vscode.ViewColumn.Active, preview: false, preserveFocus: true })
+                if (previousEditor && previousEditor.document.uri.toString() !== assemblyUri.toString()) {
+                    await vscode.window.showTextDocument(previousEditor.document, { viewColumn: previousEditor.viewColumn, preview: false, preserveFocus: true, selection: previousEditor.selection })
+                }
+            }
             const label = `Compiled · ${sizes.machineBytes.toLocaleString()} bytes (${sizes.codeDataBytes.toLocaleString()} code/data + ${sizes.heapBytes.toLocaleString()} heap)`
             status.text = '$(check) TiPy: ' + sizes.machineBytes.toLocaleString() + ' bytes'
             output.appendLine(`${project.entry}: ${label}`)
@@ -131,7 +141,9 @@ function activate(context) {
                     if (message.type === 'error') { output.appendLine('Emulator: ' + String(message.message).slice(0, 2000)); output.show(true) }
                 }
             }, null, context.subscriptions)
-            panel.onDidChangeViewState(event => { if (!event.webviewPanel.visible) event.webviewPanel.webview.postMessage({ type: 'stop' }) }, null, context.subscriptions)
+            panel.onDidChangeViewState(event => {
+                event.webviewPanel.webview.postMessage({ type: 'viewState', active: event.webviewPanel.visible && event.webviewPanel.active })
+            }, null, context.subscriptions)
             panel.onDidDispose(() => { panel = null; resolveReady?.(); resolveReady = null }, null, context.subscriptions)
         } else panel.reveal(vscode.ViewColumn.Beside)
         await Promise.race([ready, new Promise((_, reject) => { const timeout = setTimeout(() => reject(new Error('Emulator did not start. Close its tab and try Run again.')), 15000); timeout.unref?.() })])
@@ -171,7 +183,7 @@ function activate(context) {
         const parts = fullName.split('.')
         return language.entries(document.getText(), position.line, parts.length > 1 ? parts[0] : null, catalog, sources).find(item => item.name === parts.at(-1))
     }
-    context.subscriptions.push(output, diagnostics, status, emitter, assemblyChanged,
+    context.subscriptions.push(output, diagnostics, status, emitter,
         register('tipy.compile', uri => compile(uri)),
         register('tipy.run', uri => compile(uri, true)),
         register('tipy.stop', () => panel?.webview.postMessage({ type: 'stop' })),
@@ -186,9 +198,8 @@ function activate(context) {
         }),
         register('tipy.showAssembly', async () => {
             if (!lastCompilation) throw new Error('Compile a .tip file first.')
-            await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(assemblyUri), { viewColumn: vscode.ViewColumn.Beside, preview: true })
+            await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(lastCompilation.assemblyUri), { preview: false })
         }),
-        vscode.workspace.registerTextDocumentContentProvider('tipy-assembly', { onDidChange: assemblyChanged.event, provideTextDocumentContent: () => lastCompilation?.assembly || '' }),
         vscode.languages.registerCompletionItemProvider(selector, { async provideCompletionItems(document, position, token, completionContext) {
             const before = document.lineAt(position.line).text.slice(0, position.character)
             if (language.inCommentOrString(before)) return []
@@ -214,7 +225,7 @@ function activate(context) {
             const options = from ? language.entriesForModule(importing.module, catalog, sources).filter(item => !importing.selected.includes(item.name)) : language.entries(document.getText(), position.line, receiver, catalog, sources)
             return options.map(entry => {
                 const typeDeclaration = declarationPosition && Object.hasOwn(language.declarationTypes, entry.name)
-                const kind = typeDeclaration || entry.kind === 'type' ? vscode.CompletionItemKind.TypeParameter : entry.kind === 'constant' ? vscode.CompletionItemKind.Constant : entry.kind === 'keyword' ? vscode.CompletionItemKind.Keyword : entry.kind === 'module' ? vscode.CompletionItemKind.Module : entry.kind === 'variable' ? vscode.CompletionItemKind.Variable : entry.kind === 'class' ? vscode.CompletionItemKind.Class : vscode.CompletionItemKind.Function
+                const kind = typeDeclaration || entry.kind === 'type' ? vscode.CompletionItemKind.TypeParameter : entry.kind === 'constant' ? vscode.CompletionItemKind.Constant : entry.kind === 'keyword' ? vscode.CompletionItemKind.Keyword : entry.kind === 'module' ? vscode.CompletionItemKind.Module : entry.kind === 'variable' ? vscode.CompletionItemKind.Variable : entry.kind === 'property' ? vscode.CompletionItemKind.Property : entry.kind === 'class' ? vscode.CompletionItemKind.Class : vscode.CompletionItemKind.Function
                 const item = new vscode.CompletionItem(entry.name, kind)
                 item.detail = typeDeclaration ? `${entry.name} (type)` : entry.signature
                 item.documentation = typeDeclaration ? language.declarationTypes[entry.name] : entry.description

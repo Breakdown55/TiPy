@@ -384,6 +384,39 @@ __gfx_mesh_gain: defs 512,0"""]
     )
     out.append(routine.finish())
 
+    # Public/object scalar arithmetic is not limited to matrix coefficients.
+    # Keep mesh_mul's small-coefficient path for the renderer, and use a full
+    # signed 16x16 product here before rounding back to Q8.8.
+    scalar = NativeRoutine('mesh_scalar_mul', ('a','b'))
+    scalar.expr('a');scalar.emit('push hl');scalar.expr('b');scalar.emit('ex de,hl','pop hl',
+        'ld a,h','xor d','and 128','push af')
+    positive_a, positive_b, rounded = scalar.label(), scalar.label(), scalar.label()
+    scalar.emit('bit 7,h',f'jr z,{positive_a}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
+    scalar.mark(positive_a)
+    scalar.emit('bit 7,d',f'jr z,{positive_b}','xor a','sub e','ld e,a','sbc a,a','sub d','ld d,a')
+    scalar.mark(positive_b)
+    scalar.emit('ld b,h','ld c,l','call __gfx_wf_umul','ld bc,128','add hl,bc',f'jr nc,{rounded}','inc de')
+    scalar.mark(rounded)
+    scalar.emit('ld l,h','ld h,e','pop af','or a',f'jp z,{scalar.name}_return',
+                'xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
+    scalar.emit(f'jp {scalar.name}_return');out.append(scalar.finish())
+
+    radians = NativeRoutine('mesh_radians', ('value',))
+    radians.expr('value')
+    radians.emit('ld a,h','and 128','push af')
+    positive, rounded, wrapped = radians.label(), radians.label(), radians.label()
+    radians.emit('bit 7,h',f'jr z,{positive}','xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
+    radians.mark(positive)
+    # Q8.8 radians times Q8.8 (256/tau), rounded once after the full product.
+    radians.emit('ld b,h','ld c,l','ld de,10430','call __gfx_wf_umul',
+                 'ld bc,32768','add hl,bc',f'jr nc,{rounded}','inc de')
+    radians.mark(rounded)
+    radians.emit('ex de,hl','pop af','or a',f'jr z,{wrapped}',
+                 'xor a','sub l','ld l,a','sbc a,a','sub h','ld h,a')
+    radians.mark(wrapped)
+    radians.emit('ld h,0',f'jp {radians.name}_return')
+    out.append(radians.finish())
+
     routine = NativeRoutine(
         "mesh_draw",
         (
@@ -780,7 +813,7 @@ __gfx_mesh_gain: defs 512,0"""]
         routine.emit("ld b,l", "ld hl,__gfx_wf_records+10", "ld de,__gfx_solid_flags")
         routine.mark(loop)
         routine.emit(
-            "ld a,(de)",
+            'ld a,(de)',
             "ld (hl),a",
             "inc hl",
             "ld (hl),0",

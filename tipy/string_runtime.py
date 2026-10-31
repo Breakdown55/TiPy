@@ -294,4 +294,7 @@ def routines():
         r.invoke_str("append_span","result","object","start","length")
     r.if_(("eq","size",0),empty_old,nonempty)
     r.ret("result");out.append(r.finish())
-    return out
+    from .string_fast_runtime import routines as fast_routines
+    replacements = {code.split(":", 1)[0]: code for code in fast_routines()}
+    out = [replacements.pop(code.split(":", 1)[0], code) for code in out]
+    return out + list(replacements.values())

@@ -1,0 +1,42 @@
+import egx
+from timing import Clock
+
+egx.init()
+egx.init_camera(fov=75, near=2, far=100)
+egx.camera(0, 14, 38, 0, 0, 0)
+
+egx.no_lights()
+egx.ambient_light(8)
+egx.directional_light(-3, 5, 2, intensity=12)
+
+clock = Clock()
+cube = egx.Cube(size=16, y=4)
+floor = egx.Plane(
+    width=36,
+    depth=28,
+    y=-10,
+    brightness=16,
+    shaded=False
+)
+cube.rotation_y = 0.8
+cube.rotation_x = 0.3
+
+while not egx.key_down("clear"):
+    clock.tick(30)
+
+    if egx.key_down("right"):
+        cube.rotation_y += 0.04
+    if egx.key_down("left"):
+        cube.rotation_y -= 0.04
+    if egx.key_down("up"):
+        cube.rotation_x += 0.04
+    if egx.key_down("down"):
+        cube.rotation_x -= 0.04
+
+    egx.clear()
+    floor.draw()
+    cube.draw()
+    egx.draw_text("ARROWS ROTATE", 9, 55)
+    egx.render()
+
+egx.quit()

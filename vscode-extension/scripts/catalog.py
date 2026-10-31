@@ -53,6 +53,10 @@ for public, native in {"init_camera": "mesh_init", "camera": "mesh_look", "set_f
     if "__tipy_native_" + native in signatures:
         signatures[public] = signatures["__tipy_native_" + native]
 signatures.update({
+    "__egx_Cube": "int size=12, int x=0, int y=0, int z=0, bool filled=True, bool shaded=True, bool outline=True, bool depth_test=False, bool visible=True, int brightness=16",
+    "__egx_Plane": "int width=24, int depth=24, int x=0, int y=0, int z=0, bool filled=True, bool shaded=True, bool outline=True, bool depth_test=False, bool visible=True, int brightness=16",
+    "__egx_cube": "int size=12, int x=0, int y=0, int z=0, int yaw=0, int pitch=0, int roll=0, bool filled=True, bool shaded=True, bool outline=True, bool depth_test=False, int brightness=16",
+    "__egx_plane": "int width=24, int depth=24, int x=0, int y=0, int z=0, int yaw=0, int pitch=0, int roll=0, bool filled=True, bool shaded=True, bool outline=True, bool depth_test=False, int brightness=16",
     "__gx_vertex": "int x, int y, int z=...",
     "__gx_draw": "int mode, vertices, indices=None, int dimensions=2",
     "__gx_load_matrix": ', '.join(f'float m{row}{column}' for row in range(4) for column in range(4)),
@@ -83,13 +87,28 @@ def entry(name, target=None, module=None):
             description = "Scales subsequent geometry by one positive uniform factor. GX and EGX share this transform; use push_matrix() and pop_matrix() to restore the previous scale."
         else:
             description += " GX and EGX share the same geometry transform and stack."
-    return {"name": name, "kind": "constant" if name.isupper() else "function", "params": args, "signature": name + ("(" + args + ")" if args is not None else ""),
+    return {"name": name, "kind": "class" if module=="egx" and name in {"Cube","Plane"} else "constant" if name.isupper() else "function", "params": args, "signature": name + ("(" + args + ")" if args is not None else ""),
             "description": description}
 
 modules = {module: [entry(name, ALIASES.get(module, {}).get(name, name if module == "py5" else module + "." + name), module)
                     for name in sorted(names)] for module, names in MEMBERS.items()}
 builtins = [entry(name) for name in sorted(set(common) | GRAPHICS_BUILTINS) if "." not in name]
 helper_sources = {file.stem: file.read_text(encoding="utf-8") for file in (root / "tipy/lib").glob("*.tip")}
+shape_fields = {"x": ("int", "Horizontal world position."), "y": ("int", "Vertical world position; positive Y points up."), "z": ("int", "Depth position in world coordinates."),
+                "rotation_x": ("fixed", "Rotation about local X in radians."), "rotation_y": ("fixed", "Rotation about local Y in radians."), "rotation_z": ("fixed", "Rotation about local Z in radians."),
+                "scale": ("fixed", "Uniform size multiplier; 1.0 is the original size. Nonpositive scale hides the object."),
+                "visible": ("bool", "Whether draw() emits this object's geometry."), "filled": ("bool", "Whether faces are filled or shown as wireframe."),
+                "shaded": ("bool", "Whether the current EGX lights shade the faces."), "outline": ("bool", "Whether hard face outlines are drawn."),
+                "depth_test": ("bool", "Whether faces use the shared depth buffer; enabling this requires extra calculator RAM."),
+                "brightness": ("int", "Read-only material brightness, 0..16, fixed at construction.")}
+objects = {}
+for name in ("Cube", "Plane"):
+    fields = {**shape_fields, **({"size": ("int", "Cube edge length in world units, 1..40; can be changed before drawing.")} if name=="Cube" else {
+        "width": ("int", "Read-only plane width in world units, fixed at construction; use scale to resize."),
+        "depth": ("int", "Read-only plane depth in world units, fixed at construction; use scale to resize.")})}
+    objects["egx."+name] = [{"name":field,"kind":"property","type":typ,"signature":f"{field}: {typ}","description":description} for field,(typ,description) in fields.items()]
+    objects["egx."+name].append({"name":"draw","kind":"function","params":"","signature":"draw()","description":"Draws this object's current state into the shared buffer. Does not clear, render, advance time, or change camera/light/model settings. Geometry is shared; drawing does not allocate objects or lists."})
 print(json.dumps({"modules": modules, "builtins": builtins, "containers": documentation["containers"],
+                  "objects": objects,
                   "helpers": documentation["helpers"], "helperSources": helper_sources,
                   "moduleDescriptions": documentation["modules"]}))

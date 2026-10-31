@@ -29,9 +29,7 @@ COMMON = {
     "init_camera",
     "camera",
     "set_fov",
-    "mesh",
     "load_obj",
-    "draw_mesh",
     "draw_shadow",
     "collision_map",
     "collides",
@@ -74,8 +72,14 @@ ALIASES = {"egx": {
     "draw_rect": "__tipy_toolkit_rect",
     "draw_circle": "__tipy_toolkit_circle",
     "draw_text": "print",
+    "cube": "__egx_cube",
+    "plane": "__egx_plane",
+    "Cube": "__egx_Cube",
+    "Plane": "__egx_Plane",
+    "draw_model": "draw_mesh",
 }}
 ALIASES["gx"] = {
+    "mesh": "mesh", "draw_mesh": "draw_mesh",
     "clear": "clear", "render": "render",
     "begin": "__tipy_native_gx_begin", "vertex": "__gx_vertex", "end": "__tipy_native_gx_end",
     "draw": "__gx_draw", "shade": "__tipy_native_gx_shade",
@@ -84,7 +88,7 @@ ALIASES["gx"] = {
     **{name: TRANSFORMS[name] for name in ("push_matrix", "pop_matrix", "reset_matrix")},
     "load_view_matrix": "__tipy_native_mesh_load_view", "set_projection": "init_camera",
     "get_buffer_byte": "__tipy_native_mesh_buffer_read", "set_buffer_byte": "__tipy_native_mesh_buffer_write",
-    "mul_fixed": "__tipy_native_mesh_mul",
+    "mul_fixed": "__tipy_native_mesh_scalar_mul",
     "TRIANGLES": "__gx_triangles", "LINES": "__gx_lines",
 }
 CONSTANTS = {"gx": {"TRIANGLES": 0, "LINES": 1}}

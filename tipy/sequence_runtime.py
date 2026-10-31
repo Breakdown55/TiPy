@@ -23,6 +23,11 @@ def routines():
             r.if_(("sge",name,"length"),lambda name=name:r.set(name,sub("length",1)))
         r.set("magnitude",sub(0,"step"))
     r.if_(("negative","step"),negative,positive)
+    def byte_slice():
+        r.set("count",0)
+        r.if_(("slt","start","stop"),lambda:r.set("count",sub("stop","start")))
+        r.ret(call("from_data",1,"count",add(word("object"),"start")))
+    r.if_(("eq",word(add("object",6)),1),lambda:r.if_(("eq","step",1),byte_slice))
     def indices(action):
         r.set("current","start")
         begin,end=r.label(),r.label();r.mark(begin)

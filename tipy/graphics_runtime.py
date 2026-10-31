@@ -585,6 +585,7 @@ def graphics_assembly(used):
                 "mesh_shadow" in used,
                 "solid_no_legacy_light" not in used,
                 "mesh_unit_transform" in used and not fractional_bits,
+                outlines and "solid_no_cull" not in used,
             )
             + light_routines(
                 "solid_point_light" in used and (not quads or centroids),

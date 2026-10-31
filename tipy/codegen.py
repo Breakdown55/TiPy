@@ -2,6 +2,7 @@
 
 from .list_runtime import runtime_assembly, HEAP_BYTES, RUNTIME_TARGET
 from .optimizer import optimize
+from .text_optimizer import stack_format_parts, stack_format_value, borrowed_concat_parts
 from .types import (
     managed,
     is_dict,
@@ -199,6 +200,11 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
 
     def has_arrays(item):
         if isinstance(item, dict):
+            formatted = stack_format_parts(item)
+            if formatted:
+                return has_arrays(item["arguments"][1:]) or any(
+                    has_arrays(value) for kind, value in formatted[0] if kind != "literal"
+                )
             if item.get("kind") == "native_matrix" and item.get("name") in {
                 "mat_push",
                 "mat_pop",
@@ -526,6 +532,32 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
     def read_length():
         # HL points to the stable descriptor. Length is a word at offset two.
         emit("inc hl", "inc hl", "ld e,(hl)", "inc hl", "ld d,(hl)", "ex de,hl")
+
+    def format_buffer(formatted):
+        """Leave buffer pointer and actual length on the expression stack."""
+        parts, capacity = formatted
+        emit(f"ld hl,{-capacity & 0xffff}", "add hl,sp", "ld sp,hl", "push hl")
+        for part_kind, part in parts:
+            if part_kind == "literal":
+                if not part:
+                    continue
+                data = tuple(ord(char) for char in part)
+                if data not in constant_data:
+                    constant_data[data] = f"__constant_data_{len(constant_data)}"
+                emit(f"ld hl,{constant_data[data]}", f"ld bc,{len(data)}")
+            else:
+                expression(part)
+                emit(f"call __text_{'bool' if part_kind == 'boolean' else 'number'}")
+            emit("pop de", "ldir", "push de")
+        emit("pop de", "ld hl,0", "add hl,sp", "push hl", "ex de,hl", "or a", "sbc hl,de", "push hl")
+
+    def materialize_format(formatted):
+        # The buffer remains above the call arguments, even if allocation
+        # invokes the collector. Only the final immutable string is allocated.
+        format_buffer(formatted)
+        emit("pop bc", "pop de", "ld hl,1", "push hl", "push bc", "push de",
+             "call __arr_from_data", "pop de", "pop de", "pop de")
+        emit("ex de,hl", f"ld hl,{formatted[1]}", "add hl,sp", "ld sp,hl", "ex de,hl")
 
     def expression(item):
         nonlocal modulo_used, iterator_new_used
@@ -1016,7 +1048,27 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             else:
                 expression(argument)
         elif kind == "sequence_binary":
-            runtime(item["name"], [item["left"], item["right"]])
+            formatted = stack_format_value(item)
+            parts = borrowed_concat_parts(item)
+            if formatted:
+                materialize_format(formatted)
+            elif parts:
+                # Inputs are pure immutable strings. Stack pointer/length pairs
+                # replace boxed literals and all intermediate concatenations.
+                for part in reversed(parts):
+                    if part["kind"] == "string":
+                        data = tuple(ord(char) for char in part["value"])
+                        if data not in constant_data:
+                            constant_data[data] = f"__constant_data_{len(constant_data)}"
+                        emit(f"ld hl,{len(data)}", "push hl", f"ld hl,{constant_data[data]}", "push hl")
+                    else:
+                        expression(part)
+                        emit("ld e,(hl)", "inc hl", "ld d,(hl)", "inc hl", "ld c,(hl)", "inc hl", "ld b,(hl)", "push bc", "push de")
+                emit("ld hl,0", "add hl,sp", "push hl", f"ld hl,{len(parts)}", "push hl",
+                     "call __str_concat_parts", "pop de", "pop de", "ex de,hl",
+                     f"ld hl,{len(parts)*4}", "add hl,sp", "ld sp,hl", "ex de,hl")
+            else:
+                runtime(item["name"], [item["left"], item["right"]], "__str_" if item["type"] == "str" else "__arr_")
         elif kind == "sequence_builtin":
             runtime(item["name"], item["arguments"])
         elif kind == "slice":
@@ -1080,11 +1132,15 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                 [1, len(data), {"kind": "address", "label": constant_data[data]}],
             )
         elif kind == "fstring":
-            runtime("new", [1])
-            emit("push hl")
-            for value in item["values"]:
-                runtime("extend", [{"kind": "stack_dict", "type": "str"}, value])
-            emit("pop hl")
+            formatted = stack_format_value(item)
+            if formatted:
+                materialize_format(formatted)
+            else:
+                runtime("new", [1])
+                emit("push hl")
+                for value in item["values"]:
+                    runtime("extend", [{"kind": "stack_dict", "type": "str"}, value])
+                emit("pop hl")
         elif kind == "string_builtin":
             runtime(item["name"], item["arguments"], "__str_")
         elif kind == "string_index":
@@ -1097,6 +1153,16 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                 emit("ld a,l", "xor 1", "ld l,a")
         elif kind in {"text_print", "text_input"}:
             value, x, y = item["arguments"]
+            formatted = stack_format_parts(item)
+            if formatted:
+                parts, capacity = formatted
+                format_buffer(formatted)
+                expression(x)
+                emit("push hl")
+                expression(y)
+                emit("push hl", "call __text_draw", *(["pop de"] * 4))
+                emit(f"ld hl,{capacity}", "add hl,sp", "ld sp,hl")
+                return
             reentrant = may_call_user(x) or may_call_user(y)
             if value["type"] in {"i16", "u8", "bool"} and reentrant:
                 value = {
@@ -1569,6 +1635,14 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
             pixels_used.add(item["name"])
         elif kind == "raw_fixed":
             expression(item["value"])
+        elif kind == 'egx_angle':
+            runtime('mesh_radians',[{'kind':'raw_fixed','value':item['value'],'type':'i16'}],'__gfx_')
+            pixels_used.add('mesh_radians')
+        elif kind == 'egx_fixed_mul':
+            args = item['arguments']
+            values=[{"kind":"raw_fixed","value":arg,"type":"i16"} for arg in args]
+            runtime('mesh_scalar_mul',values,'__gfx_')
+            pixels_used.add('mesh_scalar_mul')
         elif kind == "graphics_value":
             if item["name"] == "sin_raw":
                 modulo_used = True
@@ -2287,12 +2361,17 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
                     emit("ex de,hl", "pop hl")
                     operator = statement["operator"]
                     if operator in {"*=", "//=", "%="}:
-                        helper = {"*=": "mul", "//=": "div", "%=": "mod"}[operator]
+                        if statement['type']=='fixed' and operator=='*=':
+                            emit('push hl','push de','call __gfx_mesh_scalar_mul','pop bc','pop bc')
+                            pixels_used.add('mesh_scalar_mul')
+                            helper = None
+                        else:
+                            helper = {"*=": "mul", "//=": "div", "%=": "mod"}[operator]
                         if helper == "mod":
                             modulo_used = True
-                        else:
+                        elif helper is not None:
                             math_used.add(helper)
-                        emit(f"call __math_{helper}")
+                        if helper is not None:emit(f"call __math_{helper}")
                     elif operator in {"&=", "|=", "^="}:
                         op = {"&=": "and", "|=": "or", "^=": "xor"}[operator]
                         emit(
@@ -2939,6 +3018,11 @@ def generate(tree, symbols, *, optimize_graphics=True, _heap_bytes=HEAP_BYTES):
 
         glyphs = set()
         for node in text_nodes:
+            formatted = stack_format_parts(node)
+            if formatted:
+                for part_kind, part in formatted[0]:
+                    glyphs.update(part if part_kind == "literal" else "FalseTrue" if part_kind == "boolean" else "-0123456789")
+                continue
             value = node["arguments"][0]
             if (
                 node["kind"] == "text_input"
