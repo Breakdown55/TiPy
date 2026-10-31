@@ -1,0 +1,9 @@
+{
+  "Integer": { "prefix": "int", "body": "int ${1:value} = ${2:0}", "description": "Declare a signed 16-bit integer" },
+  "Function": { "prefix": "def", "body": ["def ${1:function_name}(int ${2:value}) -> int:", "    return ${2:value}"], "description": "Typed function" },
+  "For range": { "prefix": "for", "body": ["for ${1:i} in range(${2:10}):", "    $0"], "description": "Range loop" },
+  "While": { "prefix": "while", "body": ["while ${1:condition}:", "    $0"], "description": "While loop" },
+  "If": { "prefix": "if", "body": ["if ${1:condition}:", "    $0"], "description": "Conditional block" },
+  "Easy GX loop": { "prefix": "egxloop", "body": ["import egx", "from timing import Clock", "", "egx.init()", "clock = Clock()", "", "while not egx.key_down(\"clear\"):", "    int dt = clock.tick(${1:60})", "    egx.clear()", "    ${0:egx.pixel_on(48, 32)}", "    egx.render()", "", "egx.quit()"], "description": "Native graphics loop with held input and frame timing" },
+  "Shared transform": { "prefix": "transform", "body": ["egx.push_matrix()", "egx.translate(${1:x}, ${2:y})", "$0", "egx.pop_matrix()"], "description": "Save and restore the shared model transform" }
+}

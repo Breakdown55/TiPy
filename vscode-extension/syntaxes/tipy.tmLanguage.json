@@ -1,0 +1,19 @@
+{
+  "name": "TiPy", "scopeName": "source.tipy",
+  "patterns": [
+    { "name": "meta.preprocessor.tipy", "match": "^\\s*(#define)\\s+([A-Za-z_]\\w*)", "captures": { "1": { "name": "keyword.control.directive.tipy" }, "2": { "name": "entity.name.constant.tipy" } } },
+    { "name": "comment.line.number-sign.tipy", "match": "#.*$" },
+    { "name": "string.quoted.double.block.tipy", "begin": "(?:f|r)?\"\"\"", "end": "\"\"\"", "patterns": [{ "name": "constant.character.escape.tipy", "match": "\\\\." }] },
+    { "name": "string.quoted.single.block.tipy", "begin": "(?:f|r)?'''", "end": "'''", "patterns": [{ "name": "constant.character.escape.tipy", "match": "\\\\." }] },
+    { "name": "string.quoted.double.tipy", "begin": "(?:f|r)?\"", "end": "\"|$", "patterns": [{ "name": "constant.character.escape.tipy", "match": "\\\\." }] },
+    { "name": "string.quoted.single.tipy", "begin": "(?:f|r)?'", "end": "'|$", "patterns": [{ "name": "constant.character.escape.tipy", "match": "\\\\." }] },
+    { "match": "\\b(def|class)\\s+([A-Za-z_]\\w*)", "captures": { "1": { "name": "keyword.declaration.tipy" }, "2": { "name": "entity.name.function.tipy" } } },
+    { "name": "keyword.control.tipy", "match": "\\b(if|elif|else|for|while|in|return|break|continue|pass|import|from|as|try|except|finally|raise|assert|yield|lambda|and|or|not|is)\\b" },
+    { "name": "storage.type.tipy", "match": "\\b(int|i16|u8|bool|str|float|fixed|i32|void)\\b" },
+    { "name": "constant.language.tipy", "match": "\\b(True|False|None)\\b" },
+    { "name": "support.module.tipy", "match": "\\b(gx|egx|py5|math|random|time)\\b" },
+    { "name": "constant.numeric.tipy", "match": "\\b(?:0[xX][0-9a-fA-F]+|[0-9]+(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\\b" },
+    { "name": "keyword.operator.tipy", "match": "(?:->|==|!=|<=|>=|\\*\\*|//|<<|>>|[+*/%=<>!&|^~:-])" },
+    { "name": "invalid.illegal.semicolon.tipy", "match": ";" }
+  ]
+}

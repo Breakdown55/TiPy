@@ -1,0 +1,232 @@
+{
+  "name": "tipy",
+  "displayName": "TiPy",
+  "description": "TiPy language tools, native Z80 compilation, and a ROM-free TI-84 Plus emulator.",
+  "version": "0.2.0",
+  "publisher": "Breakdown55",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Breakdown55/TiPy.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Other"
+  ],
+  "keywords": [
+    "tipy",
+    "ti84",
+    "z80",
+    "compiler",
+    "emulator"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "onLanguage:tipy"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": false,
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Highlighting and language tools work in Restricted Mode. Compilation and execution require a trusted workspace.",
+      "restrictedConfigurations": [
+        "tipy.pythonPath",
+        "tipy.compilerPath"
+      ]
+    }
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "tipy",
+        "aliases": [
+          "TiPy",
+          "tipy"
+        ],
+        "extensions": [
+          ".tip"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "tipy",
+        "scopeName": "source.tipy",
+        "path": "./syntaxes/tipy.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "tipy",
+        "path": "./snippets/tipy.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "tipy.compile",
+        "title": "Compile",
+        "category": "TiPy",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "tipy.run",
+        "title": "Run in Emulator",
+        "category": "TiPy",
+        "icon": "$(play)"
+      },
+      {
+        "command": "tipy.stop",
+        "title": "Stop Emulator",
+        "category": "TiPy",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "tipy.setEntry",
+        "title": "Set as Entry File",
+        "category": "TiPy",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "tipy.showAssembly",
+        "title": "Show Generated Z80 Assembly",
+        "category": "TiPy"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "tipy.compile",
+          "when": "resourceLangId == tipy",
+          "group": "navigation@1"
+        },
+        {
+          "command": "tipy.run",
+          "when": "resourceLangId == tipy",
+          "group": "navigation@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "tipy.setEntry",
+          "when": "resourceExtname == .tip",
+          "group": "tipy"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "tipy.setEntry",
+          "when": "resourceLangId == tipy",
+          "group": "tipy"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "tipy.compile",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "editorLangId == tipy && editorTextFocus"
+      },
+      {
+        "command": "tipy.run",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorLangId == tipy && editorTextFocus"
+      }
+    ],
+    "configuration": {
+      "title": "TiPy",
+      "properties": {
+        "tipy.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Python 3.10+ executable. Leave empty to detect Python automatically. Pass an executable path, not a shell command."
+        },
+        "tipy.compilerPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Optional TiPy repository folder containing tipy/. Empty uses the compiler bundled with this extension."
+        },
+        "tipy.entryFile": {
+          "type": "string",
+          "default": "",
+          "description": "Entry .tip file relative to the workspace folder. Empty compiles the active .tip file.",
+          "scope": "resource"
+        },
+        "tipy.optimization": {
+          "type": "string",
+          "enum": [
+            "reference",
+            "balanced",
+            "aggressive"
+          ],
+          "default": "aggressive",
+          "description": "Compiler optimization profile.",
+          "scope": "resource"
+        },
+        "tipy.liveDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check unsaved TiPy source after edits.",
+          "scope": "resource"
+        },
+        "tipy.diagnosticDelay": {
+          "type": "number",
+          "default": 600,
+          "minimum": 200,
+          "maximum": 10000,
+          "description": "Delay before checking edited source, in milliseconds.",
+          "scope": "resource"
+        },
+        "tipy.compileTimeout": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1000,
+          "maximum": 120000,
+          "description": "Compiler subprocess timeout in milliseconds.",
+          "scope": "resource"
+        },
+        "tipy.inlayTypeHints": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Show inferred types beside untyped variable assignments."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "[tipy]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true,
+        "editor.quickSuggestions": {
+          "other": true,
+          "comments": false,
+          "strings": false
+        },
+        "editor.suggestOnTriggerCharacters": true,
+        "editor.parameterHints.enabled": true
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.cjs",
+    "package": "node scripts/package.mjs",
+    "test:host": "node scripts/test-host.mjs"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^4.1.0",
+    "esbuild": "0.25.12"
+  }
+}
