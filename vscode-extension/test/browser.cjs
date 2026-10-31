@@ -60,7 +60,7 @@ const compile = async source => {
         await page.keyboard.up('ArrowRight')
         await page.locator('#pause').click()
         await page.waitForFunction(() => document.querySelector('canvas').getContext('2d').getImageData(20,20,1,1).data[0] === 255)
-        await page.locator('summary').click()
+        assert(await page.locator('details').evaluate(details => details.open))
         const arrow = await page.getByRole('button', { name: '→', exact: true }).boundingBox()
         await page.mouse.move(arrow.x + arrow.width / 2, arrow.y + arrow.height / 2)
         await page.mouse.down()
@@ -72,6 +72,24 @@ const compile = async source => {
         await page.waitForFunction(() => document.querySelector('#status').textContent === 'Finished')
         await page.keyboard.up('Escape')
         assert.deepEqual(errors, [])
+        for (const viewport of [{width:760,height:900}, {width:600,height:600}, {width:320,height:480}]) {
+            await page.setViewportSize(viewport)
+            const layout = await page.evaluate(() => {
+                const screen = document.querySelector('canvas').getBoundingClientRect()
+                const keypad = document.querySelector('#keys').getBoundingClientRect()
+                return { screen: { width: screen.width, height: screen.height }, bottom: keypad.bottom,
+                    right: keypad.right, top: screen.top,
+                    metadataBottom: document.querySelector('#metadata').getBoundingClientRect().bottom,
+                    scrollHeight: document.documentElement.scrollHeight }
+            })
+            assert(layout.bottom <= viewport.height + 1, `keypad fits ${JSON.stringify(viewport)}: ${JSON.stringify(layout)}`)
+            assert(layout.right <= viewport.width + 1)
+            assert(layout.scrollHeight <= viewport.height + 1)
+            assert(layout.metadataBottom <= layout.top)
+            assert(Math.abs(layout.screen.width / layout.screen.height - 1.5) < .02)
+            assert(!(await page.locator('body').innerText()).includes('Click the screen for keyboard input.'))
+        }
+        await page.setViewportSize({width:600,height:600})
         await page.screenshot({ path: path.join(root, 'dist/emulator-test.png'), fullPage: true })
         console.log('PASS: real Z80 screen output, held keys, pause/resume focus, blur key release, keypad, and Clear exit')
     } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)) }

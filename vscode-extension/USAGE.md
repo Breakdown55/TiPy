@@ -4,7 +4,7 @@ Edit `.tip` programs, compile to native Z80, and run them in a ROM-free TI-84 Pl
 
 ## Install
 
-Install Python 3.10 or newer. In VS Code, run **Extensions: Install from VSIX…** and choose `tipy-0.2.0.vsix`. Open a folder containing your `.tip` files. Compilation and execution require a trusted workspace.
+Install Python 3.10 or newer. In VS Code, run **Extensions: Install from VSIX…** and choose `tipy-0.2.2.vsix`. Open a folder containing your `.tip` files. Compilation and execution require a trusted workspace.
 
 If Python is not detected, set **TiPy: Python Path** to your Python executable. The compiler and emulator are bundled; no browser server or calculator ROM is needed.
 
@@ -35,6 +35,6 @@ and a small mixed XY/XYZ drawing example.
 
 ## Development
 
-From `vscode-extension`, run `npm ci`, `npm run build`, and `npm test`. Run `npm run package` to produce `dist/tipy-0.2.0.vsix`. Packaging requires the repository's checked-out Z80 submodule and Python. To debug, launch VS Code with `--extensionDevelopmentPath` pointing to this directory, or press F5 using the included launch configuration.
+From `vscode-extension`, run `npm ci`, `npm run build`, and `npm test`. Run `npm run package` to produce `dist/tipy-0.2.2.vsix`. Packaging requires the repository's checked-out Z80 submodule and Python. To debug, launch VS Code with `--extensionDevelopmentPath` pointing to this directory, or press F5 using the included launch configuration.
 
 TiPy is licensed under GPL-3.0-only. The bundled Z80 assembler/emulator includes MIT-licensed upstream code; see `THIRD-PARTY-NOTICES.txt`.
